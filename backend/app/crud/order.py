@@ -21,6 +21,7 @@ from app.models.enrollment import (
     LessonRecordType,
     Order,
     OrderStatus,
+    PackageStatus,
     Student,
 )
 
@@ -567,4 +568,54 @@ def self_refund(
     db.refresh(order)
     db.refresh(record)
     db.refresh(student)
+    return order, record
+
+
+def create_confirmed(
+    db: Session,
+    *,
+    student_id,
+    package_id,
+    operator_id,
+) -> tuple:
+    """新生入学选购课时包：直接生成已确认订单 + 充值课时 + 流水。
+
+    与家长端下单->支付->确认等价，但跳过待支付环节（现场招生/教务代购），
+    使 FIFO 单价 lotes 有据可查，排课扣课后财务账本能计入创收。
+    """
+    package = db.get(LessonPackage, package_id)
+    if package is None:
+        raise ValueError("课时包不存在")
+    if package.status != PackageStatus.ACTIVE.value:
+        raise ValueError("课时包已下架")
+    now = datetime.now(UTC)
+    order = Order(
+        student_id=student_id,
+        package_id=package_id,
+        amount=package.price,
+        status=OrderStatus.CONFIRMED.value,
+        paid_at=now,
+        confirmed_at=now,
+    )
+    db.add(order)
+    db.flush()
+    lessons_dec = Decimal(str(package.total_lessons))
+    student = db.get(Student, student_id)
+    record = None
+    if student is not None and lessons_dec > 0:
+        student.lesson_balance = Decimal(str(student.lesson_balance)) + lessons_dec
+        record = LessonRecord(
+            student_id=student.id,
+            record_type=LessonRecordType.RECHARGE.value,
+            delta=lessons_dec,
+            balance_after=student.lesson_balance,
+            ref_id=order.id,
+            remark=f"新生入学选购：{package.name}（{package.total_lessons} 课时）",
+            operator_id=operator_id,
+        )
+        db.add(record)
+    db.commit()
+    db.refresh(order)
+    if record is not None:
+        db.refresh(record)
     return order, record

@@ -41,6 +41,7 @@ export interface StudentCreate {
   parent_user_id?: string | null
   student_user_id?: string | null
   lesson_balance: number
+  package_id?: string | null
   class_ids: string[]
 }
 
