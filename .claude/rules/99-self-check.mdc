@@ -1,0 +1,60 @@
+---
+description: 自检与纠正 - 各阶段自检清单、常见问题排查、自动修复规则与验证流程。
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# 自检与纠正（99-self-check）
+
+## 自检清单
+
+### 开始任务前
+- [ ] 已读取 `.tasks/current.md` 了解当前状态与上下文
+- [ ] 已明确本次需求对应的 PRD 编号 / 设计约束（必要时读 `docs/prd/PRD.md`、`spec/design.md`）
+- [ ] 已遵循 `00-governance` 决策优先级与行为边界
+
+### 编码过程中 / 提交前（后端 Python）
+- [ ] 无打印残留调试；业务异常明确给 `detail`
+- [ ] 关键写操作用事务；扣课时等含并发风险的逻辑校验防重（PRD BR-03）
+- [ ] `from app.core import security` 等导入一致；枚举用 `Role.X` 而非魔法字符串
+- [ ] 字段命名 snake_case，类型注解完整
+- [ ] SQLAlchemy 模型已注册到 `app/models/__init__.py`（Alembic 需要）
+
+### 编码过程中 / 提交前（前端 Vue/TS）
+- [ ] 类型无 `any` 滥用；接口对象在 `src/api/*` 声明类型
+- [ ] 未直接 `fetch`，走 `src/api/http.ts`
+- [ ] 路由已加 `meta.requiresAuth` 与守卫正确处理
+
+### 收尾时
+- [ ] 已跑后端 `ruff check .`、前端 `npm run build`，无错误
+- [ ] 已更新 `spec/design.md`（若涉及设计变更）、`.tasks/current.md`、`.claude/plan`（若里程碑收尾）
+- [ ] 未破坏既有已验证功能（回归确认）
+
+## 常见问题排查（本环境历史命中）
+
+| 现象 | 根因 / 处置 |
+| --- | --- |
+| `make: 未找到命令`、`未找到?` | Windows 无 make，改用 `uv run {ruff/pytest/uvicorn}` 等价命令 |
+| `&&` 或 `Unknown` 语法报错 | PowerShell 5.1 不支持 `&&`，分多条执行 |
+| `UnicodeDecodeError: 'gbk' codec ...` | 中文 Windows 读 ini/yaml 用 GBK locle；配置文件避免中文 |
+| `数据库 "xxx" 不存在` | 先建库：`CREATE DATABASE child_code;` 再 `alembic upgrade head` |
+| `ModuleNotFoundError: argon2` | `pwdlib.recommended()` 走 argon2；应显式 `PasswordHash([BcryptHasher()])` |
+| `NameError: pwd_context` | security.py 存在重复模板函数残留；删除旧备份函数体 |
+| `TypeError: PasswordHash.__init__() ...` | 新版 pwdlib 需显式传 `hashers=[...]` |
+| 页面 401 循环刷新 | 前端 refresh 失败后应清 token 跳登录，勿无限重试 |
+
+## 自动修复规则
+
+- 优先采用最小修复，保留既有接口契约（字段名、URL、状态码）不变
+- 若修复涉及数据库结构，必须新增 Alembic 迁移，不手改已发布表
+- 若发现公共依赖（auth、http 实例）有误，优先在 `app/core` / `src/api` 修复后再影响调用方
+- 对版本/环境类报错先查 `.tasks` 与规则中的"常见问题"再升级依赖
+
+## 验证流程
+
+1. 单元/冒烟：后端 `uv run pytest`（无 DB 依赖的用例应能离线跑通）
+2. 接口：`/api/health`、认证闭环（register→login→me→refresh→RBAC 401/403）作为冒烟基线
+3. 前端：`npm run build` 通过（类型安全）后启动 `npm run dev` 人工确认关键交互
+4. 迁移：新增模型后务必 `uv run alembic revision --autogenerate` 生成迁移并 `upgrade head` 验证
+
+> 冒烟基线：认证闭环任一步回归失败 = 阻止本轮交付，先修复再继续。

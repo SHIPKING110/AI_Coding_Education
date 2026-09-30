@@ -1,0 +1,111 @@
+# 系统计划文档
+
+## 阶段规划
+
+| 里程碑 | 范围 | 状态 |
+| --- | --- | --- |
+| M0 基础设施与认证 | 后端 FastAPI 骨架 + JWT/RBAC 认证 + 前端 Vue3 骨架 | ✅ 完成并验证（2026-08-28） |
+| M1 学员与班级 | 学员 CRUD、分班、课时包、课时流水、催缴名单 | ✅ 完成并验证（2026-08-29） |
+| M2 排课与划课时 | 排课（跨教师冲突检测）、考勤、扣课时 | ✅ 完成并验证（2026-08-29） |
+| M3 反馈与报告 | 课后反馈、日报、周报、季度/年度总结（PPT） | ✅ 完成并验证（2026-08-31） |
+| M4 AI 习题 | 举一反三、作业模式、题目模板、作业发布 | ✅ 完成并验证（2026-09-01） |
+| M5 客户端 | 课时/反馈查看、订阅（模拟支付）、提醒、在线作业 | ⬜ 计划中 |
+| M6 评估与家长会 | 学员评估表、家长会 PPT、AI 优化对话 | ⬜ 计划中 |
+
+## 关键决策点（已定）
+
+- [x] 认证：JWT 访问令牌 + 刷新令牌，RBAC 基于 User.role（StrEnum）
+- [x] 密码哈希：pwdlib[bcrypt]（显式 `PasswordHash([BcryptHasher()])`）
+- [x] 后端 deps：uv 管理，Python 3.12；前端 deps：npm（已装 @types/node）
+- [x] 数据库迁移：Alembic（env.py 动态读 .env DATABASE_URL）
+- [x] **OQ-02 边界口径**：课时 ≤ 10 即爆红 + 催缴名单（客户已拍板）
+- [x] **OQ-05 排课冲突**：同一教师时间重叠即冲突（不同教师可同段排班）；互相冲突课程不可同时排出
+- [x] 枚举用 `enum.StrEnum` + `native_enum=False`；SECRET_KEY 48 字节随机值
+- [x] 前端设计系统：品牌渐变 + 玻璃拟态 + 卡片化 + 设计令牌（App.vue :root）
+
+## 关键决策点（待定 OQ，见 PRD §10）
+
+- [ ] OQ-01 微信通知实现方式 → M5 前定
+- [x] OQ-03 编程题是否自动判题（沙箱执行）→ 已定（2026-09-01）：**M4 只录入 test_cases 用例数据，判题引擎放 M5 客户端作答后实现**（先做 Python 用例比对，不引入沙箱）
+- [x] OQ-04 视频/文件存储 → 已定=本地磁盘
+- [ ] OQ-06 模拟支付到账确认人 → M5 前定
+
+## 进度追踪
+
+### M4（2026-09-01，AI 习题，完成）
+- `assignments/questions/submissions` 三表（迁移 c0ffee000005 已应用）
+- AI 出题：`POST /assignments/ai-generate`（similar 举一反三 / homework 作业模式）+ `POST /assignments/ai-refine`（对话优化单题）；`llm.generate_questions/refine_question` 结构化输出 + 字段规整 + 解析失败兜底
+- 作业 CRUD：创建/列表（分页）/详情/更新/删除（仅草稿）/发布（必选班级+可选截止）/撤回；题目：追加/编辑/删除（重排）/排序
+- 前端 AssignmentsView.vue：作业列表 + 每题一页编辑器 + 题号导航 + 答案折叠 + 题型切换（5 种）+ 编程题用例编辑 + AI 出题/优化弹窗 + 发布弹窗 + 文档下载（txt）
+- 权限：出题/作业写=admin/staff/teacher；教师仅自己；家长/学员 403
+- 验证：pytest 54 例全绿（M4 新增 7 例）；ruff 全库零错误；vue-tsc + build 通过；live 真实 DeepSeek 出题 + CRUD/发布全流程通过
+- 遗留：submissions 判题引擎（M5 客户端作答时实现，OQ-03）；在线作答/跳题/断点续做（M5）
+
+### M3（2026-08-30 ~ 08-31，反馈 + 报告，收货中）
+- 课后反馈模块完成；日报/周报完成（8/31）；季度/年度总结（PPT）→ 下一步
+- 课后反馈模块完成：feedbacks 表（迁移 c0ffee000001）+ 幂等创建/编辑/发布/AI 草稿预留/本地素材上传（OQ-04 决策=本地磁盘）
+- M3 增强轮（用户反馈 5 项）：
+  - 只显示已上完的课（completed）进反馈模块 + 排课反馈进度条/已完成徽标
+  - 请假学员免反馈（颜色置灰 + 顶部请假条），编辑器行含考勤状态
+  - 筛选栏（校区 + 教师/班级搜索下拉 + 日期区间默认为本周）+ 统计卡（待反馈/已反馈/应到/签到/请假）
+  - 课题下方新增「课题内容」输入框；批量填入改为真弹窗并真正写入各输入框
+  - 新增 SearchableSelect.vue 组件
+  - 待反馈口径修正：请假学员不计入待反馈；筛选联动（选校区→教师/班级同步收敛到该校区）
+- 测试：pytest 30 例全绿（M3 新增共 5 例）；ruff 零错误；前端 build 通过
+- 新增依赖：python-multipart
+- **AI 草稿接入真实 LLM（2026-08-30，完成）**：
+  - 新增 `app/services/llm.py`：LangChain OpenAI 兼容客户端（ChatOpenAI），模型名/BaseURL/Key 由 `.env` 驱动不硬编码；**延迟导入** langchain 依赖 + 未配 Key 时优雅降级（返回原内容+note 提示），不影响应用启动
+  - 改造 `POST /feedbacks/{id}/ai-enhance`：配置 Key 时基于现有反馈内容调 LLM 生成结构化草稿 `{title,topic,content,performance,homework}`，写入 `ai_draft`（含 input/model/generated_at）并返回，前端回填输入框人工编辑；调用失败 502
+  - 前端：`api/feedback.ts` 封装 `aiEnhanceFeedback`；`FeedbackView` 已到学员卡片加「AI 草稿」按钮（紫色变体 ✨），生成后回填课题/内容/课堂表现/作业
+  - 依赖：已 `uv sync --extra ai`（langchain / langchain-openai / langgraph / python-pptx 等）
+  - 验证：真实调用 DeepSeek 生成草稿成功；pytest 33 例全绿（新增 mock 生成回填/未配降级 2 例）；ruff 零错误；前端 vue-tsc + build 通过
+- **反馈增强2：课堂评价 + 提示词模板（2026-08-30，完成）**：
+  - `feedbacks` 新增 `evaluation`（课堂评价，AI 内容写入位置；迁移 c0ffee000002）
+  - 新增 `prompt_templates` 表 + 3 套系统默认模板 seed（通用鼓励型/问题引导型/亮点详述型）；占位符 `{student_name} {class_name} {subject} {topic} {content} {performance} {homework} {evaluation}`
+  - 三档可见性：system（内置，所有人可用，仅 admin 可改删）/ personal（账号隔离，仅 owner）/ published（admin 发布，全校教师可用，仅 admin 可改删/撤回）；admin 以管理视角可见全部 personal
+  - `ai-enhance` 改为按模板生成/润色 evaluation 正文（纯文本，已有 evaluation 时=润色）；`values_callable` 修复 Enum 大小写绑定问题
+  - 前端：课堂评价字段（紫色提示徽标）+ AI 生成弹窗（模板下拉选择/预览）+ 提示词模板管理弹窗（分组列表/新建/编辑/删除/发布/撤回，管理员专属按钮）+ 未保存自动保存引导
+  - 验证：pytest 35 例全绿（新增模板隔离/发布 + 自定义模板 ai-enhance 3 例）；ruff 零错误；前端 vue-tsc + build 通过；live 接口 `/api/prompt-templates` 正常返回 3 套系统模板
+- 待续：日报/周报/季度/年度总结（PPT）（下一步）
+- **报告：日报+周报（2026-08-31，完成）**：
+  - 新增 `reports` 表（迁移 c0ffee000003）：type(daily/weekly)+period_start/period_end+content(JSONB)+stats(JSONB)+status(draft/published)；同一教师同类型同周期仅一份（`uq_report_period`，幂等创建=更新）
+  - 日报（FR-DR）：模板 `{work,courses,problems,plan}`，按日归档检索
+  - 周报（FR-WR）：模板 `{summary,highlights,problems,next_plan}`；`weekly-stats/preview` 自动统计 已完成排课/上课人次/缺课人次/出勤率/缺课学员/新增学员（口径同 M2 考勤/学员）
+  - AI 草稿（FR-DR-02/FR-WR-03）：`/reports/{id}/ai-draft` 基于当日排课考勤或本周统计+已发布日报摘要生成结构化 JSON；`llm.generate_report_summary`；未配 Key 降级
+  - 前端 `ReportsView.vue`：日报/周报双 Tab + 周导航 + 统计卡 + 编辑表单（保存草稿/AI 草稿/提交/撤回重编辑）+ 历史列表；侧边栏入口「日报·周报」
+  - 验证：真实调用 DeepSeek 生成日报草稿成功；pytest 40 例全绿（报告新增 4 例）；ruff 零错误；前端 vue-tsc + build 通过；live `/api/reports` 与 `/api/reports/weekly-stats/preview` 正常
+- **报告：季度/年度总结（PPT）（2026-08-31，完成）**：
+  - `reports` 扩展 `quarterly/yearly` 类型 + `ppt_url` 列（迁移 c0ffee000004）
+  - `compute_period_stats`（周期聚合：排课/人次/出勤率/缺课/新增/已发布周报）+ `collect_period_material`（期间周报摘要）+ `llm.generate_period_summary`
+  - `app/services/pptx_builder.py`：python-pptx 构建 16:9 简报（封面/数据卡/总体/亮点/问题/计划/数据说明/结尾），落盘 `uploads/ppt/`
+  - API：`GET /reports/period-stats/preview`、`POST /reports/{id}/ppt`（生成+写 ppt_url）、list `type` 支持 quarter/yearly、ai-draft 分支季度/年度
+  - 前端 `SummaryView.vue`「总结·PPT」页（侧边栏新入口）：季度/年度 Tab + 期间导航 + 统计卡 + 编辑表单 + AI 总结 / 生成 PPT / 下载 / 提交 / 撤回；`api/report.ts` 扩展
+  - 验证：pytest 42 例全绿（新增 2 例）；ruff 零错误；前端 vue-tsc + build 通过；live 生成 PPT 8 页 38KB 可下载
+
+### M1（2026-08-29，完成）
+- 后端：6 张表 + API（students/classes/lesson-packages/lesson-records）；RBAC（写=admin+staff，课时包=admin）
+- 测试：pytest 10 例全绿；ruff 零错误
+
+### M2（2026-08-29，完成）
+- 后端：schedules/attendances 两表 + 排课冲突检测（同一教师）+ 考勤批次（已到扣 2/请假不扣/防重/余额不足/全员完成）
+- 测试：pytest 13 例全绿（M2 新增 3 例）；ruff 零错误
+- 前端：周课表 + 考勤详情页 + 全部页面设计系统升级（时尚高端视觉）
+
+### M2 修复轮（2026-08-30，完成）
+- 按用户反馈修复 6 项：按钮重叠 / 教师模块 / 排课取消 / 周导航 / 时区错位 / 冲突语义 / 独立考勤
+- 新增循环排课（每周 N 节 × M 周）；pytest 16 例全绿；uv default-groups=dev
+
+### M2 补强轮（2026-08-29，完成）
+- 教师管理带校区标签、排课时间窗拦截、班级搜索、催缴跟进状态；pytest 20 例全绿
+
+### M2 补强2（2026-08-30，完成）
+- 统一列表分页（学员/班级/教师/课时包，`PageOut{items,total}` + 前端 PaginationBar）
+- 学员停课（需备注）/恢复在读 + 班级搜索多选；催缴续费可选用课包或自定义课时+金额（订单/流水/状态闭环）；已停课学员可恢复为待跟进
+- 排课按校区筛选（schedules.campus 参数）+ 排课页校区/教师联动筛选
+- 左侧边栏固定高度独立滚动 + 可收起展开；pytest 24 例全绿；前端 build 通过
+- 新增迁移 a1b2c3d4e5f6（students.stop_note）
+
+### 遗留优化建议（不阻塞）
+- M1 课时包无编辑接口，仅发布/下架；M5 订阅下单前可视需要补充
+- M2 考勤"改判"（如误标已到→改请假）本期不做，防重策略优先保证不重复扣课时
+- M2 循环排课生成的课次不支持单独编辑某个时间段（可取消后重建）

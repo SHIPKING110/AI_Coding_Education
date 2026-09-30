@@ -1,0 +1,74 @@
+---
+description: 项目架构约束 - 模块划分、依赖管理、扩展点与禁用项。
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# 项目架构约束（11-project-arch）
+
+## 顶层结构
+
+```
+Child_Code/
+  docs/prd/PRD.md         # 产品需求文档（权威来源）
+  spec/design.md          # 系统设计文档（架构/方案/决策）
+  agent.md                # 核心说明 + 约束 + 自检 + 自修复 + 文档路径
+  CLAUDE.md               # 会话启动导航入口
+  Makefile                # 质检线（包装 uv/npm 命令）
+  .claude/
+    rules/*.mdc           # 治理/工程/架构/自检 规则库
+    plan                  # 里程碑计划与关键决策
+    skill/                # 可扩展 skill 工具
+  backend/                # Python + FastAPI 后端
+  frontend/               # Vue3 + TS 前端
+  .tasks/current.md       # 任务状态跟踪
+```
+
+## 后端架构（backend/）
+
+- **分层**：`api(路由) → crud(数据访问) → models(ORM) / schemas(Pydantic)`，依赖方向单向向下，禁止逆向
+- **认证**：JWT + RBAC，`get_current_user` 注入当前用户，`require_roles(...)` 做角色过滤
+- **配置**：`app/core/config.py` 用 pydantic-settings 统一管理 `.env`，含 `LLM_*` 预留
+- **数据库**：SQLAlchemy 2.x + Alembic 迁移；所有表变更必须通过迁移脚本，禁止手改库
+- **横切能力**：`app/core/` 放 config/security/database，不散落于业务模块
+
+## 前端架构（frontend/）
+
+- `src/api/`：axios 实例 + 领域接口封装（默认 `/api` 前缀，开发经 Vite 代理）
+- `src/stores/`：Pinia（auth 等）
+- `src/router/`：路由 + 守卫（登录拦截）
+- `src/views/`：页面；管理端与家长端/客户端 H5 同源，按路由/视图分流
+- `src/components/`：可复用组件
+
+## 依赖管理
+
+- 后端使用 `uv`：`backend/pyproject.toml` 声明依赖；AI 能力放 `[project.optional-dependencies].ai`，需时 `uv sync --extra ai`
+- 前端使用 npm：`frontend/package.json`
+- 新增依赖前先确认必要性，避免版本漂移；大版本升级走独立提交
+
+## 扩展点
+
+1. **AI 能力（M3+）**：新增能力先抽象为后端 `LangChain/LangGraph` 节点/agent，再暴露 API；prompt 与 skill 分离，模型可切换
+2. **Skill 工具**：`.claude/skill/<name>/` 目录放可复用技能，跟随 README 约定
+3. **模型可配置**：`LLM_MODEL/LLM_API_KEY/LLM_BASE_URL` 环境变量驱动，不硬编码模型名
+4. **角色扩展**：`Role` 枚举当前固定 5 类；如引入更细权限再演进为独立 roles 表（同步改 PRD §2 权限矩阵）
+
+## 禁用项（避免：先规避再讨论）
+
+- 不写"上帝模块"：单文件超过可维护体量时按层拆分
+- 不在前端直接调 LLM/外部模型
+- 不用全局单例持有业务状态（DB 连接除外）
+- 不为 AI 生成类功能开辟绕过审核状态机的直发通道
+- 不引入与既有栈重复的框架/库（如同时引入两套 ORM）
+
+## 数据流约束
+
+```mermaid
+flowchart LR
+    FE[Vue3 前端] -->|/api 契约| API[FastAPI 路由]
+    API --> CRUD[crud 数据访问]
+    CRUD <--> ORM[SQLAlchemy 模型]
+    ORM <--> PG[(PostgreSQL)]
+    API -->|异步| AGENT[LangChain/LangGraph Agent] --> CX[(ChromaDB)]
+    AGENT --> FS[(本地文件/PPT/文档)]
+```

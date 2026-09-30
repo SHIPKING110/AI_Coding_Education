@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+uv.lock.cache/
+.pytest_cache/
+.ruff_cache/
+
+# ç¯å¢ƒå˜é‡ï¼ˆå«å¯†é’¥ï¼Œå‹¿æäº¤ï¼‰
+backend/.env
+
+# Node
+node_modules/
+dist/
+*.local
+
+# è¿è¡Œæ—¶äº§ç‰©
+*.log
+backend/uploads/
+backend/media/
+
+# IDE / ç³»ç»Ÿ
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+# ±¾µØ´óÄ£ĞÍÈ¨ÖØÓëÏòÁ¿¿â£¨Ìå»ı´ó£¬°´Ğè±¾µØÏÂÔØ£©
+backend/models/
+backend/data/

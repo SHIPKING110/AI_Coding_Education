@@ -1,0 +1,77 @@
+---
+description: 工程规范 - 按语言定制（Python 后端 + Vue3/TypeScript 前端）。
+globs: ["**/*.py", "**/*.{ts,vue,js,json}"]
+alwaysApply: true
+---
+
+# 工程规范（10-engineering）
+
+## 通用代码风格
+
+- 缩进：4 空格（Python）/ 2 空格（TS/Vue）
+- 行宽：100 字符（ruff 默认 `E501` 关闭，以 `line-length=100` 为准）
+- 一律使用 UTF-8 编码；源文件注释、字符串用中文时确保可读，但**配置文件（ini/yaml）避免中文**以防 GBK 环境解码问题
+- 提交前必须通过项目质检线：后端 `ruff check`，前端 `npm run build`（含 vue-tsc 类型检查）
+
+## Python（后端）
+
+### 工具链
+
+- 依赖管理：`uv`（`pyproject.toml` 单文件即可，常备 `requirements.txt`）;尽量在 backend 根目录下操作
+- 格式/规范：`ruff format` + `ruff check`（已配置 `[tool.ruff]`）
+- 测试：`pytest`（`tests/` 目录，`pythonpath=["."]`）
+- 类型：尽量使用类型注解（`Mapped[...]`、`| None`），Python ≥ 3.12
+
+### 命名约定
+
+| 对象 | 规范 | 示例 |
+| --- | --- | --- |
+| 模型类 | PascalCase | `User`, `Student` |
+| 模型字段 | snake_case | `password_hash`, `created_at` |
+| 函数/方法 | snake_case | `verify_credentials` |
+| 枚举 | 类 PascalCase + 值小写 | `Role.ADMIN`, `Role.TEACHER` |
+| 常量 | SCREAMING_SNAKE | `MAX_UPLOAD_MB` |
+
+### 代码组织（分层）
+
+- `app/models/`：SQLAlchemy 模型（`__init__.py` 导出，供 Alembic 元数据收集）
+- `app/schemas/`：Pydantic 入/出参模型（`XxxIn` 入参，`XxxOut` 出参，`model_config = ConfigDict(from_attributes=True)`）
+- `app/crud/`：数据访问（接受 `db: Session`，不含 HTTP 逻辑）
+- `app/api/`：路由（薄层，负责参数校验+权限依赖+编排 crud）
+- `app/core/`：config / security / database 等横切能力
+- `app/api/deps.py`：公共依赖（`get_current_user`、`require_roles`）
+
+### 语言特定规范
+
+- 关键业务操作用**数据库事务**包裹（扣课时、订单入账、课时累加）
+- 抛业务错误用 `HTTPException(status_code, detail=...)` 或自定义异常并由依赖统一处理；错误信息明确、可读
+- 不写"必要时再优化"的冗余注释；注释只解释**意图与取舍**（为什么这么做），不照抄代码
+- 避免全局可变状态；配置经 `get_settings()` 读取
+- 模型枚举：数据库层建议 `String + Enum(..., native_enum=False)`，避免跨库兼容坑
+
+## Vue 3 / TypeScript（前端）
+
+### 工具链
+
+- 脚手架：Vite；类型：vue-tsc 严格模式；状态：Pinia；路由：Vue Router
+- 接口请求：统一 axios 实例（`src/api/http.ts`，已内置 JWT 注入与 401 自动刷新），**不要在组件里散落 axios 调用**
+
+### 命名约定
+
+- 组件/页面：PascalCase（`LoginView.vue`, `StudentTable.vue`）
+- 状态 store：`useXxxStore`
+- API 封装：`src/api/<domain>.ts` 内 `xxxApi()` 函数，导出 TS 类型（`XxxIn/XxxOut` 与后端对应）
+- 文件：小写 kebab-case（`lesson-package.ts`）
+
+### 语言特定规范
+
+- 组合式 API 优先：`<script setup lang="ts">`
+- 类型安全：所有接口交互定义显式 TS 类型，不滥用 `any`
+- 路由：需要登录的页面设 `meta.requiresAuth: true`；权限细化走 Pinia `isRole(...)`
+- 复用组件抽离到 `src/components/`；页面放 `src/views/`
+
+## 通用禁止
+
+- 不提交 `node_modules/`、`.venv/`、`dist/`、`.env` 等（见 `.gitignore`）
+- 不硬编码密钥；敏感配置走环境变量
+- 后端与前端通过 `/api/*` 契约交互，字段命名 snake_case 对齐数据库
