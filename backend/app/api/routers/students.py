@@ -123,18 +123,37 @@ def list_students(
 def create_student(
     payload: StudentCreate,
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("student_create")),
+    user: User = Depends(require_teacher_permission("student_create")),
 ) -> StudentOut:
+    if payload.package_id is not None:
+        from app.models.enrollment import LessonPackage, PackageStatus
+
+        package = db.get(LessonPackage, payload.package_id)
+        if package is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="课时包不存在")
+        if package.status != PackageStatus.ACTIVE.value:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="课时包已下架")
     student = student_crud.create(
         db,
         name=payload.name,
         phone=payload.phone,
-        lesson_balance=payload.lesson_balance,
+        lesson_balance=0 if payload.package_id is not None else payload.lesson_balance,
         campus=payload.campus,
         parent_user_id=payload.parent_user_id,
         student_user_id=payload.student_user_id,
         class_ids=payload.class_ids,
     )
+    if payload.package_id is not None:
+        try:
+            order_crud.create_confirmed(
+                db,
+                student_id=student.id,
+                package_id=payload.package_id,
+                operator_id=user.id,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        db.refresh(student)
     return _to_out(student)
 
 

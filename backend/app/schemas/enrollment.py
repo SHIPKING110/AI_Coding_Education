@@ -25,6 +25,9 @@ class StudentCreate(BaseModel):
     # 学员本人登录账号（M5 客户端：学员角色自己登录做题）
     student_user_id: uuid.UUID | None = None
     lesson_balance: float = Field(default=0, ge=0)
+    # 新生入学选购课时包：传 package_id 则按课时包充值（生成已确认订单+充值流水，
+    # 使排课扣课后财务账本能按 FIFO 单价计入创收）；此时忽略 lesson_balance
+    package_id: uuid.UUID | None = Field(default=None, description="新生选购的课时包id")
     class_ids: list[uuid.UUID] = Field(default_factory=list)
 
 

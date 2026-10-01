@@ -29,6 +29,7 @@ import {
   type StudentOut,
 } from '@/api/enrollment'
 import { listUsersApi } from '@/api/client'
+import { listSubjects, type SubjectOut } from '@/api/business'
 import { myPermissions } from '@/api/permissions'
 import { useAuthStore } from '@/stores/auth'
 
@@ -730,10 +731,51 @@ function openCreate() {
   studentUsernameTouched.value = false
   showCreateParent.value = false
   showCreateStudent.value = false
+  createSubjectId.value = ''
+  createPackageId.value = ''
+  createPackages.value = []
+  listSubjects()
+    .then((s) => (createSubjects.value = s))
+    .catch(() => (createSubjects.value = []))
+  loadCreatePackages()
   showForm.value = true
   loadParentUsers()
   loadStudentUsers()
 }
+
+// 新生选购课时包：按科目筛选
+const createSubjects = ref<SubjectOut[]>([])
+const createSubjectId = ref('')
+const createPackages = ref<LessonPackageOut[]>([])
+const createPackageId = ref('')
+const createPackagesLoading = ref(false)
+
+async function loadCreatePackages() {
+  createPackagesLoading.value = true
+  try {
+    const page = await listPackages(true, {
+      limit: 200,
+      subject_id: createSubjectId.value || undefined,
+    })
+    createPackages.value = page.items.filter((p) => p.status === 'active')
+    if (createPackageId.value && !createPackages.value.some((p) => p.id === createPackageId.value)) {
+      createPackageId.value = ''
+    }
+  } catch {
+    createPackages.value = []
+  } finally {
+    createPackagesLoading.value = false
+  }
+}
+
+watch(createSubjectId, () => {
+  createPackageId.value = ''
+  loadCreatePackages()
+})
+
+const createPackageInfo = computed(() =>
+  createPackages.value.find((p) => p.id === createPackageId.value),
+)
 
 function openEdit(s: StudentOut) {
   editing.value = s
@@ -799,7 +841,11 @@ async function submit() {
         })
       }
     } else {
-      await createStudent(form.value)
+      if (!createPackageId.value) {
+        formError.value = '请选择学员选购的课时包（带课时单价入账，排课扣课后财务可计入创收）'
+        return
+      }
+      await createStudent({ ...form.value, lesson_balance: 0, package_id: createPackageId.value })
     }
     showForm.value = false
     await load()
@@ -1324,8 +1370,25 @@ onMounted(async () => {
           </datalist>
         </label>
         <label v-if="!editing">
-          初始课时
-          <input v-model.number="form.lesson_balance" type="number" min="0" />
+          选购课时包 *
+          <div class="package-picker">
+            <select v-model="createSubjectId" title="按科目筛选课时包">
+              <option value="">全部科目</option>
+              <option v-for="s in createSubjects" :key="s.id" :value="s.id">{{ s.name }}</option>
+            </select>
+            <select v-model="createPackageId" title="选择课时包">
+              <option value="">{{ createPackagesLoading ? '加载中…' : '请选择课时包' }}</option>
+              <option v-for="p in createPackages" :key="p.id" :value="p.id">
+                {{ p.name }}（{{ p.total_lessons }}课时 · ¥{{ p.price }}）
+              </option>
+            </select>
+          </div>
+          <small v-if="createPackageInfo" class="hint">
+            {{ createPackageInfo.total_lessons }} 课时 · 实付 ¥{{ createPackageInfo.price }} ·
+            单价 ¥{{ (Number(createPackageInfo.price) / createPackageInfo.total_lessons).toFixed(2) }}/课时 ·
+            入账后排课扣课自动按此单价计入财务创收
+          </small>
+          <small v-else class="hint">按课时包入账（含单价），替代手工填初始课时</small>
         </label>
         <label>
           班级（可搜索）
@@ -2188,6 +2251,18 @@ tr.urgent td:first-child {
   display: flex;
   gap: 8px;
   margin-bottom: 8px;
+}
+.package-picker {
+  display: flex;
+  gap: 8px;
+}
+.package-picker select {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
 }
 .class-picker-filters .filter-input {
   flex: 1;
