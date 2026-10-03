@@ -30,6 +30,11 @@ export interface StudentOut {
   stop_note: string | null
   status: string
   low_balance: boolean
+  arrears_lessons: number
+  arrears_amount: string | null
+  trial_status: string
+  source: string
+  referrer: string | null
   classes: ClassBrief[]
   created_at: string
 }
@@ -42,6 +47,8 @@ export interface StudentCreate {
   student_user_id?: string | null
   lesson_balance: number
   package_id?: string | null
+  source?: string | null
+  referrer?: string | null
   class_ids: string[]
 }
 
@@ -126,10 +133,30 @@ export interface LessonRecordOut {
   record_type: string
   delta: number
   balance_after: number
+  unit_price: number | null
+  amount: number | null
+  student_name?: string
+  campus?: string | null
   ref_id: string | null
   remark: string | null
   operator_name: string | null
   created_at: string
+}
+
+export interface AllRecordsQuery {
+  keyword?: string
+  campus?: string
+  record_type?: string
+  date_from?: string
+  date_to?: string
+  limit?: number
+  offset?: number
+}
+
+export interface AllRecordsOut {
+  items: LessonRecordOut[]
+  total: number
+  summary: { amount_in: string; amount_out: string; amount_net: string }
 }
 
 // ---------- 学员 ----------
@@ -249,6 +276,7 @@ export async function listClasses(
     campus_unassigned?: boolean
     start_date_from?: string
     start_date_to?: string
+    subject?: string
     limit?: number
     offset?: number
   } = {},
@@ -323,11 +351,25 @@ export async function adjustLessonBalance(
   studentId: string,
   delta: number,
   remark?: string | null,
+  unit_price?: number,
 ): Promise<LessonRecordOut> {
   const { data } = await http.post<LessonRecordOut>(`/students/${studentId}/lesson-records`, {
     delta,
     remark,
+    unit_price,
   })
+  return data
+}
+
+export async function listAllLessonRecords(params: AllRecordsQuery = {}): Promise<AllRecordsOut> {
+  const { data } = await http.get<AllRecordsOut>('/finance/records', { params })
+  return data
+}
+
+export async function getLastPrice(
+  studentId: string,
+): Promise<{ price: string | null; package_name: string | null; order_id: string | null }> {
+  const { data } = await http.get(`/students/${studentId}/last-price`)
   return data
 }
 

@@ -2,7 +2,7 @@ import http from './http'
 
 export interface ScheduleOut {
   id: string
-  class_id: string
+  class_id: string | null
   class_name: string | null
   subject: string | null
   teacher_id: string
@@ -10,6 +10,7 @@ export interface ScheduleOut {
   start_time: string
   end_time: string
   status: string
+  is_trial: boolean
   created_at: string
 }
 
@@ -23,11 +24,12 @@ export interface ConflictOut {
 }
 
 export interface ScheduleCreateIn {
-  class_id: string
+  class_id: string | null
   teacher_id: string
   start_time: string
   end_time: string
   force?: boolean
+  is_trial?: boolean
 }
 
 export interface ScheduleCreateResult {
@@ -44,12 +46,14 @@ export interface AttendanceOut {
   lesson_balance: number | null
   low_balance: boolean
   status: string
+  is_trial: boolean
+  trial_status: string
   created_at: string
 }
 
 export interface AttendanceSubmitResult {
   updated: AttendanceOut[]
-  lesson_records: { student_id: string; delta: number; balance_after: number }[]
+  lesson_records: { student_id: string; delta: number; balance_after: number; is_trial?: boolean }[]
   errors: { student_id: string; reason: string }[]
 }
 

@@ -115,6 +115,17 @@ export async function computePayroll(payload: PayrollComputeIn): Promise<Record<
   return data
 }
 
+export async function autoComputePayroll(month: string): Promise<{
+  month: string
+  computed: number
+  skipped: number
+}> {
+  const { data } = await http.post('/business/payroll/auto-compute', null, {
+    params: { month },
+  })
+  return data
+}
+
 export async function listPayroll(month?: string): Promise<{ items: Record<string, unknown>[] }> {
   const { data } = await http.get('/business/payroll', { params: month ? { month } : {} })
   return data
@@ -129,6 +140,7 @@ export interface WorkbenchItem {
   level: string | null
   base_salary: string
   total: string
+  overdraft_commission: string
   has_entry: boolean
 }
 

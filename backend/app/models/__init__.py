@@ -41,6 +41,7 @@ from app.models.notification import Notification, NotificationType
 from app.models.prompt import PromptScope, PromptTemplate
 from app.models.report import Report, ReportStatus, ReportType
 from app.models.schedule import Attendance, AttendanceStatus, Schedule, ScheduleStatus
+from app.models.trial import Invitation, InvitationStatus
 from app.models.user import Role, User, UserStatus
 
 __all__ = [

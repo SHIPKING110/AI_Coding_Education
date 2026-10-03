@@ -18,6 +18,7 @@ import {
   type ClassOut,
 } from '@/api/enrollment'
 import { listCampusesApi, listTeachersApi, type UserOut } from '@/api/auth'
+import { listSubjects } from '@/api/business'
 import { useAuthStore } from '@/stores/auth'
 import { fmtCnDateKey } from '@/utils/date'
 
@@ -46,6 +47,8 @@ function guard(key: string, action: () => void) {
 const classes = ref<ClassOut[]>([])
 const keyword = ref('')
 const campusFilter = ref('')
+const subjectFilter = ref('')
+const subjectOptions = ref<string[]>([])
 const startFrom = ref('')
 const startTo = ref('')
 const loading = ref(false)
@@ -144,6 +147,7 @@ async function load() {
           ? campusFilter.value
           : undefined,
       campus_unassigned: campusFilter.value === '__unassigned__' || undefined,
+      subject: subjectFilter.value || undefined,
       start_date_from: startFrom.value || undefined,
       start_date_to: startTo.value || undefined,
       limit: pageSize,
@@ -183,6 +187,7 @@ function clearFilters() {
   keyword.value = ''
   campusFilter.value = ''
   teacherIdFilter.value = ''
+  subjectFilter.value = ''
   startFrom.value = ''
   startTo.value = ''
   page.value = 1
@@ -345,6 +350,11 @@ onMounted(async () => {
     campuses.value = []
   }
   try {
+    subjectOptions.value = (await listSubjects()).map((s: any) => s.name)
+  } catch {
+    subjectOptions.value = []
+  }
+  try {
     teacherOptions.value = (await listTeachersApi({ limit: 500 })).items
   } catch {
     teacherOptions.value = []
@@ -389,6 +399,10 @@ onMounted(async () => {
         group="class-teacher-filter"
         @update:model-value="onFilterChange"
       />
+      <select v-model="subjectFilter" class="filter-select" title="按科目筛选班级" @change="onFilterChange">
+        <option value="">全部科目</option>
+        <option v-for="s in subjectOptions" :key="s" :value="s">{{ s }}</option>
+      </select>
       <label class="date-range">
         <span>开班</span>
         <input v-model="startFrom" type="date" @change="onFilterChange" />
@@ -396,7 +410,7 @@ onMounted(async () => {
         <input v-model="startTo" type="date" @change="onFilterChange" />
       </label>
       <button
-        v-if="keyword || campusFilter || teacherIdFilter || startFrom || startTo"
+        v-if="keyword || campusFilter || teacherIdFilter || subjectFilter || startFrom || startTo"
         class="btn ghost"
         @click="clearFilters"
       >

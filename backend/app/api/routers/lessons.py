@@ -36,7 +36,7 @@ def adjust_lesson_balance(
 ) -> LessonRecordOut:
     """管理员/教务调整学员课时：delta>0 入账（充值/赠送），delta<0 人工扣减。
 
-    人工扣减不允许使余额为负。
+    人工扣减允许透支到 -overdraft_max（以财务设置为准）。
     """
     student = student_crud.get(db, student_id)
     if student is None:
@@ -44,11 +44,15 @@ def adjust_lesson_balance(
     if payload.delta == 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="delta 不能为 0")
     delta = Decimal(str(payload.delta))
-    if delta < 0 and Decimal(str(student.lesson_balance)) + delta < 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="扣减后课时不能为负",
-        )
+    if delta < 0:
+        from app.crud import business as business_crud
+
+        cap = Decimal(str(business_crud.get_finance_setting(db).overdraft_max or 10))
+        if Decimal(str(student.lesson_balance)) + delta < -cap:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"扣减后低于透支上限（-{cap}），请先续费",
+            )
     record = lesson_crud.add_record(
         db,
         student=student,
@@ -56,7 +60,27 @@ def adjust_lesson_balance(
         record_type=LessonRecordType.ADJUST if payload.delta < 0 else LessonRecordType.RECHARGE,
         operator_id=operator.id,
         remark=payload.remark,
+        unit_price=Decimal(str(payload.unit_price)) if payload.unit_price is not None else None,
+        amount=(delta * Decimal(str(payload.unit_price))).quantize(Decimal("0.01"))
+        if payload.unit_price is not None
+        else None,
     )
+    if payload.unit_price is not None:
+        from app.crud import business as business_crud
+
+        business_crud.write_ledger(
+            db,
+            student_id=student.id,
+            lessons=delta,
+            unit_price=Decimal(str(payload.unit_price)),
+            subject=None,
+            subject_name="人工调整",
+            schedule_id=None,
+            teacher_id=None,
+            detail={"adjust": True, "record_id": str(record.id), "remark": payload.remark},
+            commission_override=Decimal("0"),
+            commit=True,
+        )
     return _to_out(record)
 
 

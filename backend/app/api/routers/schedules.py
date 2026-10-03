@@ -47,6 +47,7 @@ def _schedule_out(s: Schedule) -> ScheduleOut:
         start_time=s.start_time,
         end_time=s.end_time,
         status=s.status,
+        is_trial=s.is_trial,
         created_at=s.created_at,
     )
 
@@ -105,9 +106,18 @@ def create_schedule(
     teacher_id = payload.teacher_id
     if user.role == Role.TEACHER.value:
         teacher_id = user.id
+    if payload.class_id is not None:
+        from app.models.enrollment import Class as _Class
+
+        if db.get(_Class, payload.class_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="班级不存在")
 
     conflicts = schedule_crud.find_conflicts(
-        db, start=payload.start_time, end=payload.end_time, teacher_id=teacher_id
+        db,
+        start=payload.start_time,
+        end=payload.end_time,
+        teacher_id=teacher_id,
+        class_id=payload.class_id,
     )
 
     if conflicts and not payload.force:
@@ -123,6 +133,7 @@ def create_schedule(
         teacher_id=teacher_id,
         start_time=payload.start_time,
         end_time=payload.end_time,
+        is_trial=payload.is_trial,
     )
     return ScheduleCreateResponse(schedule=_schedule_out(s), created=True)
 
@@ -191,7 +202,7 @@ def create_recurring_schedules(
     conflicts: list[ConflictOut] = []
     for idx, (start, end) in enumerate(generated):
         existing = schedule_crud.find_conflicts(
-            db, start=start, end=end, teacher_id=teacher_id
+            db, start=start, end=end, teacher_id=teacher_id, class_id=payload.class_id
         )
         for c in existing:
             item = _conflict_out(c)
@@ -282,6 +293,7 @@ def update_schedule(
             start=new_start,
             end=new_end,
             teacher_id=new_teacher_id,
+            class_id=s.class_id,
             exclude_schedule_id=s.id,
         )
         if conflicts and not payload.force:
@@ -326,6 +338,8 @@ def _attendance_out(a: AttendanceModel) -> AttendanceOut:
         lesson_balance=balance,
         low_balance=(balance is not None and balance <= 10),
         status=a.status,
+        is_trial=a.is_trial,
+        trial_status=a.student.trial_status if a.student else "none",
         created_at=a.created_at,
     )
 
@@ -400,23 +414,46 @@ def submit_attendance(
 
             if target == AttendanceStatus.ATTENDED:
                 # 划课时：按科目单次课时数扣除（乐高 1.5，其余默认 2，可在科目设置改）
+                # 体验中学员免费上课：只记到场，不扣课时不计创收
+                is_trial_attendance = (student.trial_status or "none") == "trial"
+                if is_trial_attendance:
+                    att.status = AttendanceStatus.ATTENDED
+                    att.operator_id = operator.id
+                    att.is_trial = True
+                    result.lesson_records.append(
+                        {
+                            "student_id": str(item.student_id),
+                            "delta": 0,
+                            "balance_after": float(student.lesson_balance),
+                            "is_trial": True,
+                        }
+                    )
+                    db.flush()
+                    continue
                 subject_name = s.schedule_class.subject if s.schedule_class else ""
                 subject = business_crud.find_subject_by_name(db, subject_name)
                 per_session = (
                     Decimal(str(subject.per_session)) if subject else Decimal("2")
                 )
-                if Decimal(str(student.lesson_balance)) < per_session:
+                _cap = Decimal(str(business_crud.get_finance_setting(db).overdraft_max or 10))
+                if Decimal(str(student.lesson_balance)) - per_session < -_cap:
                     result.errors.append(
                         {
                             "student_id": str(item.student_id),
-                            "reason": f"课时不足（<{per_session}），无法标记已到",
+                            "reason": f"课时不足且已达透支上限（-{_cap}），请先续费",
                         }
                     )
                     continue
-                # 创收定价：消耗瞬间 FIFO 加权单价快照
+                # 创收定价：消耗瞬间 FIFO 加权单价快照（FIFO 不足部分按最近购包价兜底=欠费消耗）
                 unit_price, lots = order_crud.price_for_consume(
                     db, student=student, lessons=per_session
                 )
+                overdraft_lessons = sum(
+                    Decimal(str(lot.get("lessons", "0")))
+                    for lot in lots
+                    if lot.get("overdraft")
+                )
+                is_overdraft = overdraft_lessons > 0
                 att.status = AttendanceStatus.ATTENDED
                 att.operator_id = operator.id
                 record = lesson_crud.add_record(
@@ -426,10 +463,15 @@ def submit_attendance(
                     record_type=LessonRecordType.CONSUME,
                     operator_id=operator.id,
                     ref_id=schedule_id,
-                    remark=f"上课扣课时（{s.schedule_class.name if s.schedule_class else ''}，{per_session} 课时）",
+                    remark=f"上课扣课时（{s.schedule_class.name if s.schedule_class else ''}，{per_session} 课时）"
+                    + (
+                        f"，含欠费 {overdraft_lessons} 节（应收，单价 ¥{unit_price}）"
+                        if is_overdraft
+                        else ""
+                    ),
                     commit=False,
                 )
-                # 创收账本（单价/抽成快照固化，只写不改）
+                # 创收账本（单价/抽成快照固化，只写不改；欠费部分挂应收）
                 business_crud.write_ledger(
                     db,
                     student_id=student.id,
@@ -439,7 +481,8 @@ def submit_attendance(
                     subject_name=subject_name or "未分类",
                     schedule_id=schedule_id,
                     teacher_id=s.teacher_id,
-                    detail={"lots": lots},
+                    detail={"lots": lots, "overdraft": is_overdraft},
+                    is_overdraft=is_overdraft,
                     commit=False,
                 )
                 result.lesson_records.append(

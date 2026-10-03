@@ -185,6 +185,8 @@ def create(
     parent_user_id: uuid.UUID | None,
     student_user_id: uuid.UUID | None,
     class_ids: list[uuid.UUID],
+    source: str | None = None,
+    referrer: str | None = None,
 ) -> Student:
     student = Student(
         name=name,
@@ -193,6 +195,8 @@ def create(
         lesson_balance=lesson_balance,
         parent_user_id=parent_user_id,
         student_user_id=student_user_id,
+        source=source or "normal",
+        referrer=referrer,
     )
     if class_ids:
         classes = db.scalars(
@@ -367,6 +371,12 @@ def renew(
         amount = custom_amount or Decimal("0")
         remark = f"催缴续费：自定义补录 {lessons} 课时" + (f"，金额 {amount} 元" if amount else "")
     lessons_dec = Decimal(str(lessons))
+
+    # 欠费自动抵扣：先填负数，剩余才是可用课时
+    arrears_before = -min(Decimal(str(student.lesson_balance)), Decimal("0"))
+    repaid = min(arrears_before, lessons_dec)
+    if repaid > 0:
+        remark += f"，其中还欠款 {repaid.normalize()} 节"
 
     order = Order(
         student_id=student.id,

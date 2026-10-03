@@ -53,6 +53,11 @@ class Student(Base):
         ForeignKey("users.id"), nullable=True, unique=True, index=True
     )
     lesson_balance: Mapped[Decimal] = mapped_column(Numeric(10, 1), default=Decimal("0"), index=True)
+    # 体验状态：none 普通学员 / trial 体验中 / signed 体验后已报名 / lost 体验未报名结束服务
+    trial_status: Mapped[str] = mapped_column(String(16), default="none", index=True)
+    # 生源：normal 自然到访 / referral 口碑转介绍（报名时标记）
+    source: Mapped[str] = mapped_column(String(16), default="normal", index=True)
+    referrer: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 催缴跟进状态（M2 催缴名单）：课时<=10 进入待跟进，教务处理后标 已续费/已停课
     follow_up_status: Mapped[str] = mapped_column(
         Enum(FollowUpStatus, native_enum=False, length=16),
@@ -164,6 +169,9 @@ class LessonRecord(Base):
     )
     delta: Mapped[Decimal] = mapped_column(Numeric(10, 1))  # 正=入账，负=扣减（支持半课时）
     balance_after: Mapped[Decimal] = mapped_column(Numeric(10, 1))
+    # 计价口径（人工调整/充值补课时用；为空表示无金额、不进财务账本）
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     ref_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)  # 关联排课/订单（M2/M5 填充）
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
     operator_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)

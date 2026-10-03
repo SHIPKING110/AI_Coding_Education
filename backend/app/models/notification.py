@@ -20,6 +20,7 @@ class NotificationType(enum.StrEnum):
     SUBMISSION_GRADED = "submission_graded"  # 作业已批改（FR-CL-18）
     EVALUATION_PUBLISHED = "evaluation_published"  # 学员评估已发布（FR-EV-04，M6）
     KNOWLEDGE_INDEXED = "knowledge_indexed"  # 知识库文档索引落定（成功/失败）
+    TRIAL_ASSIGNED = "trial_assigned"  # 教师被安排体验课（写明班级时间）
 
 
 class Notification(Base):

@@ -61,25 +61,28 @@ def find_conflicts(
     start: datetime,
     end: datetime,
     teacher_id: uuid.UUID,
+    class_id: uuid.UUID | None = None,
     exclude_schedule_id: uuid.UUID | None = None,
 ) -> list[Schedule]:
-    """按教师检测冲突：同一教师的其他排课在 [start,end) 时间段重叠即冲突。
-
-    业务口径（OQ-05 澄清）：
-    - 只有【同一教师】的排课在时间上重叠才算冲突；
-    - 不同教师在同时段分别开班不冲突；
-    - 互相冲突的课程不允许同时排出来（除非 force 强制）。
+    """冲突口径：
+    - 同一教师时间重叠即冲突；
+    - 同一班级时间重叠即冲突（无论教师是否相同，体验课跟班也一样）。
     """
     stmt = select(Schedule).options(
         selectinload(Schedule.schedule_class), selectinload(Schedule.teacher)
     )
+    from sqlalchemy import or_ as _or
+
     overlap = Schedule.status != ScheduleStatus.CANCELLED
     overlap = and_(
         overlap,
-        Schedule.teacher_id == teacher_id,
         Schedule.start_time < end,
         Schedule.end_time > start,
     )
+    who: list = [Schedule.teacher_id == teacher_id]
+    if class_id is not None:
+        who.append(Schedule.class_id == class_id)
+    overlap = and_(overlap, _or(*who))
     stmt = stmt.where(overlap)
     if exclude_schedule_id is not None:
         stmt = stmt.where(Schedule.id != exclude_schedule_id)
@@ -89,16 +92,18 @@ def find_conflicts(
 def create(
     db: Session,
     *,
-    class_id: uuid.UUID,
+    class_id: uuid.UUID | None,
     teacher_id: uuid.UUID,
     start_time: datetime,
     end_time: datetime,
+    is_trial: bool = False,
 ) -> Schedule:
     s = Schedule(
         class_id=class_id,
         teacher_id=teacher_id,
         start_time=start_time,
         end_time=end_time,
+        is_trial=is_trial,
     )
     db.add(s)
     db.commit()

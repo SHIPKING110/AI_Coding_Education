@@ -47,6 +47,7 @@ const editSubject = ref({ name: '', per_session: '2', commission_rate: '', useGl
 
 // ---- 财务 ----
 const commissionDefault = ref('0.30')
+const overdraftMax = ref('10')
 const financeNote = ref('')
 const formulas = ref({ revenue: '', commission: '', net: '' })
 
@@ -87,6 +88,7 @@ async function loadAll() {
     campuses.value = c
     subjects.value = s
     commissionDefault.value = f.commission_default
+    overdraftMax.value = f.overdraft_max ?? '10'
     financeNote.value = f.note || ''
     if (f.formula) formulas.value = f.formula
     levels.value = lv
@@ -206,9 +208,11 @@ async function saveFinance() {
   try {
     const out = await updateFinanceSetting({
       commission_default: commissionDefault.value,
+      overdraft_max: overdraftMax.value,
       note: financeNote.value || null,
     })
     commissionDefault.value = out.commission_default
+    overdraftMax.value = out.overdraft_max ?? '10'
     financeNote.value = out.note || ''
     flash('财务设置已保存（新消耗按此比例记账，历史账本不变）')
   } catch (e: any) {
@@ -426,6 +430,9 @@ onMounted(loadAll)
         <div class="add-row">
           <label class="field-inline">全局默认抽成
             <input v-model="commissionDefault" type="number" min="0" max="1" step="0.01" class="inline-input num" />
+          </label>
+          <label class="field-inline">允许透支（课时）
+            <input v-model="overdraftMax" type="number" min="0" max="100" step="0.5" class="inline-input num" title="学员余额最低可到负多少，欠费仍可上课" />
           </label>
           <input v-model="financeNote" type="text" placeholder="备注（可选）" class="grow" />
           <button class="btn primary sm" @click="saveFinance">保存财务设置</button>

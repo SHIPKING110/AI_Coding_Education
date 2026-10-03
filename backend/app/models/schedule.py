@@ -26,13 +26,16 @@ class Schedule(Base):
     __tablename__ = "schedules"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    class_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("classes.id"), index=True)
+    # 班级可空：体验课排教师空余时段时不绑定班级
+    class_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("classes.id"), nullable=True, index=True)
     teacher_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(
         Enum(ScheduleStatus, native_enum=False, length=16), default=ScheduleStatus.SCHEDULED
     )
+    # 体验课标记：空时段专排的体验课显示体验课标签
+    is_trial: Mapped[bool] = mapped_column(default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # 关系（读取时按需 eager load）
@@ -51,6 +54,8 @@ class Attendance(Base):
         Enum(AttendanceStatus, native_enum=False, length=16), default=AttendanceStatus.UNMARKED
     )
     operator_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    # 体验课考勤：体验学员免费上课，不扣课时不计创收，只记到场
+    is_trial: Mapped[bool] = mapped_column(default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     student: Mapped["Student"] = relationship()

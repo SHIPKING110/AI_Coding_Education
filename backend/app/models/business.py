@@ -63,6 +63,8 @@ class RevenueLedger(Base):
     )
     subject_name: Mapped[str] = mapped_column(String(64), default="")
     lessons: Mapped[Decimal] = mapped_column(Numeric(4, 1))
+    # 是否欠费消耗：余额不足时按最近购包价记账，计入创收但挂应收（学员未实际缴费）
+    is_overdraft: Mapped[bool] = mapped_column(default=False, server_default="false")
     unit_price: Mapped[Decimal] = mapped_column(Numeric(10, 4))
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     commission_rate: Mapped[Decimal] = mapped_column(Numeric(5, 4))
@@ -80,6 +82,10 @@ class FinanceSetting(Base):
     # 全局默认抽成比例（科目未单独设置时使用）
     commission_default: Mapped[Decimal] = mapped_column(
         Numeric(5, 4), default=Decimal("0.30")
+    )
+    # 允许透支上限：学员课时余额最低可到 -overdraft_max（欠费继续上课）
+    overdraft_max: Mapped[Decimal] = mapped_column(
+        Numeric(6, 1), default=Decimal("10")
     )
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
