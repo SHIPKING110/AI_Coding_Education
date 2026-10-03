@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     # 数据库
     DATABASE_URL: str = "postgresql+psycopg://postgres:postgres@localhost:5432/child_code"
+    # 生产通过 CORS_ORIGINS 追加前端域名（逗号分隔）；同域部署可留空
+    CORS_ORIGINS: str = ""
 
     # 素材存储（M3+：反馈照片/视频等本地文件，OQ-04 决策=本地磁盘，可配置路径）
     UPLOAD_DIR: str = "uploads"

@@ -435,7 +435,8 @@ def submit_attendance(
                 per_session = (
                     Decimal(str(subject.per_session)) if subject else Decimal("2")
                 )
-                _cap = Decimal(str(business_crud.get_finance_setting(db).overdraft_max or 10))
+                _cfg_max = business_crud.get_finance_setting(db).overdraft_max
+                _cap = Decimal(str(_cfg_max)) if _cfg_max is not None else Decimal("10")
                 if Decimal(str(student.lesson_balance)) - per_session < -_cap:
                     result.errors.append(
                         {

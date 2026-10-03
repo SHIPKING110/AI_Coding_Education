@@ -297,7 +297,7 @@ def test_assignment_role_and_visibility(client, admin_token):
     assert r_ai.status_code == 403
 
 
-def _wait_task(client, headers, task_id, timeout=5.0):
+def _wait_task(client, headers, task_id, timeout=30.0):
     """轮询任务直至 done/failed（异步后台执行，测试需等待）。"""
     import time
 

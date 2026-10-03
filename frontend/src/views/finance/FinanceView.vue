@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import SalaryPanel from './SalaryPanel.vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+const SalaryPanel = defineAsyncComponent(() => import('./SalaryPanel.vue'))
 import * as echarts from 'echarts'
 
 import PageHead from '@/components/PageHead.vue'
