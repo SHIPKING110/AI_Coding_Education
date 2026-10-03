@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles, require_teacher_permission
@@ -75,6 +75,9 @@ class InvitationIn(BaseModel):
 
 class InvitationUpdate(BaseModel):
     status: str | None = None
+    parent_name: str | None = Field(default=None, max_length=64)
+    parent_phone: str | None = Field(default=None, max_length=20)
+    student_name: str | None = Field(default=None, max_length=64)
     chat_images: list[str] | None = None
     remark: str | None = None
     subject_id: uuid.UUID | None = None
@@ -83,6 +86,33 @@ class InvitationUpdate(BaseModel):
     trial_schedule_id: uuid.UUID | None = None
     trial_class_id: uuid.UUID | None = None
     trial_teacher_id: uuid.UUID | None = None
+
+
+def _trial_student_has_financial_trace(db: Session, student_id: uuid.UUID) -> bool:
+    """体验学员是否有资金痕迹（充值/扣课流水、订单）：有则不可自动清档。"""
+    from app.models.enrollment import LessonRecord, Order
+
+    rec = db.scalar(select(LessonRecord.id).where(LessonRecord.student_id == student_id).limit(1))
+    if rec is not None:
+        return True
+    order = db.scalar(select(Order.id).where(Order.student_id == student_id).limit(1))
+    return order is not None
+
+
+def _delete_trial_student(db: Session, stu: Student) -> None:
+    """删除体验中学员档案（含考勤占位；账本/订单由调用方先检查）。
+
+    邀约侧的外键先置空（邀约记录本身保留备查），分班关联由数据库级联删除。
+    """
+    from app.models.schedule import Attendance as _Att
+
+    db.execute(delete(_Att).where(_Att.student_id == stu.id))
+    db.execute(
+        Invitation.__table__.update()
+        .where(Invitation.trial_student_id == stu.id)
+        .values(trial_student_id=None)
+    )
+    db.delete(stu)
 
 
 def _inv_out(inv: Invitation, db: Session) -> dict:
@@ -221,6 +251,16 @@ def update_invitation(
         if payload.status not in [s.value for s in InvitationStatus]:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="状态非法")
         inv.status = payload.status
+    if payload.parent_name is not None:
+        if not payload.parent_name.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="家长姓名不能为空")
+        inv.parent_name = payload.parent_name.strip()
+    if payload.parent_phone is not None:
+        inv.parent_phone = payload.parent_phone.strip() or None
+    if payload.student_name is not None:
+        if not payload.student_name.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="学员姓名不能为空")
+        inv.student_name = payload.student_name.strip()
     if payload.chat_images is not None:
         inv.chat_images = payload.chat_images
     if payload.remark is not None:
@@ -261,6 +301,39 @@ def update_invitation(
     db.commit()
     db.refresh(inv)
     return _inv_out(inv, db)
+
+
+@router.delete("/invitations/{inv_id}")
+def delete_invitation(
+    inv_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(*TEACH_ROLES)),
+) -> dict:
+    """删除邀约记录：已报名转正的不允许删；仍处于体验中的学员档案连带清档（有资金痕迹的不删）。"""
+    inv = db.get(Invitation, inv_id)
+    if inv is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="邀约记录不存在")
+    if user.role == Role.TEACHER.value and inv.trial_teacher_id != user.id and inv.staff_id != user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作他人邀约")
+    cleaned_student = False
+    if inv.trial_student_id:
+        stu = db.get(Student, inv.trial_student_id)
+        if stu is not None:
+            if (stu.trial_status or "none") == "signed":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="该学员已报名转正，不可删除邀约记录",
+                )
+            if _trial_student_has_financial_trace(db, stu.id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="关联学员已有缴费/课时记录，不可删除，请先处理账务",
+                )
+            _delete_trial_student(db, stu)
+            cleaned_student = True
+    db.delete(inv)
+    db.commit()
+    return {"deleted": True, "cleaned_student": cleaned_student}
 
 
 @router.post("/invitations/{inv_id}/trial-student", status_code=status.HTTP_201_CREATED)
@@ -311,7 +384,7 @@ def update_trial_status(
     db: Session = Depends(get_db),
     _: User = Depends(require_teacher_permission("student_edit")),
 ) -> dict:
-    """体验收尾：signed=报名成功转正式（计转化提成），lost=未报名结束服务。报名时可标口碑来源。"""
+    """体验收尾：signed=报名成功转正式（计转化提成），lost=未报名结束服务并自动清档。报名时可标口碑来源。"""
     from app.api.routers.students import _to_out as _sout
     from app.crud import student as student_crud
 
@@ -320,21 +393,35 @@ def update_trial_status(
     stu = student_crud.get(db, student_id)
     if stu is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="学员不存在")
-    stu.trial_status = payload.trial_status
+    cleaned = False
+    inv = db.scalar(select(Invitation).where(Invitation.trial_student_id == stu.id))
+    if payload.trial_status == "lost" and (stu.trial_status or "none") == "trial":
+        # 未报名结束：自动删除体验档案（邀约记录保留备查）；有资金痕迹的不删
+        if _trial_student_has_financial_trace(db, stu.id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="该学员已有缴费/课时记录，不可直接结束，请先处理账务",
+            )
+        _delete_trial_student(db, stu)
+        cleaned = True
+    else:
+        stu.trial_status = payload.trial_status
     if payload.source is not None:
         if payload.source not in ("normal", "referral"):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="生源非法")
-        stu.source = payload.source
-    if payload.referrer is not None:
+        if not cleaned:
+            stu.source = payload.source
+    if payload.referrer is not None and not cleaned:
         stu.referrer = payload.referrer
     # 同步邀约记录状态
-    inv = db.scalar(select(Invitation).where(Invitation.trial_student_id == stu.id))
     if inv is not None:
         if payload.trial_status == "signed":
             inv.status = InvitationStatus.SIGNED.value
         elif payload.trial_status == "lost":
             inv.status = InvitationStatus.LOST.value
     db.commit()
+    if cleaned:
+        return {"deleted_student": True, "student_id": str(student_id)}
     db.refresh(stu)
     return _sout(stu, db).model_dump()
 

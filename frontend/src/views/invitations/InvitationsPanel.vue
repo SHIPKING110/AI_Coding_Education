@@ -11,6 +11,7 @@ import {
   INVITATION_STATUS_LABEL,
   createInvitation,
   createTrialStudent,
+  deleteInvitation,
   listInvitations,
   updateInvitation,
   updateTrialStatus,
@@ -35,12 +36,53 @@ const pageSize = 10
 
 const subjects = ref<{ id: string; name: string }[]>([])
 const classes = ref<{ id: string; name: string; subject?: string | null; teacher_id?: string | null }[]>([])
-const teachers = ref<{ id: string; name: string }[]>([])
+const teachers = ref<{ id: string; name: string; campus?: string | null }[]>([])
 const inviters = ref<{ id: string; name: string; role: string; campus?: string | null }[]>([])
 const panelCampuses = ref<string[]>([])
+const msg = ref('')
 
-// 新建
+// 筛选联动：校区 → 邀约人/体验教师；科目 → 体验教师（按带班科目）
+const filteredInviters = computed(() =>
+  campusFilter.value ? inviters.value.filter((u) => u.campus === campusFilter.value) : inviters.value,
+)
+const teacherSubjectMap = computed(() => {
+  const m = new Map<string, Set<string>>()
+  for (const c of classes.value) {
+    if (!c.teacher_id || !c.subject) continue
+    if (!m.has(c.teacher_id)) m.set(c.teacher_id, new Set())
+    m.get(c.teacher_id)!.add(c.subject)
+  }
+  return m
+})
+const filterSubjectName = computed(() => subjects.value.find((s) => s.id === subjectFilter.value)?.name || '')
+const filteredTrialTeachers = computed(() =>
+  teachers.value.filter((t) => {
+    if (campusFilter.value && t.campus !== campusFilter.value) return false
+    if (filterSubjectName.value && !teacherSubjectMap.value.get(t.id)?.has(filterSubjectName.value)) return false
+    return true
+  }),
+)
+
+function onCampusChange() {
+  if (staffFilter.value && !filteredInviters.value.some((u) => u.id === staffFilter.value)) staffFilter.value = ''
+  if (trialTeacherFilter.value && !filteredTrialTeachers.value.some((t) => t.id === trialTeacherFilter.value)) trialTeacherFilter.value = ''
+  onFilter()
+}
+
+function onSubjectChange() {
+  if (trialTeacherFilter.value && !filteredTrialTeachers.value.some((t) => t.id === trialTeacherFilter.value)) trialTeacherFilter.value = ''
+  onFilter()
+}
+
+function flash(t: string) {
+  msg.value = t
+  setTimeout(() => (msg.value = ''), 3500)
+}
+
+// 新建/编辑
 const showCreate = ref(false)
+const editing = ref<InvitationOut | null>(null)
+const createError = ref('')
 const form = ref({
   parent_name: '',
   parent_phone: '',
@@ -155,29 +197,83 @@ function apiUrl(u: string): string {
 
 async function submitCreate() {
   if (!form.value.parent_name.trim() || !form.value.student_name.trim()) {
-    error.value = '请填写家长姓名与学员姓名'
+    createError.value = '请填写家长姓名与学员姓名'
     return
   }
   creating.value = true
+  createError.value = ''
   try {
     const subj = subjects.value.find((s) => s.id === form.value.subject_id)
-    await createInvitation({
-      parent_name: form.value.parent_name.trim(),
-      parent_phone: form.value.parent_phone.trim() || null,
-      student_name: form.value.student_name.trim(),
-      subject_id: form.value.subject_id || null,
-      subject_name: subj?.name || null,
-      chat_images: images.value,
-      remark: form.value.remark.trim() || null,
-    })
-    showCreate.value = false
-    form.value = { parent_name: '', parent_phone: '', student_name: '', subject_id: '', remark: '' }
-    images.value = []
+    if (editing.value) {
+      await updateInvitation(editing.value.id, {
+        parent_name: form.value.parent_name.trim(),
+        parent_phone: form.value.parent_phone.trim() || null,
+        student_name: form.value.student_name.trim(),
+        subject_id: form.value.subject_id || null,
+        subject_name: subj?.name || editing.value.subject_name || null,
+        chat_images: images.value,
+        remark: form.value.remark.trim() || null,
+      })
+      flash(`已更新「${form.value.student_name.trim()}」的邀约记录`)
+    } else {
+      await createInvitation({
+        parent_name: form.value.parent_name.trim(),
+        parent_phone: form.value.parent_phone.trim() || null,
+        student_name: form.value.student_name.trim(),
+        subject_id: form.value.subject_id || null,
+        subject_name: subj?.name || null,
+        chat_images: images.value,
+        remark: form.value.remark.trim() || null,
+      })
+      flash(`已新建「${form.value.student_name.trim()}」的邀约记录`)
+    }
+    closeCreate()
     onFilter()
   } catch (e: any) {
-    error.value = e?.response?.data?.detail || '新建邀约失败'
+    createError.value = e?.response?.data?.detail || (editing.value ? '更新邀约失败' : '新建邀约失败')
   } finally {
     creating.value = false
+  }
+}
+
+function openCreate() {
+  editing.value = null
+  form.value = { parent_name: '', parent_phone: '', student_name: '', subject_id: '', remark: '' }
+  images.value = []
+  createError.value = ''
+  showCreate.value = true
+}
+
+function openEdit(inv: InvitationOut) {
+  editing.value = inv
+  form.value = {
+    parent_name: inv.parent_name,
+    parent_phone: inv.parent_phone || '',
+    student_name: inv.student_name,
+    subject_id: inv.subject_id || '',
+    remark: inv.remark || '',
+  }
+  images.value = [...(inv.chat_images || [])]
+  createError.value = ''
+  showCreate.value = true
+}
+
+function closeCreate() {
+  showCreate.value = false
+  editing.value = null
+}
+
+async function removeInvite(inv: InvitationOut) {
+  const tip = inv.trial_student_id
+    ? `确定删除「${inv.student_name}」的邀约记录吗？其体验中学员档案将一并清档（学员管理中不再保留）。`
+    : `确定删除「${inv.student_name}」的邀约记录吗？`
+  if (!window.confirm(tip)) return
+  try {
+    const r = await deleteInvitation(inv.id)
+    flash(r.cleaned_student ? '已删除邀约记录，体验学员档案已同步清档' : '已删除邀约记录')
+    onFilter()
+  } catch (e: any) {
+    error.value = e?.response?.data?.detail || '删除失败'
   }
 }
 
@@ -300,9 +396,14 @@ async function submitLink() {
 async function setStatus(inv: InvitationOut, st: string) {
   try {
     if (inv.trial_student_id && (st === 'arrived' || st === 'signed' || st === 'lost')) {
-      await updateTrialStatus(inv.trial_student_id, {
+      const r = await updateTrialStatus(inv.trial_student_id, {
         trial_status: st === 'arrived' ? 'trial' : st === 'signed' ? 'signed' : 'lost',
       })
+      if (st === 'lost' && (r as Record<string, unknown>).deleted_student) {
+        flash(`「${inv.student_name}」未报名，体验学员档案已自动清档（学员管理中不再保留）`)
+      }
+    } else if (st === 'lost') {
+      flash(`「${inv.student_name}」已标记未报名结束`)
     }
     await updateInvitation(inv.id, { status: st })
     load()
@@ -352,7 +453,7 @@ onMounted(async () => {
     subjects.value = (s as any[]) || []
     classes.value = ((c as any)?.items || []) as any[]
     const ulist = ((u as any)?.items || []) as any[]
-    teachers.value = ulist.map((x: any) => ({ id: x.id, name: x.name }))
+    teachers.value = ulist.map((x: any) => ({ id: x.id, name: x.name, campus: x.campus ?? null }))
     const allUsers = (((all as any)?.items || []) as any[]).filter((x: any) =>
       ['admin', 'staff', 'teacher'].includes(x.role),
     )
@@ -375,31 +476,32 @@ onMounted(async () => {
         <option value="signed">已报名</option>
         <option value="lost">未报名结束</option>
       </select>
-      <select v-model="subjectFilter" class="filter-select" @change="onFilter()">
+      <select v-model="subjectFilter" class="filter-select" @change="onSubjectChange()">
         <option value="">全部科目</option>
         <option v-for="s in subjects" :key="s.id" :value="s.id">{{ s.name }}</option>
       </select>
-      <select v-model="campusFilter" class="filter-select" @change="onFilter()">
+      <select v-model="campusFilter" class="filter-select" @change="onCampusChange()">
         <option value="">全部校区</option>
         <option v-for="c in panelCampuses" :key="c" :value="c">{{ c }}</option>
       </select>
       <select v-model="staffFilter" class="filter-select" @change="onFilter()">
         <option value="">全部邀约人</option>
-        <option v-for="u in inviters" :key="u.id" :value="u.id">{{ u.name }}{{ u.campus ? `（${u.campus}）` : '' }}</option>
+        <option v-for="u in filteredInviters" :key="u.id" :value="u.id">{{ u.name }}{{ u.campus ? `（${u.campus}）` : '' }}</option>
       </select>
       <select v-model="trialTeacherFilter" class="filter-select" @change="onFilter()">
         <option value="">全部体验教师</option>
-        <option v-for="t in teachers" :key="t.id" :value="t.id">{{ t.name }}</option>
+        <option v-for="t in filteredTrialTeachers" :key="t.id" :value="t.id">{{ t.name }}{{ t.campus ? `（${t.campus}）` : '' }}</option>
       </select>
       <input v-model="keyword" type="text" class="filter-input" placeholder="学员/家长/电话" @keyup.enter="onFilter()" />
       <input v-model="dateFrom" type="date" class="filter-input" title="记录日期起" @change="onFilter()" />
       <span class="filter-sep">—</span>
       <input v-model="dateTo" type="date" class="filter-input" title="记录日期止" @change="onFilter()" />
       <button class="btn primary sm" @click="onFilter()">查询</button>
-      <button class="btn ghost sm" @click="showCreate = true">＋ 新建邀约</button>
+      <button class="btn ghost sm" @click="openCreate()">＋ 新建邀约</button>
     </div>
 
     <p v-if="error" class="error-banner">{{ error }}</p>
+    <p v-if="msg" class="success-banner">{{ msg }}</p>
     <div v-if="loading" class="loading-tip">加载中…</div>
     <div v-else-if="items.length === 0" class="empty-tip">暂无邀约记录，点击右上新建</div>
     <div v-else class="invite-list">
@@ -409,6 +511,13 @@ onMounted(async () => {
           <span class="pill" :class="`st-${inv.status}`">{{ INVITATION_STATUS_LABEL[inv.status] || inv.status }}</span>
           <span v-if="inv.subject_name" class="subj-chip">{{ inv.subject_name }}</span>
           <span class="muted-sm">{{ inv.parent_name }}{{ inv.parent_phone ? ` · ${inv.parent_phone}` : '' }}</span>
+          <span class="head-sep" />
+          <button v-if="inv.status !== 'signed'" class="icon-btn" title="编辑邀约" @click="openEdit(inv)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" /></svg>
+          </button>
+          <button v-if="inv.status !== 'signed'" class="icon-btn danger" title="删除邀约" @click="removeInvite(inv)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V6" /></svg>
+          </button>
         </div>
         <div class="invite-meta muted-sm">
           <span>邀约人：{{ inv.staff_name || '—' }}{{ inv.staff_campus ? `（${inv.staff_campus}）` : '' }}</span>
@@ -438,10 +547,11 @@ onMounted(async () => {
     </div>
     <PaginationBar :total="total" :page="page" :page-size="pageSize" @update:page="(p) => { page = p; load() }" />
 
-    <!-- 新建邀约 -->
-    <div v-if="showCreate" class="overlay" @click.self="showCreate = false">
+    <!-- 新建/编辑邀约 -->
+    <div v-if="showCreate" class="overlay" @click.self="closeCreate()">
       <div class="modal">
-        <h2>新建邀约记录</h2>
+        <h2>{{ editing ? '编辑邀约记录' : '新建邀约记录' }}</h2>
+        <p v-if="createError" class="error-banner">{{ createError }}</p>
         <div class="form-grid">
           <label>家长姓名*<input v-model="form.parent_name" type="text" placeholder="如：王妈妈" /></label>
           <label>家长电话<input v-model="form.parent_phone" type="text" placeholder="选填" /></label>
@@ -462,8 +572,8 @@ onMounted(async () => {
           <img v-for="(u, i) in images" :key="i" :src="apiUrl(u)" class="thumb" @click="previewImg = apiUrl(u)" />
         </div>
         <div class="modal-actions">
-          <button class="btn ghost" @click="showCreate = false">取消</button>
-          <button class="btn primary" :disabled="creating" @click="submitCreate">{{ creating ? '保存中…' : '保存邀约' }}</button>
+          <button class="btn ghost" @click="closeCreate()">取消</button>
+          <button class="btn primary" :disabled="creating" @click="submitCreate">{{ creating ? '保存中…' : editing ? '保存修改' : '保存邀约' }}</button>
         </div>
       </div>
     </div>
@@ -571,11 +681,19 @@ onMounted(async () => {
 .btn { padding: 8px 18px; border-radius: 10px; font-size: 13px; cursor: pointer; border: 1px solid var(--line); }
 .btn.primary { background: linear-gradient(135deg, #6366f1, #06b6d4); color: #fff; border-color: transparent; font-weight: 600; }
 .btn.ghost { background: var(--surface); color: var(--ink-2); }
+.btn.danger { background: #fef2f2; color: #b91c1c; }
+.action-sep { flex: 1; }
 .btn.sm { padding: 7px 14px; font-size: 12.5px; }
 .error-banner { background: var(--danger-soft); color: var(--danger); padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 13px; }
+.success-banner { background: #e2f5ea; color: #0e9f6e; padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 13px; }
 .invite-list { display: flex; flex-direction: column; gap: 12px; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; }
 .invite-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.head-sep { flex: 1; }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); cursor: pointer; transition: all 0.15s; }
+.icon-btn svg { width: 15px; height: 15px; }
+.icon-btn:hover { border-color: #6366f1; color: #4f46e5; }
+.icon-btn.danger:hover { border-color: #fca5a5; color: #b91c1c; background: #fef2f2; }
 .invite-name { font-size: 15px; }
 .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; background: var(--surface-alt); color: var(--ink-2); }
 .pill.st-invited { background: #eef2ff; color: #4338ca; }

@@ -73,6 +73,9 @@ export async function updateInvitation(
   id: string,
   payload: {
     status?: string
+    parent_name?: string
+    parent_phone?: string | null
+    student_name?: string
     chat_images?: string[]
     remark?: string | null
     subject_id?: string | null
@@ -84,6 +87,11 @@ export async function updateInvitation(
   },
 ): Promise<InvitationOut> {
   const { data } = await http.patch(`/trials/invitations/${id}`, payload)
+  return data
+}
+
+export async function deleteInvitation(id: string): Promise<{ deleted: boolean; cleaned_student: boolean }> {
+  const { data } = await http.delete(`/trials/invitations/${id}`)
   return data
 }
 
