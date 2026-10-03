@@ -2,13 +2,16 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    UV_NO_CACHE=1
 
 WORKDIR /srv/app
 
-# 系统依赖：psycopg-binary 无需 pg 编译环境；bcrypt 需要基本构建工具时用 pwdlib 纯实现
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# uv 可执行文件（多阶段复制，避免残留构建工具）
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# 依赖安装层：仅当 pyproject/uv.lock 变化时重建（uv.lock 纳入版本库保证可复现）
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
 COPY alembic ./alembic
@@ -20,5 +23,6 @@ VOLUME ["/srv/app/uploads", "/srv/app/data"]
 
 EXPOSE 8000
 
-# 生产用多 worker；表结构由 lifespan 内 create_all + 幂等 addcol 自动同步
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# 单 worker：AI 出题/评估任务状态在进程内存（ThreadPool + dict），多 worker 会导致
+# 建任务与轮询落到不同进程而 404；需要扩容时先把任务状态外置（DB/Redis）再加 worker
+CMD [".venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
