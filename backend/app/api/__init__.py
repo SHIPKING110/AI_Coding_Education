@@ -21,6 +21,7 @@ from app.api.routers import (
     schedules,
     students,
     system_settings,
+    trials,
     users,
 )
 
@@ -46,3 +47,4 @@ api_router.include_router(system_settings.router)
 api_router.include_router(business.router)
 api_router.include_router(finance.router)
 api_router.include_router(client.router)
+api_router.include_router(trials.router)

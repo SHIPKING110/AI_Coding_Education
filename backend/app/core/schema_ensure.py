@@ -37,6 +37,7 @@ def ensure_business_schema(engine: Engine) -> None:
             Base.metadata.tables["teacher_levels"],
             Base.metadata.tables["commission_rules"],
             Base.metadata.tables["payroll_entries"],
+            Base.metadata.tables["invitations"],
         ],
         checkfirst=True,
     )
@@ -55,6 +56,22 @@ def ensure_business_schema(engine: Engine) -> None:
     addcol("lesson_packages", "published_at TIMESTAMPTZ", "published_at")
     # 订单过期
     addcol("orders", "expires_at TIMESTAMPTZ", "expires_at")
+    # 透支上限（欠费继续上课）
+    addcol("finance_settings", "overdraft_max NUMERIC(6,1) DEFAULT 10", "overdraft_max")
+    # 欠费消耗标记（计入创收但挂应收）
+    addcol("revenue_ledger", "is_overdraft BOOLEAN DEFAULT FALSE", "is_overdraft")
+    # 排课班级可空（体验课可排教师空余时段不绑班级）
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE schedules ALTER COLUMN class_id DROP NOT NULL"))
+    # 课时流水计价（人工调整带单价入账本）
+    addcol("lesson_records", "unit_price NUMERIC(10,4)", "unit_price")
+    addcol("lesson_records", "amount NUMERIC(10,2)", "amount")
+    # 体验域：学员体验标记/生源 + 邀约记录 + 排课/考勤体验标记
+    addcol("students", "trial_status VARCHAR(16) DEFAULT 'none'", "trial_status")
+    addcol("students", "source VARCHAR(16) DEFAULT 'normal'", "source")
+    addcol("students", "referrer VARCHAR(64)", "referrer")
+    addcol("schedules", "is_trial BOOLEAN DEFAULT FALSE", "is_trial")
+    addcol("attendances", "is_trial BOOLEAN DEFAULT FALSE", "is_trial")
     # 职务基本工资 + 教师级别/基本工资
     addcol("job_titles", "base_salary NUMERIC(10,2) NOT NULL DEFAULT 0", "base_salary")
     addcol("users", "teacher_level_id VARCHAR(64)", "teacher_level_id")
@@ -74,6 +91,7 @@ def ensure_business_schema(engine: Engine) -> None:
     # 教师端导航可见开关（默认全开，保持现有行为）
     for _nav_col in (
         "nav_students",
+        "nav_invitations",
         "nav_classes",
         "nav_teachers",
         "nav_schedules",
@@ -87,6 +105,13 @@ def ensure_business_schema(engine: Engine) -> None:
         addcol(
             "teacher_permissions",
             f"{_nav_col} BOOLEAN NOT NULL DEFAULT TRUE",
+            _nav_col,
+        )
+    # 敏感模块导航（默认关闭，需管理员显式授予）
+    for _nav_col in ("nav_finance", "nav_settings"):
+        addcol(
+            "teacher_permissions",
+            f"{_nav_col} BOOLEAN NOT NULL DEFAULT FALSE",
             _nav_col,
         )
     # 整数余额 → 数值（支持半课时），仅当还是 INTEGER 时执行

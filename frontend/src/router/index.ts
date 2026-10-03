@@ -131,10 +131,13 @@ const router = createRouter({
           meta: { perm: 'finance_view' },
         },
         {
+          path: 'invitations',
+          name: 'invitations',
+          component: () => import('@/views/invitations/InvitationsView.vue'),
+        },
+        {
           path: 'workbench',
-          name: 'workbench',
-          component: () => import('@/views/workbench/WorkbenchView.vue'),
-          meta: { perm: 'finance_view' },
+          redirect: '/finance',
         },
         {
           path: 'profile',

@@ -327,10 +327,29 @@ def allocate_fifo_lots(db: Session, *, student: Student) -> list[dict]:
     return pool
 
 
+def last_package_price(db: Session, *, student: Student) -> tuple[Decimal, str | None, uuid.UUID | None]:
+    """该学员最近一次已确认购包的单价（元/课时），用于欠费消耗兜底定价。"""
+    order = db.scalar(
+        select(Order)
+        .where(Order.student_id == student.id, Order.status == OrderStatus.CONFIRMED.value)
+        .order_by(Order.confirmed_at.desc().nullslast(), Order.created_at.desc())
+    )
+    if order is None:
+        return Decimal("0"), None, None
+    package = db.get(LessonPackage, order.package_id) if order.package_id else None
+    lessons = Decimal(str(package.total_lessons)) if package and package.total_lessons else Decimal("0")
+    price = (Decimal(str(order.amount)) / lessons).quantize(Decimal("0.0001")) if lessons > 0 else Decimal("0")
+    return price, (package.name if package else None), order.id
+
+
 def price_for_consume(
     db: Session, *, student: Student, lessons: Decimal
 ) -> tuple[Decimal, list[dict]]:
-    """按 FIFO 为本次消耗定价：返回（加权单价, 涉及批次明细）。"""
+    """按 FIFO 为本次消耗定价：返回（加权单价, 涉及批次明细）。
+
+    FIFO 余额不足的部分（欠费消耗）按最近购包单价兜底，批次明细中标记
+    overdraft=true，以便账本挂应收；从未购包则单价为 0。
+    """
     need = Decimal(str(lessons))
     total_cost = Decimal("0")
     taken = Decimal("0")
@@ -353,7 +372,22 @@ def price_for_consume(
             }
         )
     if taken <= 0:
+        fallback, _, _ = last_package_price(db, student=student)
+        if fallback > 0:
+            return fallback, [
+                {"overdraft": True, "lessons": str(need), "unit_price": str(fallback)}
+            ]
         return Decimal("0"), []
+    if need > 0:
+        # FIFO 只覆盖了一部分：剩余按最近购包价兜底（欠费消耗）
+        fallback, _, _ = last_package_price(db, student=student)
+        if fallback > 0:
+            total_cost += need * fallback
+            lots.append(
+                {"overdraft": True, "lessons": str(need), "unit_price": str(fallback)}
+            )
+            taken += need
+            need = Decimal("0")
     return (total_cost / taken).quantize(Decimal("0.0001")), lots
 
 

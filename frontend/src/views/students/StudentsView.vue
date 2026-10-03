@@ -11,6 +11,7 @@ import {
   adjustLessonBalance,
   createStudent,
   deleteStudent,
+  getLastPrice,
   listClasses,
   listLessonRecords,
   listStudents,
@@ -90,7 +91,7 @@ const total = ref(0)
 
 const showForm = ref(false)
 const editing = ref<StudentOut | null>(null)
-const form = ref<StudentCreate>({ name: '', phone: '', campus: '', lesson_balance: 0, class_ids: [] })
+const form = ref<StudentCreate>({ name: '', phone: '', campus: '', lesson_balance: 0, class_ids: [], source: '', referrer: '' })
 const formError = ref('')
 
 const showRecords = ref(false)
@@ -100,6 +101,9 @@ const recordsStudent = ref<StudentOut | null>(null)
 const showAdjust = ref(false)
 const adjustDelta = ref(0)
 const adjustRemark = ref('')
+const adjustUnitPrice = ref<number | null>(null)
+const adjustPriceHint = ref('')
+const adjustError = ref('')
 const adjustStudent = ref<StudentOut | null>(null)
 
 // 统一确认弹窗（替代 window.confirm）
@@ -325,6 +329,11 @@ function openRenew(s: StudentOut) {
   renewCustomAmount.value = null
   renewNote.value = ''
   renewError.value = ''
+  if (collectionPackages.value.length === 0) {
+    listPackages(true)
+      .then((p) => (collectionPackages.value = p.items))
+      .catch(() => (collectionPackages.value = []))
+  }
   showRenew.value = true
 }
 
@@ -722,7 +731,7 @@ function onPageChange(p: number) {
 
 function openCreate() {
   editing.value = null
-  form.value = { name: '', phone: '', campus: '', lesson_balance: 0, class_ids: [] }
+  form.value = { name: '', phone: '', campus: '', lesson_balance: 0, class_ids: [], source: '', referrer: '' }
   resetClassPicker()
   formError.value = ''
   parentUserSearch.value = ''
@@ -917,12 +926,36 @@ function openAdjust(s: StudentOut) {
   adjustStudent.value = s
   adjustDelta.value = 0
   adjustRemark.value = ''
+  adjustUnitPrice.value = null
+  adjustPriceHint.value = ''
+  adjustError.value = ''
+  getLastPrice(s.id)
+    .then((r) => {
+      if (r.price !== null && r.price !== undefined) {
+        adjustUnitPrice.value = Number(r.price)
+        adjustPriceHint.value = r.package_name ? `默认单价取自最近购包「${r.package_name}」` : '默认单价取自最近购包'
+      } else {
+        adjustPriceHint.value = '该学员暂无购包记录，请手工填写单价'
+      }
+    })
+    .catch(() => {
+      adjustPriceHint.value = '单价获取失败，请手工填写'
+    })
   showAdjust.value = true
 }
 
 async function submitAdjust() {
   if (!adjustStudent.value || !adjustDelta.value) return
-  await adjustLessonBalance(adjustStudent.value.id, adjustDelta.value, adjustRemark.value || null)
+  if (adjustDelta.value > 0 && !(adjustUnitPrice.value ?? 0)) {
+    adjustError.value = '调增补课时必须填写单价（元/课时），以便计入财务账本'
+    return
+  }
+  await adjustLessonBalance(
+    adjustStudent.value.id,
+    adjustDelta.value,
+    adjustRemark.value || null,
+    adjustUnitPrice.value ?? undefined,
+  )
   showAdjust.value = false
   await load()
 }
@@ -1320,8 +1353,11 @@ onMounted(async () => {
             </td>
             <td><span class="tags">{{ className(s) }}</span></td>
             <td>
-              <span :class="['balance', { low: s.low_balance }]">{{ s.lesson_balance }}</span>
+              <span :class="['balance', { low: s.low_balance, neg: s.lesson_balance < 0 }]">{{ s.lesson_balance }}</span>
               <span v-if="s.low_balance && s.status === 'active'" class="low-tag">待续费</span>
+              <span v-if="s.lesson_balance < 0" class="arrears-tag" :title="`欠款估算 ¥${s.arrears_amount ?? '—'}`">欠费{{ s.arrears_lessons }}节</span>
+              <span v-if="s.trial_status === 'trial'" class="trial-chip">体验中</span>
+              <span v-if="s.source === 'referral'" class="refer-chip" :title="s.referrer ? `介绍人：${s.referrer}` : ''">口碑</span>
             </td>
             <td>
               <span class="status-pill" :class="statusInfo(s).cls">
@@ -1336,6 +1372,7 @@ onMounted(async () => {
               <button class="op-btn" @click="guard('student_records', () => openRecords(s))">流水</button>
               <button class="op-btn" @click="guard('student_adjust', () => openAdjust(s))">调课时</button>
               <button class="op-btn" @click="guard('student_refund', () => openRefund(s))">退费</button>
+              <button class="op-btn primary" @click="guard('student_refund', () => openRenew(s))">续费</button>
               <button v-if="s.status === 'active'" class="op-btn warn" @click="guard('student_stop', () => openStop(s))">停课</button>
               <button v-else-if="s.status === 'stopped'" class="op-btn ok" @click="guard('student_stop', () => resumeStudent(s))">恢复在读</button>
               <button class="op-btn danger" @click="guard('student_delete', () => removeStudent(s))">删除</button>
@@ -1368,6 +1405,17 @@ onMounted(async () => {
           <datalist id="campus-list">
             <option v-for="c in campusOptions" :key="c" :value="c" />
           </datalist>
+        </label>
+        <label v-if="!editing">
+          生源
+          <select v-model="form.source">
+            <option value="">自然到访</option>
+            <option value="referral">口碑转介绍</option>
+          </select>
+        </label>
+        <label v-if="!editing && form.source === 'referral'">
+          介绍人
+          <input v-model="form.referrer" type="text" placeholder="介绍人姓名（计转介绍提成依据）" />
         </label>
         <label v-if="!editing">
           选购课时包 *
@@ -1661,6 +1709,15 @@ onMounted(async () => {
           备注
           <input v-model="adjustRemark" type="text" placeholder="如：充值 40 课时" />
         </label>
+        <label>
+          单价（元/课时）
+          <input v-model.number="adjustUnitPrice" type="number" min="0" step="0.01" placeholder="调增必填，调减冲账可填" />
+        </label>
+        <small v-if="adjustPriceHint" class="hint">{{ adjustPriceHint }}</small>
+        <small v-if="adjustUnitPrice && adjustDelta" class="hint">
+          本次金额 ¥{{ (adjustDelta * adjustUnitPrice).toFixed(2) }}（{{ adjustDelta > 0 ? '计入公司收入' : '冲销收入' }}，不计教师绩效）
+        </small>
+        <p v-if="adjustError" class="error">{{ adjustError }}</p>
         <div class="modal-actions">
           <button class="btn ghost" @click="showAdjust = false">取消</button>
           <button class="btn primary" :disabled="!adjustDelta" @click="submitAdjust">确认调整</button>
@@ -2110,6 +2167,40 @@ tr.urgent td:first-child {
   font-weight: 600;
   padding: 2px 8px;
   border-radius: 999px;
+}
+.balance.neg {
+  color: var(--danger);
+  font-weight: 800;
+}
+.arrears-tag {
+  margin-left: 7px;
+  background: #fde4e4;
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.trial-chip {
+  margin-left: 7px;
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  color: #92400e;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.refer-chip {
+  margin-left: 7px;
+  background: #e0f2fe;
+  color: #0369a1;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
 }
 .status-pill {
   font-size: 12px;

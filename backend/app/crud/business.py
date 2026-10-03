@@ -154,13 +154,16 @@ def get_finance_setting(db: Session) -> FinanceSetting:
 
 
 def update_finance_setting(
-    db: Session, *, commission_default: Decimal | None, note: str | None
+    db: Session, *, commission_default: Decimal | None, note: str | None,
+    overdraft_max=None,
 ) -> FinanceSetting:
     row = get_finance_setting(db)
     if commission_default is not None:
         row.commission_default = commission_default
     if note is not None:
         row.note = note
+    if overdraft_max is not None:
+        row.overdraft_max = Decimal(str(overdraft_max))
     db.commit()
     db.refresh(row)
     return row
@@ -207,9 +210,15 @@ def write_ledger(
     teacher_id: uuid.UUID | None,
     detail: dict | None = None,
     consumed_at: datetime | None = None,
+    commission_override: Decimal | None = None,
+    is_overdraft: bool = False,
     commit: bool = True,
 ) -> RevenueLedger:
-    rate = effective_commission_rate(db, subject, teacher_id)
+    rate = (
+        Decimal(str(commission_override))
+        if commission_override is not None
+        else effective_commission_rate(db, subject, teacher_id)
+    )
     amount = (lessons * unit_price).quantize(Decimal("0.01"))
     commission = (amount * rate).quantize(Decimal("0.01"))
     row = RevenueLedger(
@@ -223,6 +232,7 @@ def write_ledger(
         amount=amount,
         commission_rate=rate,
         commission=commission,
+        is_overdraft=is_overdraft,
         detail=detail,
         consumed_at=consumed_at or datetime.now(UTC),
     )
@@ -329,7 +339,9 @@ def base_salary_of(db, user):
     return Decimal("0")
 
 
-def compute_payroll(db, *, user, month, counts, lesson_commission=Decimal("0")):
+def compute_payroll(
+    db, *, user, month, counts, lesson_commission=Decimal("0"), auto=False
+):
     from app.models.business import PayrollEntry
     rules = rule_map(db)
     base = base_salary_of(db, user)
@@ -352,7 +364,7 @@ def compute_payroll(db, *, user, month, counts, lesson_commission=Decimal("0")):
                    convert_count=int(counts.get("convert_count") or 0), convert_bonus=convert_b,
                    renew_count=int(counts.get("renew_count") or 0), renew_bonus=renew_b,
                    refer_count=int(counts.get("refer_count") or 0), refer_bonus=refer_b,
-                   total=total, detail={"rules": {k: str(v) for k, v in rules.items()}})
+                   total=total, detail={"rules": {k: str(v) for k, v in rules.items()}, "auto": auto})
     if row is None:
         row = PayrollEntry(user_id=user.id, month=month, **payload)
         db.add(row)
@@ -365,4 +377,4 @@ def compute_payroll(db, *, user, month, counts, lesson_commission=Decimal("0")):
             "base_salary": str(base), "lesson_commission": str(lesson_c),
             "invite_bonus": str(invite_b), "trial_bonus": str(trial_b + trial_lesson_b),
             "convert_bonus": str(convert_b), "renew_bonus": str(renew_b),
-            "refer_bonus": str(refer_b), "total": str(total)}
+            "refer_bonus": str(refer_b), "total": str(total), "auto": auto}

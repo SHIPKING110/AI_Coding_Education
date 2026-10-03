@@ -11,8 +11,9 @@
 - 排课与考勤：schedule_create（新建排课）
 - 课时包：package_create（新建）、package_off（下架）
 - 订单管理：order_visible（可见；教师默认不可见）
-- 导航可见：nav_students/nav_classes/nav_teachers/nav_schedules/nav_packages/
-  nav_feedbacks/nav_reports/nav_evaluations/nav_agents/nav_assignments
+- 导航可见：nav_students/nav_invitations/nav_classes/nav_teachers/nav_schedules/
+  nav_packages/nav_feedbacks/nav_reports/nav_evaluations/nav_agents/
+  nav_assignments/nav_finance/nav_settings
   （教师端侧边栏显隐；默认全部可见，保持现有行为）
 
 硬性规则（即使权限全开也不突破）：
@@ -56,6 +57,7 @@ PERMISSION_KEYS: dict[str, str] = {
     "settings_manage": "设置模块-可见与管理",
     "finance_view": "财务管理-可见",
     "nav_students": "导航可见-学员管理",
+    "nav_invitations": "导航可见-招生邀约",
     "nav_classes": "导航可见-班级管理",
     "nav_teachers": "导航可见-教师管理",
     "nav_schedules": "导航可见-排课与考勤",
@@ -65,6 +67,8 @@ PERMISSION_KEYS: dict[str, str] = {
     "nav_evaluations": "导航可见-学员评估",
     "nav_agents": "导航可见-Agent工作台",
     "nav_assignments": "导航可见-AI习题",
+    "nav_finance": "导航可见-财务管理",
+    "nav_settings": "导航可见-设置",
 }
 
 # 各键默认值（无记录时生效；默认 = 现有行为，避免升级后权限放大）
@@ -92,6 +96,7 @@ KEY_DEFAULTS: dict[str, bool] = {
     "settings_manage": False,
     "finance_view": False,
     "nav_students": True,
+    "nav_invitations": True,
     "nav_classes": True,
     "nav_teachers": True,
     "nav_schedules": True,
@@ -101,6 +106,8 @@ KEY_DEFAULTS: dict[str, bool] = {
     "nav_evaluations": True,
     "nav_agents": True,
     "nav_assignments": True,
+    "nav_finance": False,
+    "nav_settings": False,
 }
 
 
@@ -142,6 +149,9 @@ class TeacherPermission(Base):
     nav_evaluations: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     nav_agents: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     nav_assignments: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    nav_invitations: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    nav_finance: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    nav_settings: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

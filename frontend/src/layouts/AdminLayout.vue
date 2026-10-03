@@ -255,10 +255,11 @@ watch(
 
 const ADMIN_NAV = [
   { to: '/students', label: '学员管理', icon: 'M12 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 20c0-4 4-6 8-6s8 2 8 6', navKey: 'nav_students' },
+  { to: '/invitations', label: '招生邀约', icon: 'M18 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M19 8v6M22 11h-6', navKey: 'nav_invitations' },
   { to: '/classes', label: '班级管理', icon: 'M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M9 12h.01M9 15h.01M15 9h.01M15 12h.01M15 15h.01', navKey: 'nav_classes' },
   { to: '/teachers', label: '教师管理', icon: 'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75', navKey: 'nav_teachers' },
   { to: '/permissions', label: '权限管理', icon: 'M12 2l7 4v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-4zM9 12l2 2 4-4', adminOnly: true },
-  { to: '/settings', label: '设置', icon: 'M12 21a9 9 0 1 0-9-9M12 21a9 9 0 0 0 9-9M12 3a9 9 0 0 1 9 9M12 3A9 9 0 0 0 3 12', perm: 'settings_manage' },
+  { to: '/settings', label: '设置', icon: 'M12 21a9 9 0 1 0-9-9M12 21a9 9 0 0 0 9-9M12 3a9 9 0 0 1 9 9M12 3A9 9 0 0 0 3 12', perm: 'settings_manage', navKey: 'nav_settings' },
   { to: '/schedules', label: '排课与考勤', navKey: 'nav_schedules', icon: 'M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z' },
   { to: '/packages', label: '课时包管理', navKey: 'nav_packages', icon: 'M20 12l-8-5-8 5 8 5 8-5zM4 12v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6' },
   { to: '/feedbacks', label: '课后反馈', navKey: 'nav_feedbacks', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 13h5' },
@@ -266,8 +267,7 @@ const ADMIN_NAV = [
   { to: '/evaluations', label: '学员评估', navKey: 'nav_evaluations', icon: 'M7 3h10a2 2 0 0 1 2 2v16H5V5a2 2 0 0 1 2-2zM8 8h8M8 12h8M8 16h5' },
   { to: '/agents', label: 'Agent 工作台', navKey: 'nav_agents', icon: 'M13 2 3 14h7l-1 8 10-12h-7l1-8z' },
   { to: '/assignments', label: 'AI 习题', navKey: 'nav_assignments', icon: 'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11M15 3h6v6' },
-  { to: '/finance', label: '财务管理', icon: 'M3 3v18h18M7 14l4-4 4 4 5-6', perm: 'finance_view' },
-  { to: '/workbench', label: '教务工作台', icon: 'M4 5h16v14H4zM4 10h16M9 10v9', perm: 'finance_view' },
+  { to: '/finance', label: '财务管理', icon: 'M3 3v18h18M7 14l4-4 4 4 5-6', perm: 'finance_view', navKey: 'nav_finance' },
 ]
 
 /** 教师端按权限键显隐：设置(settings_manage)/财务(finance_view)默认不可见；

@@ -189,6 +189,7 @@ def update_subject(
 
 class FinanceSettingUpdate(BaseModel):
     commission_default: Decimal | None = Field(default=None, ge=0, le=1)
+    overdraft_max: Decimal | None = Field(default=None, ge=0, le=100, description="允许透支上限（课时）")
     note: str | None = Field(default=None, max_length=512)
 
 
@@ -200,6 +201,7 @@ def get_finance_setting(
     row = business_crud.get_finance_setting(db)
     return {
         "commission_default": str(row.commission_default),
+        "overdraft_max": str(row.overdraft_max),
         "note": row.note,
         "formula": {
             "revenue": "创收 = Σ 消耗课时 × 消耗瞬间FIFO单价",
@@ -216,9 +218,14 @@ def update_finance_setting(
     _: User = Depends(require_teacher_permission("settings_manage")),
 ) -> dict:
     row = business_crud.update_finance_setting(
-        db, commission_default=payload.commission_default, note=payload.note
+        db, commission_default=payload.commission_default, note=payload.note,
+        overdraft_max=payload.overdraft_max,
     )
-    return {"commission_default": str(row.commission_default), "note": row.note}
+    return {
+        "commission_default": str(row.commission_default),
+        "overdraft_max": str(row.overdraft_max),
+        "note": row.note,
+    }
 
 
 __all__ = ["router"]
@@ -430,6 +437,43 @@ def compute_payroll_entry(
     )
 
 
+@router.post("/payroll/auto-compute")
+def auto_compute_payroll(
+    month: str = Query(description="YYYY-MM"),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_teacher_permission("finance_view")),
+) -> dict:
+    """薪资自动核算：进入工作台/切换月份时触发。手工确认锁定（auto=false）的不覆盖，其余按业务数据重算。"""
+    from sqlalchemy import select as _select
+
+    from app.api.routers.trials import compute_payroll_stats
+    from app.models.business import PayrollEntry as _PE
+    from app.models.user import Role as _Role, User as _U
+
+    users = list(db.scalars(_select(_U).where(_U.role.in_([_Role.STAFF.value, _Role.TEACHER.value]))).all())
+    existing = {
+        e.user_id: e for e in db.scalars(_select(_PE).where(_PE.month == month)).all()
+    }
+    computed, skipped = 0, 0
+    for u in users:
+        e = existing.get(u.id)
+        if e is not None and (e.detail or {}).get("auto", True) is False:
+            skipped += 1
+            continue
+        stats = compute_payroll_stats(db, target_id=u.id, mon=month)
+        business_crud.compute_payroll(
+            db, user=u, month=month,
+            counts={"invite_count": stats["invite_count"], "trial_count": stats["trial_count"],
+                    "convert_count": stats["convert_count"], "renew_count": stats["renew_count"],
+                    "refer_count": stats["refer_count"],
+                    "trial_lesson_count": stats["trial_lesson_count"]},
+            lesson_commission=Decimal(stats["lesson_commission"]),
+            auto=True,
+        )
+        computed += 1
+    return {"month": month, "computed": computed, "skipped": skipped}
+
+
 @router.get("/payroll")
 def list_payroll(
     month: str | None = Query(default=None, description="YYYY-MM"),
@@ -451,6 +495,7 @@ def list_payroll(
         items.append({"id": str(r.id), "user_id": str(r.user_id),
                       "user_name": u.name if u else "?", "title": u.title if u else None,
                       "campus": u.campus if u else None, "month": r.month,
+                      "auto": (r.detail or {}).get("auto", True),
                       "base_salary": str(r.base_salary), "lesson_commission": str(r.lesson_commission),
                       "invite_count": r.invite_count, "invite_bonus": str(r.invite_bonus),
                       "trial_count": r.trial_count, "trial_bonus": str(r.trial_bonus),
@@ -477,6 +522,27 @@ def workbench_overview(
     users = list(db.scalars(_select(_U).where(_U.role.in_([_Role.STAFF.value, _Role.TEACHER.value]))).all())
     entries = {e.user_id: e for e in db.scalars(_select(_PE).where(_PE.month == mon)).all()}
     rules = {r.key: str(r.amount) for r in business_crud.list_rules(db)}
+    # 当月欠费消耗产生的绩效（学员未缴费，风险提示）
+    from app.models.business import RevenueLedger as _RL
+
+    y, m = int(mon.split("-")[0]), int(mon.split("-")[1])
+    _ms = _dt(y, m, 1)
+    _me = _dt(y + (m == 12), (m % 12) + 1, 1)
+    _od_rows = list(
+        db.execute(
+            _select(_RL.teacher_id, _RL.commission).where(
+                _RL.is_overdraft.is_(True),
+                _RL.consumed_at >= _ms,
+                _RL.consumed_at < _me,
+                _RL.teacher_id.isnot(None),
+            )
+        ).all()
+    )
+    from decimal import Decimal as _Dec
+
+    _od_map: dict = {}
+    for _tid, _comm in _od_rows:
+        _od_map[_tid] = _od_map.get(_tid, _Dec("0")) + _Dec(str(_comm or 0))
     items = []
     for u in users:
         e = entries.get(u.id)
@@ -486,6 +552,7 @@ def workbench_overview(
                       "level": getattr(u, "teacher_level_name", None),
                       "base_salary": str(e.base_salary) if e else base,
                       "total": str(e.total) if e else base,
+                      "overdraft_commission": str(_od_map.get(u.id, _Dec("0")).quantize(_Dec("0.01"))),
                       "has_entry": e is not None})
     items.sort(key=lambda x: float(x["total"]), reverse=True)
     return {"month": mon, "rules": rules, "items": items}

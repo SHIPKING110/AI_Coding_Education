@@ -23,6 +23,7 @@ def _filter_stmt(
     campus_unassigned: bool = False,
     start_date_from=None,
     start_date_to=None,
+    subject: str | None = None,
 ):
     stmt = (
         select(Class)
@@ -34,6 +35,8 @@ def _filter_stmt(
         stmt = stmt.where(
             or_(Class.name.ilike(like), Class.subject.ilike(like), User.name.ilike(like))
         )
+    if subject:
+        stmt = stmt.where(Class.subject == subject)
     if teacher_unassigned:
         # 教师「未分配」：尚未安排带教教师的班级
         stmt = stmt.where(Class.teacher_id.is_(None))
@@ -63,6 +66,7 @@ def list_all(
     campus_unassigned: bool = False,
     start_date_from=None,
     start_date_to=None,
+    subject: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[Class]:
@@ -76,6 +80,7 @@ def list_all(
             campus_unassigned=campus_unassigned,
             start_date_from=start_date_from,
             start_date_to=start_date_to,
+            subject=subject,
         )
         .order_by(Class.created_at.desc())
         .limit(limit)
@@ -94,6 +99,7 @@ def count_all(
     campus_unassigned: bool = False,
     start_date_from=None,
     start_date_to=None,
+    subject: str | None = None,
 ) -> int:
     """与 list_all 相同筛选条件下的总数（分页用）。"""
     stmt = _filter_stmt(
@@ -104,6 +110,7 @@ def count_all(
         campus_unassigned=campus_unassigned,
         start_date_from=start_date_from,
         start_date_to=start_date_to,
+        subject=subject,
     )
     return db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
 

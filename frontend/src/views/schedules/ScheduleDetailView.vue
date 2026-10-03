@@ -85,8 +85,18 @@ async function mark(status: 'attended' | 'leave', studentId: string) {
       notice.value = { type: 'err', text: result.errors[0].reason }
     } else {
       const rec = result.lesson_records[0]
+      const rowName = rows.value.find((r) => r.student_id === studentId)?.student_name
       notice.value = rec
-        ? { type: 'ok', text: `${rows.value.find((r) => r.student_id === studentId)?.student_name} 已到，扣 2 课时（余额 ${rec.balance_after}）` }
+        ? {
+            type: 'ok',
+            text:
+              rec.is_trial
+                ? `${rowName} 已到（体验课免费，不扣课时）`
+                : `${rowName} 已到，扣 2 课时（余额 ${rec.balance_after}）` +
+                  (rec.balance_after < 0
+                    ? `，已欠费 ${-rec.balance_after} 节（按最近购包价记账，挂应收）`
+                    : ''),
+          }
         : { type: 'ok', text: '已标记请假（不扣课时）' }
     }
     await load()
@@ -126,7 +136,7 @@ onMounted(load)
     <template v-if="schedule">      <header class="head">
         <div class="head-main">
           <div class="title-row">
-            <h1>{{ schedule.class_name }}</h1>
+            <h1>{{ schedule.class_name || '体验课（无班级）' }}<span v-if="schedule.is_trial" class="trial-chip">体验课</span></h1>
             <span class="status-pill" :class="schedule.status">{{ statusLabel(schedule.status) }}</span>
           </div>
           <p class="meta">
@@ -190,10 +200,11 @@ onMounted(load)
           <div v-for="r in rows" :key="r.id" class="student-card" :class="r.status">
             <div class="avatar" :class="r.status">{{ (r.student_name || '?').slice(0, 1) }}</div>
             <div class="info">
-              <div class="name">{{ r.student_name }}</div>
-              <div class="balance" :class="{ low: r.low_balance }">
+              <div class="name">{{ r.student_name }}<span v-if="r.trial_status === 'trial'" class="trial-chip">体验</span></div>
+              <div class="balance" :class="{ low: r.low_balance, neg: (r.lesson_balance ?? 0) < 0 }">
                 课时 {{ r.lesson_balance }}
                 <span v-if="r.low_balance" class="low-tag">待续费</span>
+                <span v-if="(r.lesson_balance ?? 0) < 0" class="arrears-tag">欠费{{-(r.lesson_balance ?? 0)}}节</span>
               </div>
             </div>
 
@@ -204,7 +215,7 @@ onMounted(load)
                   :disabled="markLocked || submitting || pending.has(r.student_id)"
                   @click="mark('attended', r.student_id)"
                 >
-                  已到 · 扣2
+                  {{ r.trial_status === 'trial' ? '已到 · 免费' : '已到 · 扣2' }}
                 </button>
                 <button
                   class="mark-btn leave"
@@ -482,6 +493,17 @@ h1 {
   font-weight: 600;
   font-size: 14.5px;
   color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.trial-chip {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  color: #92400e;
 }
 .balance {
   font-size: 12.5px;
@@ -498,6 +520,19 @@ h1 {
   padding: 1px 7px;
   border-radius: 999px;
   font-size: 11px;
+}
+.balance.neg {
+  color: var(--danger);
+  font-weight: 800;
+}
+.arrears-tag {
+  margin-left: 6px;
+  background: #fde4e4;
+  color: #b91c1c;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
 }
 .ops {
   display: flex;

@@ -34,6 +34,7 @@ def list_classes(
     ),
     start_date_from: date | None = Query(default=None, description="开班日期起始"),
     start_date_to: date | None = Query(default=None, description="开班日期结束"),
+    subject: str | None = Query(default=None, description="按科目精确过滤"),
     limit: int = Query(default=12, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -48,6 +49,7 @@ def list_classes(
         campus_unassigned=campus_unassigned,
         start_date_from=start_date_from,
         start_date_to=start_date_to,
+        subject=subject,
         limit=limit,
         offset=offset,
     )
@@ -60,6 +62,7 @@ def list_classes(
         campus_unassigned=campus_unassigned,
         start_date_from=start_date_from,
         start_date_to=start_date_to,
+        subject=subject,
     )
     return PageOut[ClassOut](
         items=[_to_out_with_count(db, c) for c in classes], total=total, limit=limit, offset=offset

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import SalaryPanel from './SalaryPanel.vue'
 import * as echarts from 'echarts'
 
 import PageHead from '@/components/PageHead.vue'
@@ -16,8 +17,13 @@ import {
   type SubjectStat,
   type TeacherStat,
 } from '@/api/finance'
+import {
+  listAllLessonRecords,
+  type AllRecordsOut,
+  type LessonRecordOut,
+} from '@/api/enrollment'
 
-const activeTab = ref<'orders' | 'lessons'>('orders')
+const activeTab = ref<'orders' | 'lessons' | 'records' | 'salary'>('orders')
 
 // ---- 通用筛选 ----
 const campuses = ref<{ id: string; name: string }[]>([])
@@ -64,9 +70,29 @@ async function loadOrderStats() {
   }
 }
 
-function renderTrend() {
-  if (!trendEl.value) return
-  if (!trendChart) trendChart = echarts.init(trendEl.value)
+function barGradient(c1: string, c2: string) {
+  return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+    { offset: 0, color: c1 },
+    { offset: 1, color: c2 },
+  ])
+}
+
+function lineArea(c: string) {
+  return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+    { offset: 0, color: c + '55' },
+    { offset: 1, color: c + '05' },
+  ])
+}
+
+async function renderTrend() {
+  // 等待 v-if 切换后的 DOM 就绪，否则容器不存在或尺寸为 0，图表空白
+  await nextTick()
+  if (!trendEl.value || !orderSummary.value) return
+  // 筛选 reload 会销毁重建图表容器（v-if），旧实例绑定的是已卸载节点，必须重建
+  if (!trendChart || trendChart.getDom() !== trendEl.value) {
+    if (trendChart) trendChart.dispose()
+    trendChart = echarts.init(trendEl.value)
+  }
   const labels = orderStats.value.map((b) => b.label.slice(5))
   const series: echarts.SeriesOption[] = []
   if (showOrders.value)
@@ -74,26 +100,21 @@ function renderTrend() {
       name: '下单数',
       type: 'bar',
       data: orderStats.value.map((b) => b.orders),
-      itemStyle: { borderRadius: [6, 6, 0, 0], color: '#6366f1' },
-      barGap: '20%',
+      itemStyle: { borderRadius: [7, 7, 2, 2], color: barGradient('#818cf8', '#6366f1') },
+      showBackground: true,
+      backgroundStyle: { color: 'rgba(99,102,241,0.07)', borderRadius: [7, 7, 2, 2] },
+      barGap: '25%',
+      emphasis: { itemStyle: { shadowBlur: 12, shadowColor: 'rgba(99,102,241,0.5)' } },
     })
   if (showPaid.value)
     series.push({
       name: '已支付数',
       type: 'bar',
       data: orderStats.value.map((b) => b.paid),
-      itemStyle: { borderRadius: [6, 6, 0, 0], color: '#10b981' },
-    })
-  if (showRefunds.value)
-    series.push({
-      name: '退款金额',
-      type: 'line',
-      yAxisIndex: 1,
-      data: orderStats.value.map((b) => Number(b.refunds)),
-      smooth: true,
-      lineStyle: { width: 2.5, color: '#ef4444' },
-      itemStyle: { color: '#ef4444' },
-      symbolSize: 6,
+      itemStyle: { borderRadius: [7, 7, 2, 2], color: barGradient('#34d399', '#10b981') },
+      showBackground: true,
+      backgroundStyle: { color: 'rgba(16,185,129,0.07)', borderRadius: [7, 7, 2, 2] },
+      emphasis: { itemStyle: { shadowBlur: 12, shadowColor: 'rgba(16,185,129,0.5)' } },
     })
   if (showPaidAmount.value)
     series.push({
@@ -102,29 +123,88 @@ function renderTrend() {
       yAxisIndex: 1,
       data: orderStats.value.map((b) => Number(b.paid_amount)),
       smooth: true,
-      lineStyle: { width: 2.5, color: '#f59e0b' },
-      itemStyle: { color: '#f59e0b' },
-      symbolSize: 6,
+      symbol: 'circle',
+      symbolSize: 7,
+      lineStyle: { width: 3, color: '#f59e0b', shadowBlur: 10, shadowColor: 'rgba(245,158,11,0.45)' },
+      itemStyle: { color: '#f59e0b', borderColor: '#fff', borderWidth: 2 },
+      areaStyle: { color: lineArea('#f59e0b') },
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        lineStyle: { type: 'dashed', color: '#f59e0b', opacity: 0.6 },
+        label: { formatter: '均值 {c}', fontSize: 11, color: '#b45309' },
+        data: [{ type: 'average' }],
+      },
+    })
+  if (showRefunds.value)
+    series.push({
+      name: '退款金额',
+      type: 'line',
+      yAxisIndex: 1,
+      data: orderStats.value.map((b) => Number(b.refunds)),
+      smooth: true,
+      symbol: 'circle',
+      symbolSize: 7,
+      lineStyle: { width: 3, color: '#ef4444', shadowBlur: 10, shadowColor: 'rgba(239,68,68,0.4)' },
+      itemStyle: { color: '#ef4444', borderColor: '#fff', borderWidth: 2 },
+      areaStyle: { color: lineArea('#ef4444') },
     })
   trendChart.setOption(
     {
-      grid: { left: 48, right: 56, top: 44, bottom: 30 },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      legend: { top: 8, textStyle: { fontSize: 12 } },
-      xAxis: { type: 'category', data: labels, axisTick: { show: false } },
+      grid: { left: 46, right: 52, top: 20, bottom: 28 },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(99,102,241,0.06)' } },
+        backgroundColor: 'rgba(15,23,42,0.92)',
+        borderWidth: 0,
+        textStyle: { color: '#f1f5f9', fontSize: 12 },
+        formatter: (params: any) => {
+          const rows = (params as any[])
+            .map((p) => {
+              const unit = p.seriesName.includes('金额') || p.seriesName.includes('盈收') ? '元' : '单';
+              const val =
+                unit === '元' ? `¥${Number(p.value).toLocaleString('zh-CN')}` : `${p.value} 单`;
+              return `${p.marker} ${p.seriesName}<span style="float:right;margin-left:24px;font-weight:700">${val}</span>`;
+            })
+            .join('<br/>');
+          return `<div style="font-weight:700;margin-bottom:4px">${params[0].axisValue}</div>${rows}`;
+        },
+      },
+      legend: {
+        show: false,
+      },
+      xAxis: {
+        type: 'category',
+        data: labels,
+        axisTick: { show: false },
+        axisLine: { lineStyle: { color: '#e2e8f0' } },
+        axisLabel: { color: '#94a3b8', fontSize: 11 },
+      },
       yAxis: [
-        { type: 'value', name: '单数', splitLine: { lineStyle: { type: 'dashed' } } },
+        {
+          type: 'value',
+          name: '单数',
+          nameTextStyle: { color: '#94a3b8', fontSize: 11 },
+          splitLine: { lineStyle: { type: 'dashed', color: '#eef2f7' } },
+          axisLabel: { color: '#94a3b8', fontSize: 11 },
+        },
         {
           type: 'value',
           name: '金额(元)',
+          nameTextStyle: { color: '#94a3b8', fontSize: 11 },
           splitLine: { show: false },
-          axisLabel: { formatter: (v: number) => (v >= 10000 ? `${(v / 10000).toFixed(0)}万` : v) },
+          axisLabel: {
+            color: '#94a3b8',
+            fontSize: 11,
+            formatter: (v: number) => (v >= 10000 ? `${(v / 10000).toFixed(0)}万` : v),
+          },
         },
       ],
       series,
     },
     true,
   )
+  trendChart.resize()
 }
 
 // ---- 课时创收 ----
@@ -161,15 +241,19 @@ async function loadLessons() {
   }
 }
 
-function renderLessons() {
+async function renderLessons() {
+  await nextTick()
   if (!lessonEl.value || !lessonStats.value) return
-  if (!lessonChart) lessonChart = echarts.init(lessonEl.value)
+  if (!lessonChart || lessonChart.getDom() !== lessonEl.value) {
+    if (lessonChart) lessonChart.dispose()
+    lessonChart = echarts.init(lessonEl.value)
+  }
   const daily = lessonStats.value.daily
   lessonChart.setOption(
     {
-      grid: { left: 52, right: 20, top: 40, bottom: 30 },
+      grid: { left: 52, right: 20, top: 16, bottom: 44 },
       tooltip: { trigger: 'axis' },
-      legend: { top: 8, textStyle: { fontSize: 12 } },
+      legend: { bottom: 0, icon: 'roundRect', itemWidth: 14, itemHeight: 6, textStyle: { fontSize: 12 } },
       xAxis: {
         type: 'category',
         data: daily.map((d) => d.label.slice(5)),
@@ -194,11 +278,76 @@ function renderLessons() {
     },
     true,
   )
+  lessonChart.resize()
 }
 
-function switchTab(t: 'orders' | 'lessons') {
+// ---- 总流水 ----
+const allRecords = ref<LessonRecordOut[]>([])
+const recordsTotal = ref(0)
+const recordsSummary = ref({ amount_in: '0', amount_out: '0', amount_net: '0' })
+const recordsLoading = ref(false)
+const recordKeyword = ref('')
+const recordType = ref('')
+const recordsPage = ref(1)
+const recordsPageSize = 20
+
+const RECORD_TYPE_LABEL: Record<string, string> = {
+  recharge: '充值入账',
+  consume: '上课扣减',
+  adjust: '人工调整',
+  refund: '退款扣减',
+}
+
+async function loadRecords() {
+  recordsLoading.value = true
+  try {
+    const data: AllRecordsOut = await listAllLessonRecords({
+      keyword: recordKeyword.value.trim() || undefined,
+      campus: campus.value || undefined,
+      record_type: recordType.value || undefined,
+      date_from: dateFrom.value || undefined,
+      date_to: dateTo.value || undefined,
+      limit: recordsPageSize,
+      offset: (recordsPage.value - 1) * recordsPageSize,
+    })
+    allRecords.value = data.items
+    recordsTotal.value = data.total
+    recordsSummary.value = data.summary
+  } catch {
+    allRecords.value = []
+  } finally {
+    recordsLoading.value = false
+  }
+}
+
+function onRecordsFilter() {
+  recordsPage.value = 1
+  loadRecords()
+}
+
+function recordTime(s: string): string {
+  return s ? s.slice(0, 16).replace('T', ' ') : '—'
+}
+
+function reloadActive() {
+  if (activeTab.value === 'orders') loadOrderStats()
+  else if (activeTab.value === 'lessons') loadLessons()
+  else onRecordsFilter()
+}
+
+async function switchTab(t: 'orders' | 'lessons' | 'records' | 'salary') {
   activeTab.value = t
-  if (t === 'lessons' && !lessonStats.value) loadLessons()
+  // tab 内容是 v-if 渲染，容器在切换后才挂载，需重绘图表以校正尺寸
+  await nextTick()
+  if (t === 'orders') {
+    if (orderSummary.value) renderTrend()
+    else loadOrderStats()
+  }
+  if (t === 'lessons') {
+    if (lessonStats.value) renderLessons()
+    else loadLessons()
+  }
+  if (t === 'records' && allRecords.value.length === 0) loadRecords()
 }
 
 watch([showOrders, showPaid, showRefunds, showPaidAmount], renderTrend)
@@ -208,7 +357,7 @@ function onResize() {
   lessonChart?.resize()
 }
 
-function money(s: string | number): string {
+function money(s: string | number | null | undefined): string {
   return Number(s || 0).toLocaleString('zh-CN', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
@@ -270,27 +419,42 @@ onUnmounted(() => {
 
     <div class="tabs">
       <button class="tab" :class="{ active: activeTab === 'orders' }" @click="switchTab('orders')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
         订单管理
       </button>
       <button class="tab" :class="{ active: activeTab === 'lessons' }" @click="switchTab('lessons')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg>
         课时创收
+      </button>
+      <button class="tab" :class="{ active: activeTab === 'records' }" @click="switchTab('records')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4M16 2v4M3 10h18" /></svg>
+        收支流水
+      </button>
+      <button class="tab" :class="{ active: activeTab === 'salary' }" @click="switchTab('salary')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M3 9h18" /></svg>
+        薪资核算
       </button>
     </div>
 
-    <!-- 通用筛选条 -->
-    <div class="filter-bar">
-      <input v-model="dateFrom" type="date" class="filter-input" @change="activeTab === 'orders' ? loadOrderStats() : loadLessons()" />
+    <!-- 通用筛选条（薪资核算 tab 自带月份/职务/校区筛选，此处隐藏） -->
+    <div v-if="activeTab !== 'salary'" class="filter-bar">
+      <input v-model="dateFrom" type="date" class="filter-input" @change="reloadActive()" />
       <span class="filter-sep">—</span>
-      <input v-model="dateTo" type="date" class="filter-input" @change="activeTab === 'orders' ? loadOrderStats() : loadLessons()" />
-      <select v-model="campus" class="filter-select" @change="activeTab === 'orders' ? loadOrderStats() : loadLessons()">
+      <input v-model="dateTo" type="date" class="filter-input" @change="reloadActive()" />
+      <select v-model="campus" class="filter-select" @change="reloadActive()">
         <option value="">全部校区</option>
         <option v-for="c in campuses" :key="c.id" :value="c.name">{{ c.name }}</option>
       </select>
-      <template v-if="activeTab === 'orders'">
-        <label class="check"><input v-model="showOrders" type="checkbox" />下单数</label>
-        <label class="check"><input v-model="showPaid" type="checkbox" />已支付数</label>
-        <label class="check"><input v-model="showPaidAmount" type="checkbox" />课时包盈收</label>
-        <label class="check"><input v-model="showRefunds" type="checkbox" />退款金额</label>
+      <template v-if="activeTab === 'records'">
+        <select v-model="recordType" class="filter-select" @change="onRecordsFilter()">
+          <option value="">全部类型</option>
+          <option value="recharge">充值入账</option>
+          <option value="consume">上课扣减</option>
+          <option value="adjust">人工调整</option>
+          <option value="refund">退款扣减</option>
+        </select>
+        <input v-model="recordKeyword" type="text" class="filter-input" placeholder="学员姓名/电话" @keyup.enter="onRecordsFilter()" />
+        <button class="btn primary sm" @click="onRecordsFilter()">查询</button>
       </template>
       <span v-else class="formula-hint">应耗 = 排课计划课时 · 消耗 = 考勤扣减 · 创收 = Σ消耗×FIFO单价 · 盈收 = 创收 − 绩效</span>
     </div>
@@ -302,30 +466,48 @@ onUnmounted(() => {
         <div v-if="statsLoading" class="loading-tip">加载中…</div>
         <div v-else-if="!orderSummary" class="empty-tip">暂无数据</div>
         <template v-else>
-          <div class="kpi-grid kpi-5">
-            <div class="kpi ico">
-              <span class="kpi-ico blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10" /></svg></span>
-              <div class="kpi-body"><span>下单总数</span><strong>{{ orderSummary.orders }} 单</strong></div>
+          <div class="flow-kpis flow-4">
+            <div class="flow-kpi indigo">
+              <div class="flow-kpi-top">
+                <span class="flow-ico in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10" /></svg></span>
+                <span class="flow-tag">全部订单</span>
+              </div>
+              <div class="flow-amt">{{ orderSummary.orders }}<small> 单</small></div>
+              <div class="flow-label">下单金额 ¥{{ money(orderSummary.order_amount) }}</div>
             </div>
-            <div class="kpi ico">
-              <span class="kpi-ico red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg></span>
-              <div class="kpi-body"><span>退课数</span><strong>{{ orderSummary.refunded_count }} 单</strong></div>
+            <div class="flow-kpi amber">
+              <div class="flow-kpi-top">
+                <span class="flow-ico warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M19 5 5 19" /><circle cx="9" cy="9" r="2.5" /><circle cx="15" cy="15" r="2.5" /></svg></span>
+                <span class="flow-tag">漏斗转化</span>
+              </div>
+              <div class="flow-amt">{{ orderSummary.pay_rate }}<small> %</small></div>
+              <div class="flow-label">已支付 {{ orderSummary.paid }} 单 · 未付款 {{ orderSummary.unpaid }} 单</div>
             </div>
-            <div class="kpi ico">
-              <span class="kpi-ico amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M19 5 5 19" /><circle cx="9" cy="9" r="2.5" /><circle cx="15" cy="15" r="2.5" /></svg></span>
-              <div class="kpi-body"><span>支付转化率</span><strong>{{ orderSummary.pay_rate }}%</strong></div>
+            <div class="flow-kpi green">
+              <div class="flow-kpi-top">
+                <span class="flow-ico ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg></span>
+                <span class="flow-tag">实际营收</span>
+              </div>
+              <div class="flow-amt">¥{{ money(orderSummary.paid_amount) }}</div>
+              <div class="flow-label">课时包盈收 · 已确认订单实收</div>
             </div>
-            <div class="kpi ico highlight">
-              <span class="kpi-ico green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M3 9h18" /></svg></span>
-              <div class="kpi-body"><span>课时包盈收</span><strong>¥{{ money(orderSummary.paid_amount) }}</strong></div>
-            </div>
-            <div class="kpi ico danger">
-              <span class="kpi-ico red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg></span>
-              <div class="kpi-body"><span>退款金额</span><strong>¥{{ money(orderSummary.refunds) }}</strong></div>
+            <div class="flow-kpi red">
+              <div class="flow-kpi-top">
+                <span class="flow-ico out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg></span>
+                <span class="flow-tag">售后流失</span>
+              </div>
+              <div class="flow-amt">{{ orderSummary.refunded_count }}<small> 单</small></div>
+              <div class="flow-label">退款 ¥{{ money(orderSummary.refunds) }}</div>
             </div>
           </div>
-          <div class="sub-kpis muted-sm">
-            已支付 {{ orderSummary.paid }} 单 · 未付款 {{ orderSummary.unpaid }} 单 · 下单金额 ¥{{ money(orderSummary.order_amount) }}
+          <div class="chart-head">
+            <div class="card-title">订单趋势 <span class="hint">柱 = 单数（左轴）· 线 = 金额（右轴）</span></div>
+            <div class="series-toggles">
+              <button class="toggle-pill indigo" :class="{ off: !showOrders }" @click="showOrders = !showOrders">下单数</button>
+              <button class="toggle-pill green" :class="{ off: !showPaid }" @click="showPaid = !showPaid">已支付数</button>
+              <button class="toggle-pill amber" :class="{ off: !showPaidAmount }" @click="showPaidAmount = !showPaidAmount">课时包盈收</button>
+              <button class="toggle-pill red" :class="{ off: !showRefunds }" @click="showRefunds = !showRefunds">退款金额</button>
+            </div>
           </div>
           <div ref="trendEl" class="echart"></div>
         </template>
@@ -335,7 +517,7 @@ onUnmounted(() => {
     </div>
 
     <!-- 课时创收 tab -->
-    <div v-else>
+    <div v-else-if="activeTab === 'lessons'">
       <p v-if="finError" class="error-banner">{{ finError }}</p>
       <div v-if="finLoading" class="loading-tip">加载中…</div>
       <template v-else-if="lessonStats">
@@ -346,6 +528,8 @@ onUnmounted(() => {
           <div class="kpi ico highlight"><span class="kpi-ico green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg></span><div class="kpi-body"><span>课时创收</span><strong>¥{{ money(lessonStats.revenue) }}</strong></div></div>
           <div class="kpi ico"><span class="kpi-ico amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="9" r="5" /><path d="M9 13.5 7.5 21 12 19l4.5 2L15 13.5" /></svg></span><div class="kpi-body"><span>教师绩效</span><strong>¥{{ money(lessonStats.commission) }}</strong></div></div>
           <div class="kpi ico"><span class="kpi-ico blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M3 9h18" /></svg></span><div class="kpi-body"><span>课时盈收</span><strong>¥{{ money(lessonStats.profit) }}</strong></div></div>
+          <div class="kpi ico danger"><span class="kpi-ico red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01" /><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" /></svg></span><div class="kpi-body"><span>欠费消耗（本期）</span><strong>{{ lessonStats.overdraft_lessons }}节 · ¥{{ money(lessonStats.overdraft_revenue) }}</strong></div></div>
+          <div class="kpi ico danger"><span class="kpi-ico red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg></span><div class="kpi-body"><span>应收欠款（当前）</span><strong>¥{{ money(lessonStats.receivable) }} · {{ lessonStats.debtors }}人</strong></div></div>
         </div>
 
         <section class="card">
@@ -410,13 +594,89 @@ onUnmounted(() => {
         </div>
       </template>
     </div>
+
+    <!-- 收支流水 tab -->
+    <div v-else-if="activeTab === 'records'">
+      <div class="flow-kpis">
+        <div class="flow-kpi in">
+          <div class="flow-kpi-top">
+            <span class="flow-ico in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg></span>
+            <span class="flow-tag">累计入账</span>
+          </div>
+          <div class="flow-amt">¥{{ money(recordsSummary.amount_in) }}</div>
+          <div class="flow-label">充值 / 补课时接收金额</div>
+        </div>
+        <div class="flow-kpi out">
+          <div class="flow-kpi-top">
+            <span class="flow-ico out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg></span>
+            <span class="flow-tag">冲销退费</span>
+          </div>
+          <div class="flow-amt">¥{{ money(recordsSummary.amount_out) }}</div>
+          <div class="flow-label">退费 / 人工减课时冲减</div>
+        </div>
+        <div class="flow-kpi net">
+          <div class="flow-kpi-top">
+            <span class="flow-ico net"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M3 9h18" /></svg></span>
+            <span class="flow-tag">实收净额</span>
+          </div>
+          <div class="flow-amt">¥{{ money(recordsSummary.amount_net) }}</div>
+          <div class="flow-label">入账 − 冲销后的净收入</div>
+        </div>
+      </div>
+      <section class="card flow-card">
+        <div class="flow-head">
+          <div>
+            <div class="card-title">全学员课时流水</div>
+            <div class="hint">共 {{ recordsTotal }} 条 · 带单价的调账计入金额</div>
+          </div>
+          <div class="flow-legend">
+            <span class="pill recharge">充值入账</span>
+            <span class="pill consume">上课扣减</span>
+            <span class="pill adjust">人工调整</span>
+            <span class="pill refund">退款扣减</span>
+          </div>
+        </div>
+        <div v-if="recordsLoading" class="loading-tip">加载中…</div>
+        <div v-else-if="allRecords.length === 0" class="empty-tip">暂无流水</div>
+        <table v-else class="flow-table">
+          <thead>
+            <tr><th>时间</th><th>学员</th><th>校区</th><th>类型</th><th>课时</th><th>单价</th><th>金额</th><th>备注</th><th>操作人</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in allRecords" :key="r.id">
+              <td><div class="ft-time">{{ r.created_at ? r.created_at.slice(0, 10) : '—' }}<small>{{ r.created_at ? r.created_at.slice(11, 16) : '' }}</small></div></td>
+              <td><div class="ft-user"><span class="ft-avatar">{{ (r.student_name || '?').slice(0, 1) }}</span><strong>{{ r.student_name }}</strong></div></td>
+              <td><span class="ft-campus">{{ r.campus || '—' }}</span></td>
+              <td><span class="pill" :class="r.record_type">{{ RECORD_TYPE_LABEL[r.record_type] || r.record_type }}</span></td>
+              <td><span class="delta-chip" :class="Number(r.delta) >= 0 ? 'up' : 'down'">{{ Number(r.delta) > 0 ? '+' : '' }}{{ r.delta }}</span></td>
+              <td class="num">{{ r.unit_price !== null && r.unit_price !== undefined ? `¥${money(r.unit_price)}` : '—' }}</td>
+              <td class="num strong" :class="r.amount !== null && Number(r.amount) < 0 ? 'neg' : ''">{{ r.amount !== null && r.amount !== undefined ? `¥${money(r.amount)}` : '—' }}</td>
+              <td class="remark" :title="r.remark || ''">{{ r.remark || '—' }}</td>
+              <td class="op">{{ r.operator_name || '—' }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="flow-pager">
+          <button class="pager-btn" :disabled="recordsPage <= 1" @click="recordsPage--; loadRecords()">‹ 上一页</button>
+          <span class="muted-sm">第 {{ recordsPage }} 页 · 共 {{ recordsTotal }} 条</span>
+          <button class="pager-btn" :disabled="recordsPage * recordsPageSize >= recordsTotal" @click="recordsPage++; loadRecords()">下一页 ›</button>
+        </div>
+      </section>
+    </div>
+
+    <!-- 薪资核算 tab -->
+    <div v-else-if="activeTab === 'salary'">
+      <SalaryPanel />
+    </div>
   </div>
 </template>
 
 <style scoped>
 .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
-.tab { padding: 8px 20px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-3); font-size: 13.5px; cursor: pointer; }
-.tab.active { background: linear-gradient(135deg, #6366f1, #06b6d4); color: #fff; border-color: transparent; font-weight: 600; }
+.tab { display: inline-flex; align-items: center; gap: 7px; padding: 8px 20px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-3); font-size: 13.5px; cursor: pointer; transition: all 0.2s ease; }
+.tab svg { width: 15px; height: 15px; }
+.tab:hover { border-color: #c7d2fe; color: #4f46e5; }
+.tab.active { background: linear-gradient(135deg, #6366f1, #06b6d4); color: #fff; border-color: transparent; font-weight: 600; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35); }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; margin-bottom: 16px; }
 .card-title { font-size: 15px; font-weight: 700; margin-bottom: 12px; }
 .card-title .hint { font-size: 12px; font-weight: 400; color: var(--ink-3); margin-left: 8px; }
@@ -476,4 +736,84 @@ onUnmounted(() => {
 .rank-amt { font-size: 15px; color: var(--brand-strong); white-space: nowrap; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+.ledger-table .pos { color: #0e9f6e; font-weight: 700; }
+.ledger-table .neg { color: #d64545; font-weight: 700; }
+.ledger-table .remark { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; background: var(--surface-alt); color: var(--ink-2); }
+.pill.recharge { background: #e2f5ea; color: #0e9f6e; }
+.pill.consume { background: #e8effe; color: #2f6fed; }
+.pill.adjust { background: #fdf0dd; color: #c2570b; }
+.pill.refund { background: #fde4e4; color: #d64545; }
+.kpi-ico.red { background: #fde4e4; color: #d64545; }
+.kpi-ico.blue { background: #e8effe; color: #2f6fed; }
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 12px 0 4px; }
+.btn.sm { padding: 6px 12px; font-size: 12px; }
+/* ---- 收支流水高级感 ---- */
+.flow-kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 16px; }
+@media (max-width: 900px) { .flow-kpis { grid-template-columns: 1fr; } }
+.flow-kpi { position: relative; overflow: hidden; border-radius: 16px; padding: 18px 20px; background: var(--card, #fff); border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05); }
+.flow-kpi::after { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; border-radius: 4px; }
+.flow-kpi.in::after { background: linear-gradient(180deg, #12b76a, #067647); }
+.flow-kpi.out::after { background: linear-gradient(180deg, #f97066, #b42318); }
+.flow-kpi.indigo::after { background: linear-gradient(180deg, #818cf8, #4f46e5); }
+.flow-kpi.amber::after { background: linear-gradient(180deg, #fbbf24, #b45309); }
+.flow-kpi.green::after { background: linear-gradient(180deg, #34d399, #047857); }
+.flow-kpi.red::after { background: linear-gradient(180deg, #f87171, #b91c1c); }
+.flow-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 1100px) { .flow-4 { grid-template-columns: repeat(2, 1fr); } }
+.flow-ico.warn { background: #fef3c7; color: #b45309; }
+.flow-ico.ok { background: #dcfae6; color: #067647; }
+.chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 4px 0 12px; }
+.chart-head .card-title { margin-bottom: 0; }
+.series-toggles { display: flex; gap: 8px; flex-wrap: wrap; }
+.toggle-pill { padding: 6px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600; cursor: pointer; border: 1px solid transparent; color: #fff; transition: all 0.2s ease; }
+.toggle-pill.indigo { background: linear-gradient(135deg, #818cf8, #6366f1); box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3); }
+.toggle-pill.green { background: linear-gradient(135deg, #34d399, #10b981); box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3); }
+.toggle-pill.amber { background: linear-gradient(135deg, #fbbf24, #f59e0b); box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3); }
+.toggle-pill.red { background: linear-gradient(135deg, #f87171, #ef4444); box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3); }
+.toggle-pill.off { background: var(--surface-alt); color: var(--ink-3); box-shadow: none; border-color: var(--line); }
+.echart.tall { height: 380px; }
+.flow-kpi.net { color: #fff; border: none; background: linear-gradient(135deg, #155eef 0%, #0e9384 130%); box-shadow: 0 10px 24px rgba(21, 94, 239, 0.28); }
+.flow-kpi-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.flow-ico { width: 38px; height: 38px; border-radius: 12px; display: flex; align-items: center; justify-content: center; }
+.flow-ico svg { width: 20px; height: 20px; }
+.flow-ico.in { background: #dcfae6; color: #067647; }
+.flow-ico.out { background: #fee4e2; color: #b42318; }
+.flow-ico.net { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.flow-tag { font-size: 12px; color: var(--ink-3); background: var(--surface-alt); padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+.net .flow-tag { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.flow-amt { font-size: 28px; font-weight: 800; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
+.flow-label { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+.net .flow-label { color: rgba(255, 255, 255, 0.82); }
+.flow-card { overflow: hidden; }
+.flow-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; padding: 18px 20px 4px; }
+.flow-head .hint { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+.flow-legend { display: flex; gap: 8px; flex-wrap: wrap; padding-top: 4px; }
+.flow-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; margin-top: 8px; }
+.flow-table thead th { text-align: left; font-size: 12px; font-weight: 600; color: var(--ink-3); padding: 10px 12px; background: var(--surface-alt); white-space: nowrap; }
+.flow-table thead th:first-child { padding-left: 20px; }
+.flow-table thead th:last-child { padding-right: 20px; }
+.flow-table tbody td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.flow-table tbody td:first-child { padding-left: 20px; }
+.flow-table tbody td:last-child { padding-right: 20px; }
+.flow-table tbody tr { transition: background 0.15s ease; }
+.flow-table tbody tr:hover { background: var(--brand-soft, #f4f7ff); }
+.flow-table tbody tr:last-child td { border-bottom: none; }
+.ft-time { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+.ft-time small { display: block; font-weight: 400; font-size: 11px; color: var(--ink-3); }
+.ft-user { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.ft-avatar { width: 30px; height: 30px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; font-size: 13px; font-weight: 800; color: #fff; background: linear-gradient(135deg, #155eef, #0e9384); }
+.ft-campus { color: var(--ink-2); white-space: nowrap; }
+.delta-chip { display: inline-block; min-width: 64px; text-align: center; padding: 3px 10px; border-radius: 999px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.delta-chip.up { background: #dcfae6; color: #067647; }
+.delta-chip.down { background: #fee4e2; color: #b42318; }
+.flow-table .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.flow-table .num.strong { font-weight: 800; }
+.flow-table .num.neg { color: #d92d20; }
+.flow-table .remark { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.flow-table .op { color: var(--ink-2); white-space: nowrap; }
+.flow-pager { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 14px 0 16px; }
+.pager-btn { padding: 7px 16px; border-radius: 999px; border: 1px solid var(--line); background: var(--card, #fff); font-size: 13px; cursor: pointer; transition: all 0.15s ease; }
+.pager-btn:hover:not(:disabled) { border-color: var(--brand, #155eef); color: var(--brand, #155eef); }
+.pager-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

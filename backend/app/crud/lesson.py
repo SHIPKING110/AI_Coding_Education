@@ -26,6 +26,8 @@ def add_record(
     operator_id: uuid.UUID | None,
     ref_id: uuid.UUID | None = None,
     remark: str | None = None,
+    unit_price=None,
+    amount=None,
     commit: bool = True,
 ) -> LessonRecord:
     """追加流水并同步学员余额（同事务，delta 支持小数）。"""
@@ -36,6 +38,8 @@ def add_record(
         record_type=record_type.value,
         delta=delta_dec,
         balance_after=student.lesson_balance,
+        unit_price=Decimal(str(unit_price)).quantize(Decimal("0.0001")) if unit_price is not None else None,
+        amount=Decimal(str(amount)).quantize(Decimal("0.01")) if amount is not None else None,
         ref_id=ref_id,
         remark=remark,
         operator_id=operator_id,

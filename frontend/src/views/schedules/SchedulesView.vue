@@ -48,9 +48,16 @@ const campuses = ref<string[]>([])
 const loading = ref(false)
 const error = ref('')
 
-// ---------- 校区 / 教师筛选 ----------
+// ---------- 校区 / 教师 / 科目筛选 ----------
 const campusFilter = ref('')
 const teacherFilter = ref('')
+const subjectFilter = ref('')
+
+const subjectOptions = computed(() => {
+  const set = new Set<string>()
+  for (const s of schedules.value) if (s.subject) set.add(s.subject)
+  return [...set].sort()
+})
 
 async function loadTeachers() {
   const pageData = await listTeachersApi({
@@ -94,6 +101,7 @@ watch(weekStart, () => {
 const scheduleByDay = computed(() => {
   const map: Record<string, ScheduleOut[]> = {}
   for (const s of schedules.value) {
+    if (subjectFilter.value && s.subject !== subjectFilter.value) continue
     const key = dayKeyFromIso(s.start_time)
     if (!map[key]) map[key] = []
     map[key].push(s)
@@ -459,8 +467,8 @@ async function submit() {
 }
 
 async function submitSingle() {
-  if (!single.value.class_id || !single.value.teacher_id) {
-    formError.value = '请选择班级和教师'
+  if (!single.value.teacher_id) {
+    formError.value = '请选择教师（班级可空，不选即教师空余时段体验课）'
     return
   }
   const start = new Date(`${single.value.date}T${single.value.time}:00`)
@@ -468,14 +476,14 @@ async function submitSingle() {
   submitting.value = true
   try {
     const result = await createSchedule({
-      class_id: single.value.class_id,
+      class_id: single.value.class_id || null,
       teacher_id: single.value.teacher_id,
       start_time: toLocalNaiveIso(start),
       end_time: toLocalNaiveIso(end),
     })
     if (!result.created && result.conflicts.length > 0) {
       conflicts.value = result.conflicts
-      conflictTitle.value = `教师时间冲突（${teachers.value.find((t) => t.id === single.value.teacher_id)?.name || ''}）`
+      conflictTitle.value = `时间冲突（${teachers.value.find((t) => t.id === single.value.teacher_id)?.name || ''}，同教师或同班同时段）`
       showConflict.value = true
       return
     }
@@ -651,6 +659,10 @@ onMounted(async () => {
             {{ t.name }}{{ t.campus ? `（${t.campus}）` : '' }}
           </option>
         </select>
+        <select v-model="subjectFilter" class="filter-select" title="按科目筛选课表">
+          <option value="">全部科目</option>
+          <option v-for="s in subjectOptions" :key="s" :value="s">{{ s }}</option>
+        </select>
       </div>
 
       <button class="btn ghost" @click="load">
@@ -708,9 +720,10 @@ onMounted(async () => {
           >
             <template v-if="card.kind === 'single'">
               <div class="sched-time">{{ fmtRange(card.s) }}</div>
-              <div class="sched-class">{{ card.s.class_name }}</div>
+              <div class="sched-class">{{ card.s.class_name || '体验课（无班级）' }}</div>
               <div class="sched-meta">
-                <span class="pill">{{ card.s.subject }}</span>
+                <span v-if="card.s.subject" class="pill">{{ card.s.subject }}</span>
+                <span v-if="card.s.is_trial" class="trial-chip">体验课</span>
                 <span class="sched-teacher">{{ card.s.teacher_name || '未分配' }}</span>
               </div>
               <div class="sched-status" :class="card.s.status">{{ statusLabel(card.s.status) }}</div>
@@ -762,9 +775,10 @@ onMounted(async () => {
                   @click.stop="goDetail(child.s.id)"
                 >
                   <div class="sched-time">{{ fmtRange(child.s) }}</div>
-                  <div class="sched-class">{{ child.s.class_name }}</div>
+                  <div class="sched-class">{{ child.s.class_name || '体验课（无班级）' }}</div>
                   <div class="sched-meta">
-                    <span class="pill">{{ child.s.subject }}</span>
+                    <span v-if="child.s.subject" class="pill">{{ child.s.subject }}</span>
+                    <span v-if="child.s.is_trial" class="trial-chip">体验课</span>
                     <span class="sched-teacher">{{ child.s.teacher_name || '未分配' }}</span>
                   </div>
                   <div class="sched-status" :class="child.s.status">{{ statusLabel(child.s.status) }}</div>
@@ -1298,6 +1312,15 @@ h1 {
   color: var(--ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.trial-chip {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  color: #92400e;
+  flex-shrink: 0;
 }
 .sched-status {
   position: absolute;

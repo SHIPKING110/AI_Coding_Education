@@ -20,6 +20,7 @@ export interface SubjectOut {
 
 export interface FinanceSettingOut {
   commission_default: string
+  overdraft_max: string
   note: string | null
   formula?: {
     revenue: string
@@ -96,6 +97,7 @@ export async function getFinanceSetting(): Promise<FinanceSettingOut> {
 
 export async function updateFinanceSetting(payload: {
   commission_default?: string
+  overdraft_max?: string
   note?: string | null
 }): Promise<FinanceSettingOut> {
   const { data } = await http.put<FinanceSettingOut>('/business/finance-setting', payload)

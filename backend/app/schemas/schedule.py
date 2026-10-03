@@ -5,11 +5,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ScheduleCreate(BaseModel):
-    class_id: uuid.UUID
+    class_id: uuid.UUID | None = Field(default=None, description="班级id；体验课排教师空余时段时可空")
     teacher_id: uuid.UUID
     start_time: datetime
     end_time: datetime
     force: bool = Field(default=False, description="为 true 时忽略冲突强制创建")
+    is_trial: bool = Field(default=False, description="体验课：空时段专排体验课时打标")
 
 
 class RecurringSlot(BaseModel):
@@ -62,7 +63,7 @@ class ScheduleCreateResponse(BaseModel):
 
 class ScheduleOut(BaseModel):
     id: uuid.UUID
-    class_id: uuid.UUID
+    class_id: uuid.UUID | None = None
     class_name: str | None = None
     subject: str | None = None
     teacher_id: uuid.UUID
@@ -70,6 +71,8 @@ class ScheduleOut(BaseModel):
     start_time: datetime
     end_time: datetime
     status: str
+    is_trial: bool = False
+    trial_status: str = "none"
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -92,6 +95,7 @@ class AttendanceOut(BaseModel):
     lesson_balance: float | None = None
     low_balance: bool = False
     status: str
+    is_trial: bool = False
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

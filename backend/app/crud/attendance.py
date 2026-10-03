@@ -46,7 +46,19 @@ def class_student_ids(db: Session, class_id: uuid.UUID) -> list[uuid.UUID]:
 
 
 def all_students_for_schedule(db: Session, schedule: Schedule) -> list[Student]:
-    sids = class_student_ids(db, schedule.class_id)
-    if not sids:
+    sids = class_student_ids(db, schedule.class_id) if schedule.class_id else []
+    # 体验学员：通过邀约关联到本节排课（不占班级名额，考勤时单独列出）
+    from app.models.trial import Invitation
+
+    trial_ids = list(
+        db.scalars(
+            select(Invitation.trial_student_id).where(
+                Invitation.trial_schedule_id == schedule.id,
+                Invitation.trial_student_id.isnot(None),
+            )
+        ).all()
+    )
+    all_ids = list(dict.fromkeys([*(sids or []), *trial_ids]))
+    if not all_ids:
         return []
-    return list(db.scalars(select(Student).where(Student.id.in_(sids))).all())
+    return list(db.scalars(select(Student).where(Student.id.in_(all_ids))).all())

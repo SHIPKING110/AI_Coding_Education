@@ -63,6 +63,10 @@ export interface LessonStats {
   revenue: string
   commission: string
   profit: string
+  overdraft_lessons: string
+  overdraft_revenue: string
+  receivable: string
+  debtors: number
   sessions: number
   daily: { label: string; lessons: string }[]
 }

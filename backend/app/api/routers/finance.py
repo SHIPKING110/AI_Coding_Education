@@ -53,6 +53,86 @@ def _zero() -> dict:
     return {"revenue": Decimal("0"), "commission": Decimal("0"), "refunds": Decimal("0")}
 
 
+@router.get("/records")
+def finance_records(
+    keyword: str | None = Query(default=None, description="学员姓名/电话"),
+    campus: str | None = Query(default=None, description="按校区筛选（学员校区）"),
+    record_type: str | None = Query(default=None, description="recharge/consume/adjust/refund"),
+    date_from: str | None = Query(default=None, description="YYYY-MM-DD"),
+    date_to: str | None = Query(default=None, description="YYYY-MM-DD"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_teacher_permission("finance_view")),
+) -> dict:
+    """总流水：全学员课时流水 + 金额汇总（调课时带单价的计入金额）。"""
+    from app.models.enrollment import LessonRecord as _LR
+    from app.models.enrollment import Student as _ST
+
+    stmt = select(_LR).join(_ST, _ST.id == _LR.student_id)
+    count_stmt = select(func.count(_LR.id)).join(_ST, _ST.id == _LR.student_id)
+    if keyword:
+        kw = f"%{keyword.strip()}%"
+        stmt = stmt.where((_ST.name.like(kw)) | (_ST.phone.like(kw)))
+        count_stmt = count_stmt.where((_ST.name.like(kw)) | (_ST.phone.like(kw)))
+    if campus:
+        stmt = stmt.where(_ST.campus == campus)
+        count_stmt = count_stmt.where(_ST.campus == campus)
+    if record_type:
+        stmt = stmt.where(_LR.record_type == record_type)
+        count_stmt = count_stmt.where(_LR.record_type == record_type)
+    start, end = _range(date_from, date_to) if (date_from or date_to) else (None, None)
+    if start is not None:
+        stmt = stmt.where(_LR.created_at >= start)
+        count_stmt = count_stmt.where(_LR.created_at >= start)
+    if end is not None:
+        stmt = stmt.where(_LR.created_at < end)
+        count_stmt = count_stmt.where(_LR.created_at < end)
+    total = db.scalar(count_stmt) or 0
+    records = list(
+        db.scalars(stmt.order_by(_LR.created_at.desc()).limit(limit).offset(offset)).unique().all()
+    )
+    items = []
+    sum_in = Decimal("0")
+    sum_out = Decimal("0")
+    for rec in records:
+        stu = rec.student
+        op_name = rec.operator.name if rec.operator else None
+        items.append(
+            {
+                "id": str(rec.id),
+                "student_id": str(rec.student_id),
+                "student_name": stu.name if stu else "—",
+                "campus": stu.campus if stu else None,
+                "record_type": rec.record_type,
+                "delta": str(rec.delta),
+                "balance_after": str(rec.balance_after),
+                "unit_price": str(rec.unit_price) if rec.unit_price is not None else None,
+                "amount": str(rec.amount) if rec.amount is not None else None,
+                "remark": rec.remark,
+                "operator_name": op_name,
+                "created_at": rec.created_at.isoformat() if rec.created_at else None,
+            }
+        )
+    sum_rows = list(db.execute(stmt.with_only_columns(_LR.amount, _LR.delta)).all())
+    for amt, delta in sum_rows:
+        if amt is None:
+            continue
+        if Decimal(str(delta)) >= 0:
+            sum_in += Decimal(str(amt))
+        else:
+            sum_out += Decimal(str(amt))
+    return {
+        "items": items,
+        "total": total,
+        "summary": {
+            "amount_in": str(sum_in.quantize(Decimal("0.01"))),
+            "amount_out": str(sum_out.quantize(Decimal("0.01"))),
+            "amount_net": str((sum_in + sum_out).quantize(Decimal("0.01"))),
+        },
+    }
+
+
 @router.get("/overview")
 def finance_overview(
     granularity: str = Query(default="day", description="day|month|quarter|year"),
@@ -350,8 +430,25 @@ def finance_lesson_stats(
     consumed = sum((Decimal(str(r.lessons)) for r in ledgers), Decimal("0"))
     revenue = sum((Decimal(str(r.amount)) for r in ledgers), Decimal("0"))
     commission = sum((Decimal(str(r.commission)) for r in ledgers), Decimal("0"))
+    overdraft_revenue = sum(
+        (Decimal(str(r.amount)) for r in ledgers if r.is_overdraft), Decimal("0")
+    )
+    overdraft_lessons = sum(
+        (Decimal(str(r.lessons)) for r in ledgers if r.is_overdraft), Decimal("0")
+    )
     profit = revenue - commission
     rate = float((consumed / planned * 100).quantize(Decimal("0.1"))) if planned else 0
+    # 应收欠款（当前时点）：所有负余额学员的欠课时 × 各自最近购包价
+    from app.crud import order as _order_crud
+    from app.models.enrollment import Student as _Stu
+
+    receivable = Decimal("0")
+    debtors = list(
+        db.scalars(select(_Stu).where(_Stu.lesson_balance < 0)).all()
+    )
+    for stu in debtors:
+        price, _, _ = _order_crud.last_package_price(db, student=stu)
+        receivable += (-Decimal(str(stu.lesson_balance))) * price
     # 按天消耗趋势
     by_day: dict[str, Decimal] = {}
     for r in ledgers:
@@ -364,6 +461,10 @@ def finance_lesson_stats(
         "revenue": str(revenue.quantize(Decimal("0.01"))),
         "commission": str(commission.quantize(Decimal("0.01"))),
         "profit": str(profit.quantize(Decimal("0.01"))),
+        "overdraft_lessons": str(overdraft_lessons),
+        "overdraft_revenue": str(overdraft_revenue.quantize(Decimal("0.01"))),
+        "receivable": str(receivable.quantize(Decimal("0.01"))),
+        "debtors": len(debtors),
         "sessions": len(schedules),
         "daily": [{"label": k, "lessons": str(v)} for k, v in sorted(by_day.items())],
     }

@@ -28,6 +28,9 @@ class StudentCreate(BaseModel):
     # 新生入学选购课时包：传 package_id 则按课时包充值（生成已确认订单+充值流水，
     # 使排课扣课后财务账本能按 FIFO 单价计入创收）；此时忽略 lesson_balance
     package_id: uuid.UUID | None = Field(default=None, description="新生选购的课时包id")
+    # 生源标记（报名时可标口碑+介绍人，转介绍提成依据）
+    source: str | None = Field(default=None, description="normal/referral")
+    referrer: str | None = Field(default=None, max_length=64, description="介绍人")
     class_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
@@ -63,6 +66,13 @@ class StudentOut(BaseModel):
     parent_user_id: uuid.UUID | None
     student_user_id: uuid.UUID | None = None
     lesson_balance: float
+    # 欠费估算（余额为负时：欠课时数与按最近购包价估算的欠款金额；路由层填充）
+    arrears_lessons: float = 0
+    arrears_amount: str | None = None
+    # 体验标记/生源（体验课链路）
+    trial_status: str = "none"
+    source: str = "normal"
+    referrer: str | None = None
     follow_up_status: str = "pending"
     follow_up_at: datetime | None = None
     follow_up_note: str | None = None
@@ -221,6 +231,8 @@ class LessonRecordIn(BaseModel):
 
     delta: float = Field(description="正数=入账，负数=扣减，不可为 0")
     remark: str | None = None
+    # 单价（元/课时）：调增补课时必填以计入财务；调减冲销可填（负金额冲账），不填则只调数量
+    unit_price: float | None = Field(default=None, ge=0, description="单价元/课时")
 
 
 class LessonRecordOut(BaseModel):
@@ -229,6 +241,8 @@ class LessonRecordOut(BaseModel):
     record_type: str
     delta: float
     balance_after: float
+    unit_price: float | None = None
+    amount: float | None = None
     ref_id: uuid.UUID | None
     remark: str | None
     operator_name: str | None = None

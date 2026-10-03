@@ -33,9 +33,17 @@ router = APIRouter(prefix="/students", tags=["students"])
 MANAGE_ROLES = (Role.ADMIN, Role.STAFF)
 
 
-def _to_out(student) -> StudentOut:
+def _to_out(student, db=None) -> StudentOut:
     out = StudentOut.model_validate(student)
     out.low_balance = student.lesson_balance <= 10
+    if student.lesson_balance < 0 and db is not None:
+        from decimal import Decimal as _Dec
+
+        price, _, _ = order_crud.last_package_price(db, student=student)
+        out.arrears_lessons = float(-student.lesson_balance)
+        out.arrears_amount = str(
+            (_Dec(str(-student.lesson_balance)) * price).quantize(_Dec("0.01"))
+        )
     out.classes = [
         ClassBrief(
             id=c.id,
@@ -115,7 +123,7 @@ def list_students(
     )
 
     return PageOut[StudentOut](
-        items=[_to_out(s) for s in students], total=total, limit=limit, offset=offset
+        items=[_to_out(s, db) for s in students], total=total, limit=limit, offset=offset
     )
 
 
@@ -142,6 +150,8 @@ def create_student(
         parent_user_id=payload.parent_user_id,
         student_user_id=payload.student_user_id,
         class_ids=payload.class_ids,
+        source=payload.source,
+        referrer=payload.referrer,
     )
     if payload.package_id is not None:
         try:
@@ -154,7 +164,42 @@ def create_student(
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         db.refresh(student)
-    return _to_out(student)
+    return _to_out(student, db)
+
+
+@router.get("/{student_id}/last-price")
+def get_last_package_price(
+    student_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_teacher_permission("student_adjust")),
+) -> dict:
+    """该学员最近一次已确认购包的单价（元/课时），供调课时默认带出，可手工改。"""
+    from decimal import Decimal as _Dec
+
+    from sqlalchemy import select as _select
+
+    from app.models.enrollment import LessonPackage as _PKG
+    from app.models.enrollment import Order as _Order
+    from app.models.enrollment import OrderStatus as _OS
+
+    student = student_crud.get(db, student_id)
+    if student is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    order = db.scalar(
+        _select(_Order)
+        .where(_Order.student_id == student.id, _Order.status == _OS.CONFIRMED.value)
+        .order_by(_Order.confirmed_at.desc().nullslast(), _Order.created_at.desc())
+    )
+    if order is None:
+        return {"price": None, "package_name": None}
+    package = db.get(_PKG, order.package_id) if order.package_id else None
+    lessons = _Dec(str(package.total_lessons)) if package and package.total_lessons else _Dec("0")
+    price = (_Dec(str(order.amount)) / lessons).quantize(_Dec("0.01")) if lessons > 0 else _Dec("0")
+    return {
+        "price": str(price),
+        "package_name": package.name if package else None,
+        "order_id": str(order.id),
+    }
 
 
 @router.get("/{student_id}", response_model=StudentOut)
@@ -166,7 +211,7 @@ def get_student(
     student = student_crud.get(db, student_id)
     if student is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
-    return _to_out(student)
+    return _to_out(student, db)
 
 
 @router.patch("/{student_id}", response_model=StudentOut)
@@ -189,7 +234,7 @@ def update_student(
         student_user_id=payload.student_user_id,
         class_ids=payload.class_ids,
     )
-    return _to_out(student)
+    return _to_out(student, db)
 
 
 @router.patch("/{student_id}/classes", response_model=StudentOut)
@@ -220,7 +265,7 @@ def update_student_classes(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
-    return _to_out(student)
+    return _to_out(student, db)
 
 
 @router.patch("/{student_id}/status", response_model=StudentOut)
@@ -246,7 +291,7 @@ def update_student_status(
     )
     if student is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
-    return _to_out(student)
+    return _to_out(student, db)
 
 
 @router.patch("/{student_id}/follow-up", response_model=StudentOut)
@@ -273,7 +318,7 @@ def update_student_follow_up(
     )
     if student is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
-    return _to_out(student)
+    return _to_out(student, db)
 
 
 @router.post("/{student_id}/renew", response_model=StudentOut)
@@ -312,7 +357,7 @@ def renew_student(
         note=payload.note,
         operator_id=operator.id,
     )
-    return _to_out(student)
+    return _to_out(student, db)
 
 
 @router.get("/{student_id}/refund-preview")
@@ -362,7 +407,7 @@ def refund_student(
         ],
     )
     return {
-        "student": _to_out(student),
+        "student": _to_out(student, db),
         "orders": [o.id for o in orders],
         "records": [r.id for r in records],
         "detail": detail,
