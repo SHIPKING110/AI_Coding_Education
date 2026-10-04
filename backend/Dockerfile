@@ -16,6 +16,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY scripts ./scripts
 
 # 上传目录与本地数据目录（compose 中挂载命名卷持久化）
 RUN mkdir -p uploads data
