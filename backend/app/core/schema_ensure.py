@@ -26,21 +26,8 @@ def _col_type(engine: Engine, table: str, col: str) -> str:
 def ensure_business_schema(engine: Engine) -> None:
     from app.core.database import Base
 
-    # 新表（已存在的跳过）
-    Base.metadata.create_all(
-        engine,
-        tables=[
-            Base.metadata.tables["campuses"],
-            Base.metadata.tables["subjects"],
-            Base.metadata.tables["revenue_ledger"],
-            Base.metadata.tables["finance_settings"],
-            Base.metadata.tables["teacher_levels"],
-            Base.metadata.tables["commission_rules"],
-            Base.metadata.tables["payroll_entries"],
-            Base.metadata.tables["invitations"],
-        ],
-        checkfirst=True,
-    )
+    # 全量建表（已存在的跳过；按外键拓扑排序，空库也不会因建表顺序报错）
+    Base.metadata.create_all(engine, checkfirst=True)
 
     stmts: list[str] = []
 
