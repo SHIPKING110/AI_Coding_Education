@@ -21,21 +21,27 @@ cp .env.prod.example .env.prod
 docker compose --env-file .env.prod up -d --build
 
 # 4) 创建首个管理员（幂等，可重复执行）
-docker compose exec backend python scripts/seed_admin.py
+docker compose exec backend .venv/bin/python scripts/seed_admin.py
 
 # 5) 打开 http://服务器IP:8080（或 WEB_PORT）登录
 ```
+
+
 
 ## 3. 表结构同步
 
 - 后端启动时自动执行 `create_all` + 幂等 `addcol`，**无需手动迁移**；发版后 `docker compose up -d --build backend` 重启即同步。
 - 旧 alembic 链仅保留历史参考，不再参与部署流程。
 
+
+
 ## 4. 已知生产约束（重要）
 
 - **单 worker**：AI 出题/评估任务状态在进程内存，多 worker 会导致建任务与轮询落到不同进程。需要扩容时，先把任务状态外置（DB/Redis）再加 worker。
 - **AI 重型依赖不在镜像内**：langchain/chromadb/sentence-transformers（torch，体积大）未进生产镜像，相关 AI 增强走兜底；PPT/PDF/DOCX 导出依赖已包含，正常可用。如需完整 AI 能力，服务器可科学上网后在镜像构建时加 --extra ai。
 - **微信推送**：未接入（需商户资质），通知走应用内站内信。
+
+
 
 ## 5. 日常运维
 
@@ -53,6 +59,8 @@ cat backup.sql | docker compose exec -T db psql -U app child_code
 docker run --rm -v child_code_uploads:/data -v $(pwd):/bak alpine tar czf /bak/uploads-$(date +%F).tgz /data
 ```
 
+
+
 ## 6. 生产 checklist（上线前逐项打勾）
 
 - [ ] `SECRET_KEY` / `POSTGRES_PASSWORD` / `SEED_ADMIN_PASSWORD` 均为随机强密码
@@ -63,9 +71,12 @@ docker run --rm -v child_code_uploads:/data -v $(pwd):/bak alpine tar czf /bak/u
 - [ ] 首个 admin 已创建；`SEED_ADMIN_*` 可从 `.env.prod` 删除
 - [ ] 全量回归通过：`pytest` / `ruff` / `npm run build`
 
+
+
 ## 7. 回滚
 
 ```bash
 git checkout <上一个tag/commit> && docker compose up -d --build
 # 数据回滚用第 4 节的备份恢复（注意：新代码产生的数据可能与旧代码不兼容，先在测试环境验证）
 ```
+
