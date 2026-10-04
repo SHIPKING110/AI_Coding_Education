@@ -2,7 +2,13 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_NO_CACHE=1
+    UV_NO_CACHE=1 \
+    TZ=Asia/Shanghai
+
+# tzdata：让容器内 datetime.now() 与 DB 会话时区一致（业务时间为北京时间）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv/app
 

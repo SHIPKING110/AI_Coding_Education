@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     # 数据库
     DATABASE_URL: str = "postgresql+psycopg://postgres:postgres@localhost:5432/child_code"
+    # 业务时区：前端提交无时区本地时间，DB 会话按此时区解释（容器默认 UTC 会导致 +8 偏移）
+    BUSINESS_TIMEZONE: str = "Asia/Shanghai"
     # 生产通过 CORS_ORIGINS 追加前端域名（逗号分隔）；同域部署可留空
     CORS_ORIGINS: str = ""
 

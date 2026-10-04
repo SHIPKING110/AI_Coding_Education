@@ -190,9 +190,10 @@ async function onPickFiles(e: Event) {
 }
 
 function apiUrl(u: string): string {
+  if (!u) return ''
   if (u.startsWith('http')) return u
-  const base = window.location.origin.replace(':5173', ':8000')
-  return `${base}${u}`
+  // 上传文件由后端 /uploads 静态服务；同域下相对路径即可（dev 由 vite 代理，生产由 nginx 反代）
+  return u.startsWith('/') ? u : `/${u}`
 }
 
 async function submitCreate() {
