@@ -4,7 +4,7 @@
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -333,7 +333,14 @@ def test_teacher_listing(client, admin_token):
 
 def test_attendance_insufficient_balance(client, admin_token):
     class_id = _make_class(client, admin_token, "余额不足班")
-    # 课时 1，不足以扣 2
+    # 课时 1，不足以扣 2；先把透支上限设为 0，还原“不足即拦”的断言口径
+    # （默认 overdraft_max=10，余额 1 扣 2 后 -1 在透支额度内是允许的）
+    put = client.put(
+        "/api/business/finance-setting",
+        json={"overdraft_max": 0},
+        headers=admin_token,
+    )
+    assert put.status_code == 200, put.text
     sid = _make_student(client, admin_token, "余额不足学员", balance=1, class_ids=[class_id])
 
     start = datetime(2026, 8, 20, 10, 0)
@@ -379,9 +386,10 @@ def test_attendance_blocked_before_start(client, admin_token):
     class_id = _make_class(client, admin_token, "未开课班")
     sid = _make_student(client, admin_token, "未来学员", balance=10, class_ids=[class_id])
 
-    # 未来的排课
-    start = datetime(2026, 9, 30, 9, 0)
-    end = datetime(2026, 9, 30, 10, 30)
+    # 未来的排课（相对当前时间 +2 天，避免硬编码日期过期）
+    _future = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=2)
+    start = _future
+    end = _future + timedelta(hours=1, minutes=30)
     tid = _uid_from_token(client, admin_token)
     r = client.post(
         "/api/schedules",

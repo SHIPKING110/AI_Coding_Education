@@ -47,7 +47,8 @@ def adjust_lesson_balance(
     if delta < 0:
         from app.crud import business as business_crud
 
-        cap = Decimal(str(business_crud.get_finance_setting(db).overdraft_max or 10))
+        _cfg_max = business_crud.get_finance_setting(db).overdraft_max
+        cap = Decimal(str(_cfg_max)) if _cfg_max is not None else Decimal("10")
         if Decimal(str(student.lesson_balance)) + delta < -cap:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

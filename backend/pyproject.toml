@@ -15,19 +15,21 @@ dependencies = [
     "python-multipart>=0.0.32",
     "reportlab>=5.0.1",
     "pypinyin>=0.55.0",
+    # 文档导出（PPT/PDF/DOCX，启动链直接引用，属于核心运行时）
+    "python-pptx>=1.0",
+    "pypdf>=4.0",
+    "python-docx>=1.1",
 ]
 
 [project.optional-dependencies]
 # AI 能力（M3+ 使用）：模型编排 / 向量检索 / PPT 生成
+# AI 能力（模型编排/向量检索，重型，需科学上网，按需 uv sync --extra ai）
 ai = [
     "langchain>=0.3",
     "langgraph>=0.2",
     "langchain-openai>=0.2",
     "chromadb>=0.5",
-    "python-pptx>=1.0",
     "sentence-transformers>=3.0",
-    "pypdf>=4.0",
-    "python-docx>=1.1",
 ]
 
 [dependency-groups]

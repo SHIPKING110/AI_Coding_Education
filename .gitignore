@@ -27,3 +27,6 @@ Thumbs.db
 # 本地大模型权重与向量库（体积大，按需本地下载）
 backend/models/
 backend/data/
+
+# 生产环境配置（含密码，切勿提交）
+.env.prod
