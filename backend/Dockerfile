@@ -2,8 +2,13 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_NO_CACHE=1 \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    UV_LINK_MODE=copy
+
+# PyPI 镜像：国内网络直连官方源易超时，默认走清华镜像；
+# 如需官方源，构建时 --build-arg UV_INDEX_URL=https://pypi.org/simple 覆盖
+ARG UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV UV_DEFAULT_INDEX=$UV_INDEX_URL
 
 # tzdata：让容器内 datetime.now() 与 DB 会话时区一致（业务时间为北京时间）
 RUN apt-get update \
@@ -16,8 +21,10 @@ WORKDIR /srv/app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # 依赖安装层：仅当 pyproject/uv.lock 变化时重建（uv.lock 纳入版本库保证可复现）
+# cache 挂载复用已下载的 wheel，重试构建不用从头下载
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
 COPY alembic ./alembic
