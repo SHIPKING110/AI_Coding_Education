@@ -35,6 +35,15 @@ def is_llm_configured() -> bool:
     return bool((get_settings().LLM_API_KEY or "").strip())
 
 
+def _require_any_llm(fallback_message: str) -> None:
+    """上下文感知门禁：当前请求有教师个人配置则放行，否则看全局 key。
+    两者都没有时抛中文引导（前端弹 toast 指引去 设置→模型配置）。"""
+    if _active_resolved() is not None:
+        return
+    if not is_llm_configured():
+        raise LLMConfigError(fallback_message)
+
+
 _client_cache: dict = {}
 
 
@@ -169,8 +178,7 @@ def stream_text(system: str, prompt: str):
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI")
     model = _chat_model()
     for chunk in model.stream([SystemMessage(content=system), HumanMessage(content=prompt)]):
         piece = getattr(chunk, "content", "") or ""
@@ -262,8 +270,7 @@ def generate_feedback_evaluation(
     已有 evaluation 时在其基础上润色完善；没有则按模板直接生成。
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 草稿")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 草稿")
 
     values = {
         "student_name": student_name,
@@ -296,8 +303,7 @@ def generate_report_summary(
     基于当日/本周素材（排课/考勤/反馈摘要）生成，人工编辑后保存。
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 草稿")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 草稿")
 
     if report_type == "daily":
         schema_hint = (
@@ -343,8 +349,7 @@ def generate_period_summary(
     素材：季度=周期统计指标 + 已发布周报摘要；年度=已选季度总结聚合（from_quarters）
     或回退的周报口径。人工编辑后保存、生成 PPT。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 总结")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 总结")
 
     label = "季度" if report_type == "quarterly" else "年度"
     schema_hint = (
@@ -447,8 +452,7 @@ def generate_evaluation(
     素材 = 周期统计 + 已发布课后反馈明细；subjects.level 为 1-5 整数。
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 评估")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 评估")
 
     instruction = (
         f"你是少儿编程培训机构的资深教师，正在为学员 {student_name} 撰写家长会评估表"
@@ -480,8 +484,7 @@ def refine_evaluation(
     instruction: str,
 ) -> dict[str, Any]:
     """对话式优化评估（FR-EV-03）：基于现有评估 + 教师修改要求重写整份评估。"""
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 优化")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 优化")
 
     prompt = (
         f"你是少儿编程培训机构的资深教师。下面是学员 {student_name} 的家长会评估表，"
@@ -550,8 +553,7 @@ def generate_class_meeting(
     能力培养、班级亮点（可点名）、共性问题、下阶段教学安排与家庭配合建议。
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 生成家长会文案")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 生成家长会文案")
 
     instruction = (
         f"你是少儿编程培训机构的资深教师兼班主任，正在准备「{class_name}」的家长会 PPT"
@@ -581,8 +583,7 @@ def generate_ppt_titles(
     material: str,
 ) -> list[str]:
     """为班级家长会拟 4 个标题（Agent Step 2，异步任务内使用）。"""
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 生成标题")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 生成标题")
     return generate_ppt_titles_sync(class_name=class_name, material=material, style="")
 
 
@@ -673,8 +674,7 @@ def refine_ppt_content(
     instruction: str,
 ) -> dict[str, Any]:
     """对话式微调班级家长会文案（Agent 生成后二次编辑）。"""
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 微调")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 微调")
     prompt = (
         "你是家长会PPT文案编辑。请基于当前文案按用户指令修改，未提及字段保持原意。\n"
         f"当前文案JSON：{json.dumps(current, ensure_ascii=False)}\n"
@@ -864,8 +864,7 @@ def generate_questions(
     返回题目列表（含答案/解析），由调用方回填模板窗口供人工编辑；
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 出题")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 出题")
 
     if mode == "similar":
         if not source_question:
@@ -927,8 +926,7 @@ def refine_question(
     instruction: str,
 ) -> dict[str, Any]:
     """对话优化单题（FR-AI-05）：基于原题 + 教师修改要求重新生成一题。"""
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 优化")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 优化")
 
     prompt = (
         f"你是少儿编程培训机构的资深出题老师。下面是作业中的一道题，请根据教师的修改要求"

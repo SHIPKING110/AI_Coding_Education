@@ -172,3 +172,32 @@ def test_context_switches_client():
         client = llm_svc._chat_model()
         assert getattr(client, "model_name", "") == "deepseek-chat"
     assert ctx.get_current() is None
+
+
+def test_personal_config_drives_generate_without_global_key(monkeypatch):
+    """回归：个人配置压入上下文后，generate_* 不再报未配置（无需全局 key）。"""
+    from app.services import llm as llm_svc
+    from app.services import llm_context as ctx
+
+    class FakeResp:
+        content = '[{"type": "single_choice", "stem": "1+1=?", "options": ["1", "2"], "answer": 1}]'
+
+    class FakeModel:
+        def invoke(self, msgs):
+            return FakeResp()
+
+    monkeypatch.setattr(llm_svc, "_build_chat", lambda *a, **k: FakeModel())
+    resolved = crud.ResolvedLLM(
+        base_url="https://api.deepseek.com/v1",
+        api_key="sk-x",
+        model="deepseek-chat",
+        embed_model=None,
+        config_id=None,
+        config_name="t",
+    )
+    with ctx.use_llm(resolved):
+        out = llm_svc.generate_questions(
+            mode="similar", count=1, difficulty=3,
+            source_question="x", source_answer=None, hint=None, types=None,
+        )
+    assert isinstance(out, list) and len(out) == 1
