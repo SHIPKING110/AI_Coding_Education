@@ -328,10 +328,10 @@ onMounted(loadAll)
         <button class="tab" :class="{ active: activeTab === 'personalize' }" @click="activeTab = 'personalize'">
           个性化设置
         </button>
-        <button class="tab" :class="{ active: activeTab === 'business' }" @click="activeTab = 'business'">
         <button class="tab" :class="{ active: activeTab === 'llm' }" @click="activeTab = 'llm'">
           模型配置
         </button>
+        <button class="tab" :class="{ active: activeTab === 'business' }" @click="activeTab = 'business'">
           业务功能设置
         </button>
       </div>
