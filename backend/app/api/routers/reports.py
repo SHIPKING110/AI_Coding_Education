@@ -554,11 +554,8 @@ def ppt_chat_stream(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="仅季度/年度总结可使用 PPT 定制"
         )
-    if not llm.is_llm_configured():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="未配置 LLM_API_KEY，无法使用 AI 定制 PPT",
-        )
+    from app.services import llm_context as _llm_ctx
+    ppt_resolved = _llm_ctx.require_llm(db, user_id=user.id, module="report")
     stage = payload.stage
     message = payload.message or ""
     outline = list(payload.outline or [])
@@ -572,20 +569,21 @@ def ppt_chat_stream(
 
     def event_stream():
         try:
-            yield _frame({"phase": {"key": "read", "label": "读取报告数据与统计"}})
-            material = ppt_chat.report_material(db, rep)
-            yield _frame({"phase": {"key": "analyze", "label": "分析统计数据"}})
-            prompt = ppt_chat.build_prompt(
-                stage=stage, material=material, user_message=message,
-                outline=outline, sections=sections,
-            )
-            yield _frame({"phase": {"key": "model", "label": f"AI 模型生成{stage_label}中"}})
-            started = False
-            for chunk in llm.stream_text(ppt_chat.SYSTEM_PROMPT, prompt):
-                if not started:
-                    started = True
-                    yield _frame({"phase": {"key": "stream", "label": "接收并整理结果"}})
-                yield _frame({"delta": chunk})
+            with _llm_ctx.use_llm(ppt_resolved):
+                yield _frame({"phase": {"key": "read", "label": "读取报告数据与统计"}})
+                material = ppt_chat.report_material(db, rep)
+                yield _frame({"phase": {"key": "analyze", "label": "分析统计数据"}})
+                prompt = ppt_chat.build_prompt(
+                    stage=stage, material=material, user_message=message,
+                    outline=outline, sections=sections,
+                )
+                yield _frame({"phase": {"key": "model", "label": f"AI 模型生成{stage_label}中"}})
+                started = False
+                for chunk in llm.stream_text(ppt_chat.SYSTEM_PROMPT, prompt):
+                    if not started:
+                        started = True
+                        yield _frame({"phase": {"key": "stream", "label": "接收并整理结果"}})
+                    yield _frame({"delta": chunk})
         except Exception as e:  # noqa: BLE001 —— 统一转可读错误
             yield _frame({"error": llm.friendly_llm_error(e)})
             return
@@ -726,10 +724,15 @@ def _generate_ai_draft_blocking(
     if not is_admin_staff and rep.teacher_id != teacher_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作该报告")
 
-    if not llm.is_llm_configured():
+    from app.services import llm_context as _llm_ctx
+
+    _draft_resolved = _llm_ctx.get_current()
+    if _draft_resolved is None:
+        _draft_resolved = _llm_ctx.optional_resolved(db_or_session, teacher_id, "report")
+    if _draft_resolved is None:
         return {
             "title": rep.title,
-            "content": {"note": "未配置 LLM_API_KEY，AI 草稿暂不可用，请手动填写"},
+            "content": {"note": "δ���� LLM_API_KEY��AI �ݸ��ݲ����ã����ֶ���д"},
             "model": None,
         }
 
@@ -740,32 +743,33 @@ def _generate_ai_draft_blocking(
             extra_note=extra_note, source_quarter_ids=source_quarter_ids or None
         ),
     )
-    try:
-        if rep.type in (ReportType.QUARTERLY.value, ReportType.YEARLY.value):
-            draft = llm.generate_period_summary(
-                report_type=rep.type,
-                material=material,
-                extra_note=extra_note,
-                from_quarters=rep.type == ReportType.YEARLY.value and "季度总结" in material,
+    with _llm_ctx.use_llm(_draft_resolved):
+        try:
+            if rep.type in (ReportType.QUARTERLY.value, ReportType.YEARLY.value):
+                draft = llm.generate_period_summary(
+                    report_type=rep.type,
+                    material=material,
+                    extra_note=extra_note,
+                    from_quarters=rep.type == ReportType.YEARLY.value and "季度总结" in material,
+                )
+            else:
+                draft = llm.generate_report_summary(
+                    report_type=rep.type,
+                    material=material,
+                    extra_note=extra_note,
+                )
+        except llm.LLMConfigError as e:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+        except Exception as e:  # noqa: BLE001 —— LLM 超时/断网/限流等未预见异常统一转 502
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=llm.friendly_llm_error(e),
             )
-        else:
-            draft = llm.generate_report_summary(
-                report_type=rep.type,
-                material=material,
-                extra_note=extra_note,
-            )
-    except llm.LLMConfigError as e:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
-    except Exception as e:  # noqa: BLE001 —— LLM 超时/断网/限流等未预见异常统一转 502
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=llm.friendly_llm_error(e),
-        )
 
     return {
         "title": draft.get("title") or rep.title,
         "content": {k: v for k, v in draft.items() if k != "title" and v is not None},
-        "model": settings.LLM_MODEL,
+        "model": _llm_ctx.active_model_name(),
     }
 
 
@@ -776,16 +780,20 @@ def _run_ai_draft_job(job_id: str) -> None:
         if job is None:
             return
         job["status"] = "running"
+    from app.services import llm_context as _llm_ctx
+
     db = SessionLocal()
     try:
-        draft = _generate_ai_draft_blocking(
-            db,
-            report_id=uuid.UUID(job["report_id"]),
-            teacher_id=uuid.UUID(job["teacher_id"]),
-            is_admin_staff=job["is_admin_staff"],
-            extra_note=job.get("extra_note"),
-            source_quarter_ids=[uuid.UUID(i) for i in (job.get("source_quarter_ids") or [])],
-        )
+        _job_resolved = _llm_ctx.optional_resolved(db, uuid.UUID(job["teacher_id"]), "report")
+        with _llm_ctx.use_llm(_job_resolved):
+                draft = _generate_ai_draft_blocking(
+                db,
+                report_id=uuid.UUID(job["report_id"]),
+                teacher_id=uuid.UUID(job["teacher_id"]),
+                is_admin_staff=job["is_admin_staff"],
+                extra_note=job.get("extra_note"),
+                source_quarter_ids=[uuid.UUID(i) for i in (job.get("source_quarter_ids") or [])],
+            )
         with _AI_JOBS_LOCK:
             job = _AI_JOBS.get(job_id)
             if job is None:

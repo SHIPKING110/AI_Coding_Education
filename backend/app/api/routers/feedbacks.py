@@ -320,7 +320,9 @@ def ai_enhance_feedback(
         "homework": payload.homework if payload.homework is not None else fb.homework,
     }
 
-    if not llm.is_llm_configured():
+    from app.services import llm_context as _llm_ctx
+    fb_resolved = _llm_ctx.optional_resolved(db, user.id, "feedback")
+    if fb_resolved is None:
         fb.ai_draft = {
             **current,
             "note": "未配置 LLM_API_KEY，AI 草稿暂不可用，返回当前内容占位",
@@ -358,7 +360,7 @@ def ai_enhance_feedback(
     subject = schedule_class.subject if schedule_class else ""
 
     try:
-        evaluation = llm.generate_feedback_evaluation(
+        evaluation = _llm_ctx.run_with(fb_resolved, llm.generate_feedback_evaluation,
             template_content=template.content,
             student_name=student_name,
             class_name=class_name,

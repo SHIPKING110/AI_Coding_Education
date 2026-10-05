@@ -98,8 +98,11 @@ def upload_document(
         db, owner_id=user.id, title=title.strip(), description=description.strip(),
         file_name=file.filename or stored, file_path=str(dest),
     )
+    from app.services import llm_context as _llm_ctx
+
     rag.index_in_background(
         doc_id=doc.id, owner_id=user.id, title=doc.title,
+        resolved=_llm_ctx.optional_resolved(db, user.id, "agent"),
         file_path=str(dest), file_name=file.filename or stored,
         mark_done=_mark_done, mark_progress=_mark_progress,
     )

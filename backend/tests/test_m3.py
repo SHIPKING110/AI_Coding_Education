@@ -245,7 +245,8 @@ def test_feedback_ai_enhance_degraded_without_llm(client, admin_token, monkeypat
     """AI 草稿接口：未配置 LLM 时降级——返回当前内容并记录占位 ai_draft（不报错、不真正走网络）。"""
     from app.services import llm
 
-    monkeypatch.setattr(llm, "is_llm_configured", lambda: False)
+    from app.services import llm_context as _llm_ctx
+    monkeypatch.setattr(_llm_ctx, "optional_resolved", lambda *a, **k: None)
 
     teacher = _register(client, "teacher", "t3")
     class_id = _make_class(client, admin_token, "AI测试班")

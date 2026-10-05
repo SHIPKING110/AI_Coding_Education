@@ -174,11 +174,8 @@ def ai_generate(
     `GET /assignments/ai-tasks/{id}` 获取 进度阶段/结果，期间可切换其他页面。
     未配置 LLM 时 400 降级提示。
     """
-    if not llm.is_llm_configured():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="未配置 LLM_API_KEY，暂时无法使用 AI 出题",
-        )
+    from app.services import llm_context as _llm_ctx
+    llm_resolved = _llm_ctx.require_llm(db, user_id=user.id, module="assignment")
     if payload.mode == "similar":
         if not (payload.source_question or "").strip():
             raise HTTPException(
@@ -195,7 +192,7 @@ def ai_generate(
         owner_id=str(user.id),
         kind="generate",
         summary=summary,
-        runner=lambda: _normalize_ai_questions(llm.generate_questions(
+        runner=lambda: _normalize_ai_questions(_llm_ctx.run_with(llm_resolved, llm.generate_questions,
             mode=payload.mode,
             count=payload.count,
             difficulty=payload.difficulty,
@@ -215,11 +212,8 @@ def ai_refine(
     user: User = Depends(require_roles(*ASSIGN_ROLES)),
 ) -> AiTaskOut:
     """对话优化单题（FR-AI-05），异步任务：按教师修改要求重新生成题目。"""
-    if not llm.is_llm_configured():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="未配置 LLM_API_KEY，暂时无法使用 AI 优化",
-        )
+    from app.services import llm_context as _llm_ctx
+    llm_resolved = _llm_ctx.require_llm(db, user_id=user.id, module="assignment")
     task = ai_tasks.create_task(
         owner_id=str(user.id),
         kind="refine",
@@ -232,7 +226,7 @@ def ai_refine(
             )
             + "）"
         ),
-        runner=lambda: llm.refine_question(
+        runner=lambda: _llm_ctx.run_with(llm_resolved, llm.refine_question,
             question=payload.question.model_dump(),
             instruction=payload.instruction,
         ),

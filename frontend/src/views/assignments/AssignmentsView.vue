@@ -33,6 +33,7 @@ import {
   type QuestionsPoolItem,
   QUESTION_TYPE_LABELS,
 } from '@/api/assignment'
+import { toastApiError } from '@/stores/toast'
 import { listCampusesApi, listTeachersApi, type UserOut } from '@/api/auth'
 import { listClasses, listStudents, type ClassOut } from '@/api/enrollment'
 import { useAiTasksStore, type UnifiedAiTask } from '@/stores/aiTasks'
@@ -956,6 +957,7 @@ async function runAi() {
     aiTasks.register(task, 'assignment')
   } catch (e: any) {
     aiError.value = e?.response?.data?.detail || '提交任务失败'
+    toastApiError(e)
   } finally {
     aiLoading.value = false
   }
@@ -1170,6 +1172,7 @@ async function runRefine() {
     editorNotice.value = '优化任务已提交，稍后可在 AI 出题弹窗中查看并应用'
   } catch (e: any) {
     refineError.value = e?.response?.data?.detail || '提交优化失败'
+    toastApiError(e)
   } finally {
     refineLoading.value = false
   }

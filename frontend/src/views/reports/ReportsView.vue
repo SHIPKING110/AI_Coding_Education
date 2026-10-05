@@ -23,6 +23,7 @@ import {
   type ReportType,
   type WeeklyStatsOut,
 } from '@/api/report'
+import { toastApiError } from '@/stores/toast'
 import { useAuthStore } from '@/stores/auth'
 import PageHead from '@/components/PageHead.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
@@ -499,6 +500,7 @@ async function generateAI() {
     startAiJobTimers()
   } catch (e: any) {
     aiError.value = e?.response?.data?.detail || 'AI 任务提交失败'
+    toastApiError(e)
   }
 }
 

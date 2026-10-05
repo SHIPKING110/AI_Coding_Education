@@ -1,11 +1,13 @@
 <template>
   <RouterView />
+  <ToastHost />
 </template>
 
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 
+import ToastHost from './components/ToastHost.vue'
 import { useThemeStore } from './stores/theme'
 
 const theme = useThemeStore()

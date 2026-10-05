@@ -8,7 +8,6 @@
 
 import json
 import re
-from functools import lru_cache
 from typing import Any
 
 from app.core.config import get_settings
@@ -36,38 +35,65 @@ def is_llm_configured() -> bool:
     return bool((get_settings().LLM_API_KEY or "").strip())
 
 
-@lru_cache
+_client_cache: dict = {}
+
+
+def _active_resolved():
+    from app.services import llm_context as _ctx
+
+    return _ctx.get_current()
+
+
+def _build_chat(base_url: str, api_key: str, model: str, temperature: float, timeout: int, max_retries: int):
+    from langchain_openai import ChatOpenAI
+
+    key = (base_url or "", api_key or "", model or "", temperature, timeout, max_retries)
+    client = _client_cache.get(key)
+    if client is None:
+        client = ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=base_url or None,
+            temperature=temperature,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        _client_cache[key] = client
+    return client
+
+
 def _chat_model():
-    """构造 OpenAI 兼容聊天客户端（DeepSeek / 其他），按需延迟导入 LangChain。"""
-    from langchain_openai import ChatOpenAI
-
+    resolved = _active_resolved()
+    if resolved is not None:
+        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.6, 60, 2)
     settings = get_settings()
     base_url = _normalized_base_url(settings.LLM_BASE_URL)
-    return ChatOpenAI(
-        model=settings.LLM_MODEL,
-        api_key=settings.LLM_API_KEY,
-        base_url=base_url or None,
-        temperature=0.6,
-        timeout=60,
-        max_retries=2,
-    )
+    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.6, 60, 2)
 
 
-@lru_cache
 def _plan_model():
-    """规划用客户端：温度 0、超时更短、不重试，保证规划步骤确定且不拖慢首字。"""
-    from langchain_openai import ChatOpenAI
-
+    resolved = _active_resolved()
+    if resolved is not None:
+        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.0, 30, 0)
     settings = get_settings()
     base_url = _normalized_base_url(settings.LLM_BASE_URL)
-    return ChatOpenAI(
-        model=settings.LLM_MODEL,
-        api_key=settings.LLM_API_KEY,
-        base_url=base_url or None,
-        temperature=0.0,
-        timeout=30,
-        max_retries=0,
+    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.0, 30, 0)
+
+
+def ping(resolved=None) -> str:
+    model = _build_chat(
+        (resolved.base_url if resolved else ""),
+        (resolved.api_key if resolved else get_settings().LLM_API_KEY),
+        (resolved.model if resolved else get_settings().LLM_MODEL),
+        0.0,
+        15,
+        0,
     )
+    from langchain_core.messages import HumanMessage
+
+    resp = model.invoke([HumanMessage(content="ping")])
+    text = resp.content if isinstance(resp.content, str) else str(resp.content)
+    return (text or "").strip()[:200] or "pong"
 
 
 def _normalized_base_url(url: str | None) -> str:

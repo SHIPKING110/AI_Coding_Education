@@ -42,6 +42,7 @@ import {
   unpublishEvaluation,
   updateEvaluation,
 } from '@/api/evaluation'
+import { toastApiError } from '@/stores/toast'
 import { useAiTasksStore, type UnifiedAiTask } from '@/stores/aiTasks'
 import { useAuthStore } from '@/stores/auth'
 import { cleanListishText } from '@/utils/text'
@@ -921,6 +922,7 @@ async function runAiDraft() {
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
     setErr(detail || '提交 AI 任务失败')
+    toastApiError(e)
   }
 }
 
@@ -943,6 +945,7 @@ async function runAiRefine() {
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
     setErr(detail || '提交优化任务失败')
+    toastApiError(e)
   }
 }
 

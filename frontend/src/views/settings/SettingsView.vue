@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
 import PersonalizeView from '@/views/settings/PersonalizeView.vue'
+import LLMConfigTab from '@/views/settings/LLMConfigTab.vue'
 import {
   createCampus,
   createSubject,
@@ -31,7 +32,7 @@ import {
   type TeacherLevelOut,
 } from '@/api/payroll'
 
-const activeTab = ref<'personalize' | 'business'>('personalize')
+const activeTab = ref<'personalize' | 'business' | 'llm'>('personalize')
 
 // ---- 校区 ----
 const campuses = ref<CampusOut[]>([])
@@ -328,6 +329,9 @@ onMounted(loadAll)
           个性化设置
         </button>
         <button class="tab" :class="{ active: activeTab === 'business' }" @click="activeTab = 'business'">
+        <button class="tab" :class="{ active: activeTab === 'llm' }" @click="activeTab = 'llm'">
+          模型配置
+        </button>
           业务功能设置
         </button>
       </div>
@@ -338,6 +342,8 @@ onMounted(loadAll)
     <p v-if="msg" class="success-banner">{{ msg }}</p>
 
     <PersonalizeView v-if="activeTab === 'personalize'" embedded />
+
+    <LLMConfigTab v-else-if="activeTab === 'llm'" />
 
     <div v-else class="biz">
       <!-- 校区 -->

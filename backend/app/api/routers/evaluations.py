@@ -464,11 +464,8 @@ def ai_draft_evaluation(
     """
     ev = _get_or_404(db, evaluation_id)
     _ensure_visible(ev, user)
-    if not llm.is_llm_configured():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="未配置 LLM_API_KEY，暂时无法使用 AI 评估",
-        )
+    from app.services import llm_context as _llm_ctx
+    llm_resolved = _llm_ctx.require_llm(db, user_id=user.id, module="evaluation")
     student = _get_student_or_404(db, ev.student_id)
     material = evaluation_crud.collect_material(
         db, student=student, start=ev.period_start, end=ev.period_end
@@ -478,7 +475,7 @@ def ai_draft_evaluation(
         owner_id=str(user.id),
         kind="evaluation_draft",
         summary=f"生成 {student.name} 的学习评估",
-        runner=lambda: llm.generate_evaluation(
+        runner=lambda: _llm_ctx.run_with(llm_resolved, llm.generate_evaluation,
             student_name=student.name, material=text, extra_note=payload.extra_note
         ),
     )
@@ -495,11 +492,8 @@ def ai_refine_evaluation(
     """对话式优化评估（FR-EV-03，异步任务）：按教师修改要求在现有评估基础上重写。"""
     ev = _get_or_404(db, evaluation_id)
     _ensure_visible(ev, user)
-    if not llm.is_llm_configured():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="未配置 LLM_API_KEY，暂时无法使用 AI 优化",
-        )
+    from app.services import llm_context as _llm_ctx
+    llm_resolved = _llm_ctx.require_llm(db, user_id=user.id, module="evaluation")
     if not (ev.content or {}).get("summary"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -515,7 +509,7 @@ def ai_refine_evaluation(
         owner_id=str(user.id),
         kind="evaluation_refine",
         summary=f"优化 {student.name} 的评估（{instruction[:16]}…）",
-        runner=lambda: llm.refine_evaluation(
+        runner=lambda: _llm_ctx.run_with(llm_resolved, llm.refine_evaluation,
             student_name=student.name, current=current, instruction=instruction
         ),
     )
@@ -756,6 +750,8 @@ def create_class_ppt(
             detail="全班学员评估与课堂数据自上次生成后无变化，无需重新提炼；如需强制重提炼请二次确认",
         )
     text = _class_material_text(material, averages)
+    from app.services import llm_context as _llm_ctx
+    ppt_resolved = _llm_ctx.optional_resolved(db, user.id, "evaluation")
     period_label = _period_label(payload.period_start, payload.period_end)
     class_id = cls.id
     class_name = cls.name
@@ -763,12 +759,15 @@ def create_class_ppt(
     teacher_name = material["teacher_name"] or ""
     honor_roll = _honor_roll(material)
 
+    from app.services import llm_context as _llm_ctx
+    _agent_ppt_resolved = _llm_ctx.optional_resolved(db, user.id, "evaluation")
     def _runner(report) -> dict:  # noqa: ANN001 - ai_tasks 回调，上报执行阶段
-        if llm.is_llm_configured():
+        if ppt_resolved is not None:
             report("AI 正在结合全班评估提炼汇报内容…（整体表现 / 亮点 / 下阶段安排，约 20-60 秒）")
             try:
-                content = llm.generate_class_meeting(
-                    class_name=class_name, material=text, extra_note=payload.extra_note
+                content = _llm_ctx.run_with(
+                    ppt_resolved, llm.generate_class_meeting,
+                    class_name=class_name, material=text, extra_note=payload.extra_note,
                 )
             except llm.LLMConfigError:
                 report("AI 调用失败，切换为模板生成…")
@@ -1072,6 +1071,7 @@ def agent_init(
 @router.post("/class-ppt/agent/titles")
 def agent_titles(
     payload: AgentTitlesIn,
+    db: Session = Depends(get_db),
     user: User = Depends(require_roles(*EVALUATION_ROLES)),
 ) -> dict:
     """Agent Step2：根据风格返回 4 个标题建议；custom:xxx 直接回显自定义。"""
@@ -1085,10 +1085,13 @@ def agent_titles(
         return {"titles": [payload.style[7:].strip() or f"{material['class_name']} 家长会"], "is_custom": True}  # noqa: E501
     cn = material["class_name"]
     titles = [f"{cn} 阶段学习汇报", f"看见每一次进步 · {cn}", f"一起见证成长 · {cn}", f"{cn} 家长会"]
-    if llm.is_llm_configured():
+    from app.services import llm_context as _llm_ctx
+    _titles_resolved = _llm_ctx.optional_resolved(db, user.id, "evaluation")
+    if _titles_resolved is not None:
         try:
-            titles = llm.generate_ppt_titles_sync(
-                class_name=material["class_name"], material=text, style=payload.style
+            titles = _llm_ctx.run_with(
+                _titles_resolved, llm.generate_ppt_titles_sync,
+                class_name=material["class_name"], material=text, style=payload.style,
             )
         except Exception:  # noqa: BLE001 - LLM 同步调用失败（超时/429/断网）时回退本地标题
             pass
@@ -1203,12 +1206,16 @@ def agent_build(
         extra_parts.append(f"自定义风格要求：{style[7:]}")
     extra_note = "；".join(extra_parts) or None
 
-    def _runner(report) -> dict:  # noqa: ANN001 - ai_tasks 回调
-        if llm.is_llm_configured():
+    from app.services import llm_context as _llm_ctx
+    _agent_ppt_resolved = _llm_ctx.optional_resolved(db, user.id, "evaluation")
+
+    def _runner(report) -> dict:  # noqa: ANN001 - ai_tasks
+        if _agent_ppt_resolved is not None:
             report("AI 正在按你的定制要求提炼班级文案…")
             try:
-                content = llm.generate_class_meeting(
-                    class_name=class_name, material=text, extra_note=extra_note
+                content = _llm_ctx.run_with(
+                    _agent_ppt_resolved, llm.generate_class_meeting,
+                    class_name=class_name, material=text, extra_note=extra_note,
                 )
             except llm.LLMConfigError:
                 report("AI 调用失败，切换为模板生成…")
@@ -1266,6 +1273,8 @@ def agent_refine(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="生成记录不存在")
     cls = db.get(Class, record.class_id)
     _ensure_class_visible(cls, user)
+    from app.services import llm_context as _llm_ctx
+    _refine_resolved = _llm_ctx.require_llm(db, user_id=user.id, module="evaluation")
     current = {**(record.content or {})}
     rec_id = record.id
     rec_stats = record.stats or {}
@@ -1279,7 +1288,10 @@ def agent_refine(
     def _runner(report) -> dict:  # noqa: ANN001
         report("正在按你的要求微调文案…")
         try:
-            nxt = llm.refine_ppt_content(current=current, instruction=instruction)
+            nxt = _llm_ctx.run_with(
+                _refine_resolved, llm.refine_ppt_content,
+                current=current, instruction=instruction,
+            )
         except llm.LLMConfigError as e:
             raise RuntimeError(str(e)) from e
         report("文案已更新，正在重新排版…")

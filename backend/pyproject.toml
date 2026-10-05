@@ -15,6 +15,7 @@ dependencies = [
     "python-multipart>=0.0.32",
     "reportlab>=5.0.1",
     "pypinyin>=0.55.0",
+    "cryptography>=44",
     # 文档导出（PPT/PDF/DOCX，启动链直接引用，属于核心运行时）
     "python-pptx>=1.0",
     "pypdf>=4.0",
