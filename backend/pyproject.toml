@@ -30,6 +30,9 @@ ai = [
     "langgraph>=0.2",
     "langchain-openai>=0.2",
     "chromadb>=0.5",
+]
+# 本地 embedding（Qwen3 + torch，体积大）：仅开发机回退用，生产镜像不装
+ai-local = [
     "sentence-transformers>=3.0",
 ]
 

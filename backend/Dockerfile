@@ -21,10 +21,14 @@ WORKDIR /srv/app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # 依赖安装层：仅当 pyproject/uv.lock 变化时重建（uv.lock 纳入版本库保证可复现）
+# --extra ai：装 AI 运行依赖（langchain/chromadb 等走清华镜像，国内可直连）；
+# 不含 ai-local（sentence-transformers+torch 体积大，生产 embedding 走 API，无需本地权重）
 # cache 挂载复用已下载的 wheel，重试构建不用从头下载
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --no-install-project --extra ai
+# 构建期冒烟：AI 关键依赖缺失直接失败，不流到运行时才暴露
+RUN .venv/bin/python -c "import langchain_openai, chromadb; print('ai deps ok')"
 
 COPY app ./app
 COPY alembic ./alembic

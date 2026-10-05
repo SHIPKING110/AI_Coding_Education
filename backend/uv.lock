@@ -516,6 +516,8 @@ ai = [
     { name = "langchain" },
     { name = "langchain-openai" },
     { name = "langgraph" },
+]
+ai-local = [
     { name = "sentence-transformers" },
 ]
 
@@ -545,11 +547,11 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "python-pptx", specifier = ">=1.0" },
     { name = "reportlab", specifier = ">=5.0.1" },
-    { name = "sentence-transformers", marker = "extra == 'ai'", specifier = ">=3.0" },
+    { name = "sentence-transformers", marker = "extra == 'ai-local'", specifier = ">=3.0" },
     { name = "sqlalchemy", specifier = ">=2.0,<3.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["ai"]
+provides-extras = ["ai", "ai-local"]
 
 [package.metadata.requires-dev]
 dev = [
