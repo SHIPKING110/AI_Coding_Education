@@ -29,6 +29,7 @@ import {
   type StudentCreate,
   type StudentOut,
 } from '@/api/enrollment'
+import { toastApiError } from '@/stores/toast'
 import { listUsersApi } from '@/api/client'
 import { listSubjects, type SubjectOut } from '@/api/business'
 import { myPermissions } from '@/api/permissions'
@@ -864,14 +865,33 @@ async function submit() {
 }
 
 function removeStudent(s: StudentOut) {
+  // 余额非零先本地拦截并弹窗说明（后端同样会 400 拦截）
+  const balance = Number(s.lesson_balance ?? 0)
+  if (Math.abs(balance) >= 0.05) {
+    const reason =
+      balance > 0
+        ? `该学员还有 ${balance} 节课时未消耗，无法直接删除；请先退费/消耗完课时后再删除`
+        : `该学员欠 ${Math.abs(balance)} 节课时，无法直接删除；请先结清欠费后再删除`
+    try {
+      toastApiError({ response: { data: { detail: reason } } })
+    } catch {
+      alert(reason)
+    }
+    return
+  }
   askConfirm({
     title: '删除学员',
     message: `确认删除学员「${s.name}」？删除后该学员将从在读列表移除，历史课时、考勤与评估数据会归档保留，可在需要时恢复。`,
     confirmText: '删除',
     danger: true,
     onConfirm: async () => {
-      await deleteStudent(s.id)
-      await load()
+      try {
+        await deleteStudent(s.id)
+        await load()
+      } catch (e: unknown) {
+        toastApiError(e, '删除失败，请稍后重试')
+        throw e
+      }
     },
   })
 }
@@ -1256,40 +1276,6 @@ onMounted(async () => {
 
       <PaginationBar :total="collectionTotal" :page="collectionPage" :page-size="collectionPageSize" @update:page="(p) => { collectionPage = p; loadCollection() }" />
 
-      <!-- 续费弹窗 -->
-      <div v-if="showRenew" class="overlay" @click.self="showRenew = false">
-        <div class="modal">
-          <h2>{{ renewTarget?.name }} · 续费入账</h2>
-          <p class="muted">当前余额：{{ renewTarget?.lesson_balance }} 课时</p>
-          <div class="mode-tabs">
-            <button class="mode-tab" :class="{ active: renewMode === 'package' }" @click="renewMode = 'package'">选课包</button>
-            <button class="mode-tab" :class="{ active: renewMode === 'custom' }" @click="renewMode = 'custom'">自定义</button>
-          </div>
-          <label v-if="renewMode === 'package'">
-            课时包
-            <select v-model="renewPackageId">
-              <option value="">请选择课时包</option>
-              <option v-for="p in collectionPackages" :key="p.id" :value="p.id">
-                {{ p.name }} · {{ p.total_lessons }} 课时 · ¥{{ Number(p.price).toFixed(2) }}
-              </option>
-            </select>
-          </label>
-          <template v-else>
-            <div class="row">
-              <label>补充课时 *<input v-model.number="renewCustomLessons" type="number" min="1" /></label>
-              <label>实收金额（元）<input v-model.number="renewCustomAmount" type="number" min="0" step="0.01" /></label>
-            </div>
-          </template>
-          <label>备注<input v-model="renewNote" type="text" placeholder="如：家长微信转账续费" /></label>
-          <p v-if="renewError" class="error">{{ renewError }}</p>
-          <div class="modal-actions">
-            <button class="btn ghost" @click="showRenew = false">取消</button>
-            <button class="btn primary" :disabled="renewSubmitting" @click="submitRenew">
-              {{ renewSubmitting ? '入账中…' : '确认续费' }}
-            </button>
-          </div>
-        </div>
-      </div>
     </template>
 
     <!-- ========== 学员管理主页面 ========== -->
@@ -1745,6 +1731,42 @@ onMounted(async () => {
       @cancel="showNoPerm = false"
     />
     </template>
+
+    <!-- 续费弹窗（根级：首页/缴费名单共用） -->
+      <!-- 续费弹窗 -->
+      <div v-if="showRenew" class="overlay" @click.self="showRenew = false">
+        <div class="modal">
+          <h2>{{ renewTarget?.name }} · 续费入账</h2>
+          <p class="muted">当前余额：{{ renewTarget?.lesson_balance }} 课时</p>
+          <div class="mode-tabs">
+            <button class="mode-tab" :class="{ active: renewMode === 'package' }" @click="renewMode = 'package'">选课包</button>
+            <button class="mode-tab" :class="{ active: renewMode === 'custom' }" @click="renewMode = 'custom'">自定义</button>
+          </div>
+          <label v-if="renewMode === 'package'">
+            课时包
+            <select v-model="renewPackageId">
+              <option value="">请选择课时包</option>
+              <option v-for="p in collectionPackages" :key="p.id" :value="p.id">
+                {{ p.name }} · {{ p.total_lessons }} 课时 · ¥{{ Number(p.price).toFixed(2) }}
+              </option>
+            </select>
+          </label>
+          <template v-else>
+            <div class="row">
+              <label>补充课时 *<input v-model.number="renewCustomLessons" type="number" min="1" /></label>
+              <label>实收金额（元）<input v-model.number="renewCustomAmount" type="number" min="0" step="0.01" /></label>
+            </div>
+          </template>
+          <label>备注<input v-model="renewNote" type="text" placeholder="如：家长微信转账续费" /></label>
+          <p v-if="renewError" class="error">{{ renewError }}</p>
+          <div class="modal-actions">
+            <button class="btn ghost" @click="showRenew = false">取消</button>
+            <button class="btn primary" :disabled="renewSubmitting" @click="submitRenew">
+              {{ renewSubmitting ? '入账中…' : '确认续费' }}
+            </button>
+          </div>
+        </div>
+      </div>
   </div>
 </template>
 
@@ -2032,13 +2054,14 @@ tr.urgent td:first-child {
   color: var(--ink-3);
 }
 .op-btn.primary {
-  border-color: transparent;
-  background: linear-gradient(135deg, #6366f1, #06b6d4);
-  color: #fff;
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  color: #4338ca;
 }
 .op-btn.primary:hover {
-  filter: brightness(1.05);
-  color: #fff;
+  filter: none;
+  background: #e0e7ff;
+  color: #4338ca;
 }
 .op-btn.ok {
   color: #047857;
