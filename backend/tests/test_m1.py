@@ -143,6 +143,14 @@ def test_student_crud_and_low_balance(client, admin_token):
 
     # 删除（软删除）
     resp = client.delete(f"/api/students/{student_id}", headers=headers)
+    assert resp.status_code == 400
+    zero = client.post(
+        f"/api/students/{student_id}/lesson-records",
+        json={"delta": -28, "remark": "ceshiqingling"},
+        headers=headers,
+    )
+    assert zero.status_code == 201
+    resp = client.delete(f"/api/students/{student_id}", headers=headers)
     assert resp.status_code == 204
     gone = client.get(f"/api/students/{student_id}", headers=headers)
     assert gone.status_code == 404

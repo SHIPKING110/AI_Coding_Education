@@ -54,6 +54,7 @@ def ensure_business_schema(engine: Engine) -> None:
     addcol("lesson_records", "unit_price NUMERIC(10,4)", "unit_price")
     addcol("lesson_records", "amount NUMERIC(10,2)", "amount")
     # 体验域：学员体验标记/生源 + 邀约记录 + 排课/考勤体验标记
+    addcol("students", "gender VARCHAR(8) DEFAULT ''", "gender")
     addcol("students", "trial_status VARCHAR(16) DEFAULT 'none'", "trial_status")
     addcol("students", "source VARCHAR(16) DEFAULT 'normal'", "source")
     addcol("students", "referrer VARCHAR(64)", "referrer")

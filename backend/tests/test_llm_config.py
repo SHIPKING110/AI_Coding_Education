@@ -7,8 +7,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-from app.core.database import Base, get_db
 from app.core.config import get_settings
+from app.core.database import Base, get_db
 from app.crud import llm_config as crud
 from app.main import app
 
@@ -91,7 +91,7 @@ def test_create_list_masked(client):
 
 def test_default_switch_and_delete_promotes(client):
     tok, _ = _register(client, "teacher", "llm2")
-    a = client.post("/api/llm-configs", json=CFG, headers=tok).json()
+    _a = client.post("/api/llm-configs", json=CFG, headers=tok).json()
     b = client.post(
         "/api/llm-configs",
         json={**CFG, "name": "备", "make_default": True},

@@ -187,11 +187,13 @@ def create(
     class_ids: list[uuid.UUID],
     source: str | None = None,
     referrer: str | None = None,
+    gender: str | None = None,
 ) -> Student:
     student = Student(
         name=name,
         phone=phone,
         campus=campus,
+        gender=(gender or ""),
         lesson_balance=lesson_balance,
         parent_user_id=parent_user_id,
         student_user_id=student_user_id,
@@ -219,9 +221,12 @@ def update(
     parent_user_id: uuid.UUID | None,
     student_user_id: uuid.UUID | None,
     class_ids: list[uuid.UUID] | None,
+    gender: str | None = None,
 ) -> Student:
     if name is not None:
         student.name = name
+    if gender is not None:
+        student.gender = gender
     if phone is not None:
         student.phone = phone
     if campus is not None:
@@ -279,10 +284,42 @@ def set_classes(
     return student
 
 
-def archive(db: Session, student: Student) -> None:
-    """软删除（归档）：历史数据保留，学员不再出现在活跃列表。"""
-    student.status = StudentStatus.ARCHIVED
+def unbind_account(db: Session, student: Student, kind: str) -> Student:
+    """手动解绑家长/学员登录账号（User 行保留，可重新绑定）。"""
+    if kind == "parent":
+        student.parent_user_id = None
+    elif kind == "student":
+        student.student_user_id = None
+    else:
+        raise ValueError("kind 须为 parent 或 student")
     db.commit()
+    db.refresh(student)
+    return student
+
+
+def archive(db: Session, student: Student) -> None:
+    """软删除→归档：历史数据保留，不再出现在活跃列表；同时清空在读班级（自动退班）。"""
+    student.status = StudentStatus.ARCHIVED
+    student.classes = []
+    # 归档同时解绑家长/学员登录账号：User 行保留，账号名可被重新绑定（不再占着）
+    student.parent_user_id = None
+    student.student_user_id = None
+    db.commit()
+
+
+def archive_block_reason(student: Student) -> str | None:
+    """余额非零（未消耗完或欠课时）时禁止归档，返回中文原因；可归档返回 None。"""
+    try:
+        balance = float(student.lesson_balance or 0)
+    except (TypeError, ValueError):
+        balance = 0.0
+    if abs(balance) >= 0.05:
+        if balance > 0:
+            return f"该学员还有 {balance:g} 节课时未消耗，无法直接删除；请先退费/消耗完课时后再删除"
+        return f"该学员欠 {abs(balance):g} 节课时，无法直接删除；请先结清欠费后再删除"
+    return None
+
+
 
 
 def set_follow_up(

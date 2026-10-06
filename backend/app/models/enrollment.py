@@ -54,6 +54,7 @@ class Student(Base):
     )
     lesson_balance: Mapped[Decimal] = mapped_column(Numeric(10, 1), default=Decimal("0"), index=True)
     # 体验状态：none 普通学员 / trial 体验中 / signed 体验后已报名 / lost 体验未报名结束服务
+    gender: Mapped[str] = mapped_column(String(8), default="", index=True)
     trial_status: Mapped[str] = mapped_column(String(16), default="none", index=True)
     # 生源：normal 自然到访 / referral 口碑转介绍（报名时标记）
     source: Mapped[str] = mapped_column(String(16), default="normal", index=True)
