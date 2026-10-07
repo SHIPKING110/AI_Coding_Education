@@ -301,7 +301,7 @@ async function openAiModal(r: FbRow) {
   }
   // 加载可选模板并打开弹窗
   try {
-    aiTemplates.value = await listPromptTemplates()
+    aiTemplates.value = await listPromptTemplates('feedback')
     aiTemplateId.value = aiTemplates.value[0]?.id ?? ''
     aiTplError.value = ''
   } catch {
@@ -349,7 +349,7 @@ async function loadTplTemplates() {
   tplLoading.value = true
   tplError.value = ''
   try {
-    tplTemplates.value = await listPromptTemplates()
+    tplTemplates.value = await listPromptTemplates('feedback')
   } catch {
     tplError.value = '提示词模板加载失败'
   } finally {
@@ -393,6 +393,7 @@ async function saveTpl() {
       await createPromptTemplate({
         name: tplForm.value.name.trim(),
         content: tplForm.value.content.trim(),
+        scene: 'feedback',
       })
     }
     tplEditing.value = null

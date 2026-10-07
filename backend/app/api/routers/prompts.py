@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_roles
@@ -27,15 +27,19 @@ def _to_out(t) -> PromptTemplateOut:
 def list_prompt_templates(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles(*MANAGE_ROLES)),
+    scene: str | None = Query(default=None, pattern="^(feedback|report|evaluation)$"),
 ) -> list[PromptTemplateOut]:
     """当前用户可见的提示词模板。
 
     普通用户：system + published + 本人 personal（账号隔离）；
     管理员：额外可见全部 personal（便于管理/发布优秀模板）。
+    scene 按使用场景过滤（feedback/report/evaluation），不传则全量。
     """
     # 系统预设幂等补齐：保证报告/反馈五套自带提示词始终存在
     prompt_crud.ensure_system_presets(db)
     items = prompt_crud.list_visible(db, user.id, is_admin=user.role == Role.ADMIN.value)
+    if scene:
+        items = [t for t in items if (t.scene or "feedback") == scene]
     return [_to_out(t) for t in items]
 
 
@@ -53,6 +57,7 @@ def create_prompt_template(
             content=payload.content,
             scope=PromptScope.PERSONAL,
             owner_id=user.id,
+            scene=payload.scene,
         )
     )
 

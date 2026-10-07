@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "deepseek-v4-pro"
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = ""
+    # RAG 知识库 embedding：留空则沿用各教师自配 embedding；两者都无时 RAG 不可用
+    LLM_EMBED_MODEL: str = ""
 
     # 智能助手业务工具规划层预算（多轮工具调用的稳定性护栏）
     AGENT_TOOL_MAX_ROUNDS: int = 4       # 最多规划-执行轮数

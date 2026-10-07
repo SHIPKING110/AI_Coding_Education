@@ -450,6 +450,7 @@ def generate_evaluation(
     student_name: str,
     material: str,
     extra_note: str | None = None,
+    style_guide: str | None = None,
 ) -> dict[str, Any]:
     """生成学员综合评估表草稿（FR-EV-01/02，结构化 JSON）。
 
@@ -476,6 +477,7 @@ def generate_evaluation(
         "3. 所有内容必须引用周期内课程/作业中的真实细节，不要编造。\n\n"
         f"素材信息（学员：{student_name}）：\n{material}\n"
         + (f"\n教师补充说明/想强调的重点：{extra_note}\n" if extra_note else "")
+        + (f"\n写作风格要求（教师所选提示词模板，请遵守）：\n{style_guide}\n" if style_guide else "")
     )
     raw = _invoke(prompt)
     return _parse_evaluation_json(raw)

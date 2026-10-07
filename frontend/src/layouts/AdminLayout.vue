@@ -4,6 +4,7 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
 import { getUnreadCount, listNotifications, markNotificationRead, type NotificationOut } from '@/api/client'
 import { myPermissions } from '@/api/permissions'
+import { getSystemSettings } from '@/api/system'
 import { useAiTasksStore } from '@/stores/aiTasks'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
@@ -282,8 +283,30 @@ const navItems = computed(() =>
     }
     if ((item as { adminOnly?: boolean }).adminOnly && auth.user?.role !== 'admin') return false
     return true
+  }).sort((a, b) => {
+    // 个性化设置的模块排序：nav_order 存 to 数组，未收录的沉底保持原相对顺序
+    const order = navOrderMap.value
+    const ia = order.get(a.to)
+    const ib = order.get(b.to)
+    if (ia === undefined && ib === undefined) return 0
+    if (ia === undefined) return 1
+    if (ib === undefined) return -1
+    return ia - ib
   }),
 )
+
+/** 侧边栏排序（个性化设置 → 模块上下排序，全局生效） */
+const navOrderMap = ref(new Map<string, number>())
+async function loadNavOrder() {
+  try {
+    const s = await getSystemSettings()
+    const list = Array.isArray(s.nav_order) ? s.nav_order : []
+    navOrderMap.value = new Map(list.map((t, i) => [t, i]))
+  } catch {
+    navOrderMap.value = new Map()
+  }
+}
+onMounted(loadNavOrder)
 </script>
 
 <template>

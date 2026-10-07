@@ -193,7 +193,8 @@ def resolve(db: Session, owner_id: uuid.UUID, module: str) -> ResolvedLLM | None
             base_url=_normalize_base_url(settings.LLM_BASE_URL or ""),
             api_key=settings.LLM_API_KEY.strip(),
             model=settings.LLM_MODEL,
-            embed_model=None,
+            # 系统级 embedding：.env 配了则 RAG 直接可用，否则沿用教师自配
+            embed_model=(settings.LLM_EMBED_MODEL or "").strip() or None,
             config_id=None,
             config_name="系统默认",
         )

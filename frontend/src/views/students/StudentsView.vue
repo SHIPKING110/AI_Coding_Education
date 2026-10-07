@@ -6,7 +6,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import StudentFilter, { type StudentFilterValue } from '@/components/StudentFilter.vue'
 import { pinyinInitials } from '@/utils/pinyin'
-import { listCampusesApi, listTeachersApi, registerApi, resetUserPasswordApi } from '@/api/auth'
+import { listCampusesApi, listTeachersApi, loginApi, registerApi, resetUserPasswordApi } from '@/api/auth'
 import {
   adjustLessonBalance,
   createStudent,
@@ -29,7 +29,7 @@ import {
   type StudentCreate,
   type StudentOut,
 } from '@/api/enrollment'
-import { toastApiError } from '@/stores/toast'
+import { toastApiError, useToastStore } from '@/stores/toast'
 import { listUsersApi } from '@/api/client'
 import { listSubjects, type SubjectOut } from '@/api/business'
 import { myPermissions } from '@/api/permissions'
@@ -524,6 +524,8 @@ const showCreateStudent = ref(false)
 const createStudentUsername = ref('')
 const creatingStudentUser = ref(false)
 const createStudentError = ref('')
+// 账号创建成功回执（显示真实登录名，已用该值调过登录校验）
+const createOkMsg = ref('')
 
 // —— 管理员重置已绑定账号密码（默认 123456）——
 const resetTarget = ref<{ kind: 'parent' | 'student'; id: string; label: string } | null>(null)
@@ -540,10 +542,16 @@ function openCreateParentForm() {
 
 function openCreateStudentForm() {
   showCreateStudent.value = !showCreateStudent.value
-  // 学员账号：登录名默认=姓名缩写+家长电话（如：露露+138… → ll138…）；用户名必须 ≥3 位
+  // 学员账号：搜索框里若已填账号样式文本（如 bfsm13766356421）则原样采用；
+  // 否则默认=姓名缩写+家长电话；用户名必须 ≥3 位
   const phone = (form.value.phone || '').trim()
-  const abbr = pinyinInitials(form.value.name || '')
-  createStudentUsername.value = showCreateStudent.value && abbr && phone ? `${abbr}${phone}` : ''
+  const search = (studentUserSearch.value || '').trim()
+  if (/^[a-zA-Z0-9]{3,}$/.test(search)) {
+    createStudentUsername.value = showCreateStudent.value ? search : ''
+  } else {
+    const abbr = pinyinInitials(form.value.name || '')
+    createStudentUsername.value = showCreateStudent.value && abbr && phone ? `${abbr}${phone}` : ''
+  }
   createStudentError.value = ''
 }
 
@@ -559,15 +567,21 @@ function onStudentUsernameInput() {
 }
 
 watch(
-  () => [form.value.phone, form.value.name],
+  () => [form.value.phone, form.value.name, studentUserSearch.value],
   () => {
     if (showCreateParent.value && !parentUsernameTouched.value) {
       createParentUsername.value = (form.value.phone || '').trim()
     }
     if (showCreateStudent.value && !studentUsernameTouched.value) {
       const phone = (form.value.phone || '').trim()
-      const abbr = pinyinInitials(form.value.name || '')
-      createStudentUsername.value = abbr && phone ? `${abbr}${phone}` : ''
+      const search = (studentUserSearch.value || '').trim()
+      // 搜索框里直接填了账号样式文本（如 bfsm13766356421）：原样作为登录名
+      if (/^[a-zA-Z0-9]{3,}$/.test(search)) {
+        createStudentUsername.value = search
+      } else {
+        const abbr = pinyinInitials(form.value.name || search || '')
+        createStudentUsername.value = abbr && phone ? `${abbr}${phone}` : ''
+      }
     }
   },
 )
@@ -575,9 +589,14 @@ watch(
 async function createParentAccount() {
   createParentError.value = ''
   const username = createParentUsername.value.trim()
-  const name = parentUserSearch.value.trim()
+  const name = parentUserSearch.value.trim() || (form.value.name.trim() ? `${form.value.name.trim()}的家长` : '')
   if (!username || username.length < 3) {
     createParentError.value = '请填写登录名（至少 3 位字母/数字）'
+    return
+  }
+  // 登录名是手机号样式时校验合规性
+  if (/^1\d{10}$/.test(username) && !/^1[3-9]\d{9}$/.test(username)) {
+    createParentError.value = '登录手机号格式不正确，请输入11位大陆手机号码'
     return
   }
   if (!name) {
@@ -587,10 +606,18 @@ async function createParentAccount() {
   creatingParent.value = true
   try {
     const user = await registerApi({ role: 'parent', username, password: '123456', name })
+    try {
+      await loginApi({ username: user.username, password: '123456' })
+    } catch {
+      createParentError.value = `账号已创建（${user.username}），但登录校验失败，请检查密码或联系管理员`
+      return
+    }
     await loadParentUsers()
     bindParent(user.id)
     showCreateParent.value = false
     createParentError.value = ''
+    batchDone.value = `家长账号 ${user.username} 创建成功，可用该登录名 + 密码 123456 登录`
+    createOkMsg.value = `家长账号 ${user.username} 创建并绑定成功，可用该登录名 + 密码 123456 登录`
   } catch (e: any) {
     if (e?.response?.data?.detail === 'Username already exists') {
       // 登录名已存在：可能是删除学员后残留的 User 行，直接复用绑定（旧账号不再占着）
@@ -618,7 +645,7 @@ async function createParentAccount() {
 async function createStudentAccount() {
   createStudentError.value = ''
   const username = createStudentUsername.value.trim()
-  const name = studentUserSearch.value.trim()
+  const name = studentUserSearch.value.trim() || form.value.name.trim()
   if (!username || username.length < 3) {
     createStudentError.value = '请填写登录名（至少 3 位字母/数字）'
     return
@@ -630,10 +657,19 @@ async function createStudentAccount() {
   creatingStudentUser.value = true
   try {
     const user = await registerApi({ role: 'student', username, password: '123456', name })
+    // 创建成功后用真实 username 调一次登录校验：确保该登录名可用于登录（token 丢弃，不切换会话）
+    try {
+      await loginApi({ username: user.username, password: '123456' })
+    } catch {
+      createStudentError.value = `账号已创建（${user.username}），但登录校验失败，请检查密码或联系管理员`
+      return
+    }
     await loadStudentUsers()
     bindStudentUser(user.id)
     showCreateStudent.value = false
     createStudentError.value = ''
+    batchDone.value = `学员账号 ${user.username} 创建成功，可用该登录名 + 密码 123456 登录`
+    createOkMsg.value = `学员账号 ${user.username} 创建并绑定成功，可用该登录名 + 密码 123456 登录`
   } catch (e: any) {
     if (e?.response?.data?.detail === 'Username already exists') {
       // 登录名已存在：可能是删除学员后残留的 User 行，直接复用绑定（旧账号不再占着）
@@ -764,6 +800,7 @@ function openCreate() {
   form.value = { name: '', phone: '', gender: '', campus: '', lesson_balance: 0, class_ids: [], source: '', referrer: '' }
   resetClassPicker()
   formError.value = ''
+  createOkMsg.value = ''
   parentUserSearch.value = ''
   studentUserSearch.value = ''
   parentUsernameTouched.value = false
@@ -834,6 +871,7 @@ function openEdit(s: StudentOut) {
   // 沿用学员校区作为班级选择器的初始校区，便于快速定位同校区班级
   classPickerCampus.value = s.campus ?? ''
   formError.value = ''
+  createOkMsg.value = ''
   parentUserSearch.value = ''
   studentUserSearch.value = ''
   showForm.value = true
@@ -863,6 +901,14 @@ async function submit() {
   formError.value = ''
   if (!form.value.name.trim()) {
     formError.value = '请填写学员姓名'
+    return
+  }
+  const phone = (form.value.phone || '').trim()
+  if (phone && !/^1[3-9]\d{9}$/.test(phone)) {
+    formError.value = '联系电话格式不正确，请输入11位大陆手机号码（如13800000000）'
+    try {
+      useToastStore().error('联系电话格式不正确：请输入11位大陆手机号码')
+    } catch { /* toast 不可用时仅行内提示 */ }
     return
   }
   try {
@@ -1526,7 +1572,8 @@ onMounted(async () => {
                   <div v-else class="create-form">
                     <div class="cf-row">
                       <input v-model="createParentUsername" type="text" placeholder="登录名默认=学员电话号码（字母/数字，≥3 位）" @input="onParentUsernameInput" />
-                      <span class="cf-note">显示名：{{ parentUserSearch.trim() || '（先输入姓名）' }}</span>
+                      <span class="cf-note">登录名：{{ createParentUsername.trim() || '（待生成）' }}（创建后即为登录账号，请核对）</span>
+                      <span class="cf-note">显示名：{{ parentUserSearch.trim() || form.name.trim() + '的家长' || '（先输入姓名）' }}</span>
                     </div>
                     <p class="cf-note">密码默认 123456，创建后请及时告知家长</p>
                     <p v-if="createParentError" class="cf-error">{{ createParentError }}</p>
@@ -1574,7 +1621,8 @@ onMounted(async () => {
                   </button>
                   <div v-else class="create-form">
                     <div class="cf-row">
-                      <input v-model="createStudentUsername" type="text" placeholder="登录名默认=姓名首字母+电话（如 xy138…，字母/数字，≥3 位）" />
+                      <input v-model="createStudentUsername" type="text" placeholder="登录名默认=姓名首字母+电话（如 xy138…，字母/数字，≥3 位）" @input="onStudentUsernameInput" />
+                      <span class="cf-note">登录名：{{ createStudentUsername.trim() || '（待生成）' }}（创建后即为登录账号，请核对）</span>
                       <span class="cf-note">显示名：{{ studentUserSearch.trim() || '（先输入姓名）' }}</span>
                     </div>
                     <p v-if="createStudentError" class="cf-error">{{ createStudentError }}</p>
@@ -1591,6 +1639,7 @@ onMounted(async () => {
           </div>
         </label>
         <p v-if="formError" class="error">{{ formError }}</p>
+        <p v-if="createOkMsg" class="ok">{{ createOkMsg }}</p>
         <div class="modal-actions">
           <button class="btn ghost" @click="showForm = false">取消</button>
           <button class="btn primary" @click="submit">保存</button>
@@ -2385,6 +2434,11 @@ tr.urgent td:first-child {
 .error {
   color: var(--danger);
   font-size: 13px;
+}
+.ok {
+  color: var(--success, #047857);
+  font-size: 13px;
+  font-weight: 600;
 }
 .modal-actions {
   display: flex;

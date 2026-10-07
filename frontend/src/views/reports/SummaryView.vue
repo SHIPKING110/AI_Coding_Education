@@ -8,6 +8,7 @@ import { useRouter } from 'vue-router'
 
 import PaginationBar from '@/components/PaginationBar.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import PromptTemplateManager from '@/components/PromptTemplateManager.vue'
 import PptBuilderDrawer from './PptBuilderDrawer.vue'
 import {
   createAiDraftJob,
@@ -128,6 +129,7 @@ const historyOffset = ref(0)
 const historyLimit = 10
 
 const showAiModal = ref(false)
+const showTplManage = ref(false)
 const aiNote = ref('')
 const aiError = ref('')
 // 提示词模板（报告类系统预设 + 个人模板）：所选模板内容作为写作风格要求
@@ -833,19 +835,23 @@ async function openAI() {
   aiError.value = ''
   aiQuarterIds.value = []
   aiQuarters.value = []
-  // 加载报告类提示词模板，默认选中当前总结类型对应的系统预设
+  await loadAiTemplates()
+  showAiModal.value = true
+  if (activeTab.value === 'yearly') {
+    loadAiQuarters()
+  }
+}
+
+/** 加载报告类提示词模板，默认选中当前总结类型对应的系统预设（模板管理弹窗变更后复用刷新） */
+async function loadAiTemplates() {
   try {
-    const all = await listPromptTemplates()
-    aiTemplates.value = all.filter((t) => t.scope !== 'system' || t.name.startsWith('【报告'))
+    const all = await listPromptTemplates('report')
+    aiTemplates.value = all
     const want = activeTab.value === 'quarterly' ? '【报告·季度总结】' : '【报告·年度总结】'
     aiTemplateId.value = aiTemplates.value.find((t) => t.name.startsWith(want))?.id ?? aiTemplates.value[0]?.id ?? ''
   } catch {
     aiTemplates.value = []
     aiTemplateId.value = ''
-  }
-  showAiModal.value = true
-  if (activeTab.value === 'yearly') {
-    loadAiQuarters()
   }
 }
 
@@ -1289,6 +1295,7 @@ onBeforeUnmount(() => {
             </option>
           </select>
         </label>
+        <button class="link-btn" type="button" @click="showTplManage = true">管理总结模板（新建/编辑）</button>
         <label>
           补充说明（可选）
           <textarea v-autogrow v-model="aiNote" rows="3" placeholder="想强调的重点、遗漏事项等…" />
@@ -1378,6 +1385,13 @@ onBeforeUnmount(() => {
       :period-label="fmtRange(periodStart, periodEnd)"
       @close="showPptBuilder = false"
       @built="onPptBuilt"
+    />
+    <PromptTemplateManager
+      :visible="showTplManage"
+      scene="report"
+      title="总结提示词模板管理"
+      @close="showTplManage = false"
+      @changed="loadAiTemplates"
     />
   </div>
 </template>

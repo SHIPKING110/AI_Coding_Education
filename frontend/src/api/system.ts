@@ -11,6 +11,7 @@ export interface SystemSettings {
   login_hero: string
   sidebar_sub: string
   sidebar_theme: string
+  nav_order: string[]
 }
 
 export async function getSystemSettings(): Promise<SystemSettings> {

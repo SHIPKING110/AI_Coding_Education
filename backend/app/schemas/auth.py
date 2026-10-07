@@ -35,6 +35,7 @@ class UserOut(BaseModel):
     username: str
     name: str
     phone: str | None
+    gender: str | None = None
     campus: str | None = None
     title: str | None = None
     teacher_level_id: str | None = None
@@ -56,6 +57,7 @@ class UserUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=64)
     phone: str | None = Field(default=None, max_length=20)
+    gender: str | None = Field(default=None, max_length=16, description="性别：male/female/空")
     campus: str | None = Field(default=None, max_length=64)
     title: str | None = Field(default=None, max_length=64, description="职务标签；变更时自动套用该职务预设权限")
     teacher_level_id: str | None = Field(default=None, description="教师级别id")

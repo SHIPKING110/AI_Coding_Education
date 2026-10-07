@@ -10,7 +10,7 @@
 - 教师管理：teacher_add（新增）、teacher_view（查看）、teacher_edit（编辑）、teacher_delete（删除）
 - 排课与考勤：schedule_create（新建排课）
 - 课时包：package_create（新建）、package_off（下架）
-- 订单管理：order_visible（可见；教师默认不可见）
+- 订单管理：并入 finance_revenue（创收统计），不再单独设键
 - 导航可见：nav_students/nav_invitations/nav_classes/nav_teachers/nav_schedules/
   nav_packages/nav_feedbacks/nav_reports/nav_evaluations/nav_agents/
   nav_assignments/nav_finance/nav_settings
@@ -58,8 +58,7 @@ PERMISSION_KEYS: dict[str, str] = {
     "package_off": "课时包-下架",
     "assignment_ai": "AI习题-AI出题",
     "assignment_create": "AI习题-新建作业",
-    "order_visible": "订单管理-可见",
-    "settings_manage": "设置模块-可见与管理",
+    "settings_manage": "设置-全部设置管理",
     "settings_tab_personalize": "设置-个性化设置（可见与操作）",
     "settings_tab_model": "设置-模型配置（可见与操作）",
     "settings_tab_business": "设置-业务功能设置（可见与操作）",
@@ -109,13 +108,12 @@ KEY_DEFAULTS: dict[str, bool] = {
     "package_off": False,
     "assignment_ai": True,
     "assignment_create": True,
-    "order_visible": False,
     "settings_manage": False,
     "settings_tab_personalize": False,
     "settings_tab_model": False,
     "settings_tab_business": False,
-    "finance_view": False,
-    "finance_revenue": False,
+    "finance_view": True,
+    "finance_revenue": True,
     "finance_records": False,
     "finance_salary": False,
     "finance_salary_all": False,
@@ -130,7 +128,7 @@ KEY_DEFAULTS: dict[str, bool] = {
     "nav_evaluations": True,
     "nav_agents": True,
     "nav_assignments": True,
-    "nav_finance": False,
+    "nav_finance": True,
     "nav_settings": False,
 }
 
@@ -165,13 +163,12 @@ class TeacherPermission(Base):
     package_off: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     assignment_ai: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     assignment_create: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    order_visible: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     settings_manage: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     settings_tab_personalize: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     settings_tab_model: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     settings_tab_business: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    finance_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    finance_revenue: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    finance_view: Mapped[bool] = mapped_column(Boolean, default=True, server_default="false")
+    finance_revenue: Mapped[bool] = mapped_column(Boolean, default=True, server_default="false")
     finance_records: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     finance_salary: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     finance_salary_all: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
@@ -186,7 +183,7 @@ class TeacherPermission(Base):
     nav_agents: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     nav_assignments: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     nav_invitations: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    nav_finance: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    nav_finance: Mapped[bool] = mapped_column(Boolean, default=True, server_default="false")
     nav_settings: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -335,6 +335,7 @@ function unenroll(studentId: string, studentName: string) {
       try {
         await updateStudentClasses(studentId, remaining)
         detail.value = await getClass(target.id)
+        await load()
       } catch (e: unknown) {
         const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
         actionError.value = typeof msg === 'string' && msg ? `退班失败：${msg}` : '退班失败，请稍后重试'
@@ -368,6 +369,7 @@ async function confirmTransfer() {
     await updateStudentClasses(transferTarget.value.id, remaining)
     showTransfer.value = false
     detail.value = await getClass(target.id)
+    await load()
   } catch (e: unknown) {
     const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
     actionError.value = typeof msg === 'string' && msg ? `调班失败：${msg}` : '调班失败，请稍后重试'
@@ -614,8 +616,11 @@ onMounted(async () => {
                 </span>
               </span>
               <span>
-                <button class="op-btn" @click="guard('class_edit', () => openTransfer(s.id, s.name))">调班</button>
-                <button class="op-btn warn" @click="guard('class_unenroll', () => unenroll(s.id, s.name))">退班</button>
+                <template v-if="s.status !== 'archived'">
+                  <button class="op-btn" @click="guard('class_edit', () => openTransfer(s.id, s.name))">调班</button>
+                  <button class="op-btn warn" @click="guard('class_unenroll', () => unenroll(s.id, s.name))">退班</button>
+                </template>
+                <span v-else class="archived-note">已归档</span>
               </span>
             </div>
           </div>
@@ -1126,6 +1131,10 @@ h1 {
   background: var(--danger-soft);
   border-radius: 8px;
   padding: 8px 12px;
+}
+.archived-note {
+  font-size: 12px;
+  color: var(--ink-3);
 }
 .modal label {
   display: block;

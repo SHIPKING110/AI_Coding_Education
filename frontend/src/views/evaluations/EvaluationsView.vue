@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import PromptTemplateManager from '@/components/PromptTemplateManager.vue'
 import EvaluationDetailDialog from '@/components/EvaluationDetailDialog.vue'
 import PptAgentDialog from '@/views/evaluations/components/PptAgentDialog.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
@@ -43,6 +44,7 @@ import {
   updateEvaluation,
 } from '@/api/evaluation'
 import { toastApiError } from '@/stores/toast'
+import { listPromptTemplates, type PromptTemplateOut } from '@/api/prompt'
 import { useAiTasksStore, type UnifiedAiTask } from '@/stores/aiTasks'
 import { useAuthStore } from '@/stores/auth'
 import { cleanListishText } from '@/utils/text'
@@ -84,6 +86,20 @@ const message = ref('')
 const error = ref('')
 const aiNote = ref('')
 const aiInstruction = ref('')
+// 评估提示词模板（系统自带 + 个人/全校）：所选模板正文作为写作风格要求
+const aiTemplates = ref<PromptTemplateOut[]>([])
+const aiTemplateId = ref('')
+const showTplManage = ref(false)
+async function loadAiTemplates() {
+  try {
+    aiTemplates.value = await listPromptTemplates('evaluation')
+    if (!aiTemplateId.value || !aiTemplates.value.some((t) => t.id === aiTemplateId.value)) {
+      aiTemplateId.value = aiTemplates.value[0]?.id ?? ''
+    }
+  } catch {
+    aiTemplates.value = []
+  }
+}
 const detailEv = ref<EvaluationOut | null>(null)
 const showDelete = ref(false)
 const myTaskIds = ref<string[]>([])
@@ -915,7 +931,8 @@ async function runAiDraft() {
   if (!(await save())) return
   if (!current.value) return
   try {
-    const task = await aiDraftEvaluation(current.value.id, { extra_note: aiNote.value || null })
+    const style = aiTemplates.value.find((t) => t.id === aiTemplateId.value)?.content || null
+    const task = await aiDraftEvaluation(current.value.id, { extra_note: aiNote.value || null, style_guide: style })
     myTaskIds.value.push(task.id)
     aiTasks.register(task, 'evaluation')
     setMsg('AI 生成任务已提交，完成后自动回填')
@@ -1063,6 +1080,7 @@ watch([periodStart, periodEnd], async () => {
 onMounted(async () => {
   window.addEventListener('keydown', onGlobalKeydown)
   await aiTasks.bootstrap()
+  void loadAiTemplates()
   if (!auth.user) await auth.fetchMe()
   const me = auth.user
   if (me?.role === 'teacher') {
@@ -1314,6 +1332,14 @@ onBeforeUnmount(() => {
             <button class="op-btn ai-solid" :disabled="aiBusy" @click="runAiDraft">
               {{ aiBusy ? '生成中…' : 'AI 生成草稿' }}
             </button>
+          </div>
+          <div v-if="aiTemplates.length" class="ai-row tpl-row">
+            <select v-model="aiTemplateId" class="tpl-select">
+              <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
+                {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
+              </option>
+            </select>
+            <button class="link-btn" type="button" @click="showTplManage = true">管理评估模板</button>
           </div>
           <div class="ai-row">
             <textarea v-autogrow v-model="aiInstruction" rows="2" placeholder="对话式优化指令，如：把语气更亲切，突出逻辑思维的进步" />

@@ -5,6 +5,7 @@ export interface PromptTemplateOut {
   name: string
   content: string
   scope: string // system | personal | published
+  scene: string // feedback | report | evaluation
   owner_id: string | null
   owner_name: string | null
   created_at: string
@@ -14,10 +15,13 @@ export interface PromptTemplateOut {
 export interface PromptTemplateIn {
   name: string
   content: string
+  scene?: string // feedback | report | evaluation（默认 feedback）
 }
 
-export async function listPromptTemplates(): Promise<PromptTemplateOut[]> {
-  const { data } = await http.get<PromptTemplateOut[]>('/prompt-templates')
+export async function listPromptTemplates(scene?: string): Promise<PromptTemplateOut[]> {
+  const { data } = await http.get<PromptTemplateOut[]>('/prompt-templates', {
+    params: scene ? { scene } : {},
+  })
   return data
 }
 

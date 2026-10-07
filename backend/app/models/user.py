@@ -35,6 +35,8 @@ class User(Base):
     campus: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # 职务标签（可自定义，如 主教/助教/班主任；也可在权限管理中按职务预设权限）
     title: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 性别（male/female/空=未填写）
+    gender: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # 教师级别（关联 teacher_levels.id 字符串存档，删除级别时置空）
     teacher_level_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     teacher_level_name: Mapped[str | None] = mapped_column(String(64), nullable=True)

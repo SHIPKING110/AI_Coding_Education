@@ -254,6 +254,21 @@ def update_student_classes(
     """
     student = student_crud.get(db, student_id)
     if student is None:
+        # 已归档学员：允许直接解除其班级关联（清理僵尸数据），不允许转入新班级
+        from app.models.enrollment import Student as _Student
+        from app.models.enrollment import StudentClass as _StudentClass
+
+        raw = db.get(_Student, student_id)
+        if raw is not None and str(raw.status) == StudentStatus.ARCHIVED.value:
+            if payload.class_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="该学员已归档，只能解除班级关联，不能转入新班级",
+                )
+            db.execute(_StudentClass.__table__.delete().where(_StudentClass.student_id == student_id))
+            db.commit()
+            db.refresh(raw)
+            return _to_out(raw, db)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
     if user.role == Role.TEACHER.value:
         from app.models.permission import check as _perm_check

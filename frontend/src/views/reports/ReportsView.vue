@@ -28,6 +28,7 @@ import { listPromptTemplates, type PromptTemplateOut } from '@/api/prompt'
 import { useAuthStore } from '@/stores/auth'
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import PromptTemplateManager from '@/components/PromptTemplateManager.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import SummaryView from '@/views/reports/SummaryView.vue'
@@ -155,6 +156,7 @@ const aiDoneMsg = ref('')
 
 // —— AI 草稿弹窗（后台任务：提交即关弹窗，完成后顶部任务条回填，不锁页面） ——
 const showAiModal = ref(false)
+const showTplManage = ref(false)
 const aiNote = ref('')
 const aiError = ref('')
 // 提示词模板（报告类系统预设 + 个人模板）：所选模板内容作为写作风格要求
@@ -493,6 +495,19 @@ async function unpublish() {
 }
 
 // —— AI 草稿（后台任务：提交即关弹窗，完成后顶部任务条回填，不锁页面） ——
+async function loadAiTemplates() {
+  // 加载报告类提示词模板（系统预设 + 个人模板），默认选中当前报告类型对应的系统预设
+  try {
+    const all = await listPromptTemplates('report')
+    aiTemplates.value = all
+    const want = activeTab.value === 'daily' ? '【报告·日报】' : '【报告·周报】'
+    aiTemplateId.value = aiTemplates.value.find((t) => t.name.startsWith(want))?.id ?? aiTemplates.value[0]?.id ?? ''
+  } catch {
+    aiTemplates.value = []
+    aiTemplateId.value = ''
+  }
+}
+
 async function openAI() {
   if (!report.value) {
     showError('请先保存草稿，再生成 AI 报告')
@@ -500,16 +515,7 @@ async function openAI() {
   }
   aiNote.value = ''
   aiError.value = ''
-  // 加载报告类提示词模板（系统预设 + 个人模板），默认选中当前报告类型对应的系统预设
-  try {
-    const all = await listPromptTemplates()
-    aiTemplates.value = all.filter((t) => t.scope !== 'system' || t.name.startsWith('【报告'))
-    const want = activeTab.value === 'daily' ? '【报告·日报】' : '【报告·周报】'
-    aiTemplateId.value = aiTemplates.value.find((t) => t.name.startsWith(want))?.id ?? aiTemplates.value[0]?.id ?? ''
-  } catch {
-    aiTemplates.value = []
-    aiTemplateId.value = ''
-  }
+  await loadAiTemplates()
   showAiModal.value = true
 }
 
@@ -1114,6 +1120,7 @@ onBeforeUnmount(() => {
             </option>
           </select>
         </label>
+        <button class="link-btn" type="button" @click="showTplManage = true">管理报告模板（新建/编辑）</button>
         <label>
           补充说明（可选）
           <textarea v-autogrow v-model="aiNote" rows="3" placeholder="想强调的重点、遗漏事项等…"></textarea>
@@ -1137,6 +1144,13 @@ onBeforeUnmount(() => {
       confirm-text="知道了"
       @confirm="showAiDone = false"
       @cancel="showAiDone = false"
+    />
+    <PromptTemplateManager
+      :visible="showTplManage"
+      scene="report"
+      title="报告提示词模板管理"
+      @close="showTplManage = false"
+      @changed="loadAiTemplates"
     />
     </template>
   </div>

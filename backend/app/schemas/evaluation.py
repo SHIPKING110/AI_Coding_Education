@@ -90,6 +90,9 @@ class EvaluationAiDraftIn(BaseModel):
     extra_note: str | None = Field(
         default=None, max_length=1000, description="教师补充说明/想强调的重点"
     )
+    style_guide: str | None = Field(
+        default=None, max_length=8000, description="所选提示词模板正文，作为写作风格要求"
+    )
 
 
 class EvaluationAiRefineIn(BaseModel):

@@ -476,7 +476,8 @@ def ai_draft_evaluation(
         kind="evaluation_draft",
         summary=f"生成 {student.name} 的学习评估",
         runner=lambda: _llm_ctx.run_with(llm_resolved, llm.generate_evaluation,
-            student_name=student.name, material=text, extra_note=payload.extra_note
+            student_name=student.name, material=text, extra_note=payload.extra_note,
+            style_guide=payload.style_guide
         ),
     )
     return _task_to_out(task)

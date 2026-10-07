@@ -590,9 +590,11 @@ def conversation_chat(
             # 寒暄类消息跳过检索：省一次向量化，首字更快
             if rag_service.needs_retrieval(message.strip()):
                 collected = knowledge_crud.collected_doc_ids(db, user_id=user.id)
-                hits = rag_service.retrieve(
-                    message.strip(), db=db, owner_id=user.id, collected_ids=collected
-                )
+                # 压入教师个人配置：检索向量化走自配 embedding 模型
+                with _llm_ctx.use_llm(resolved):
+                    hits = rag_service.retrieve(
+                        message.strip(), db=db, owner_id=user.id, collected_ids=collected
+                    )
             if hits:
                 citations = {"hits": hits}
                 lines = [

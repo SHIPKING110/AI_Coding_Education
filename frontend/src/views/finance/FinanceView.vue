@@ -59,6 +59,7 @@ function defaultRange(days = 13) {
 // ---- 订单管理 ----
 const orderStats = ref<OrderStatBucket[]>([])
 const orderSummary = ref<OrderStatsSummary | null>(null)
+const orderError = ref('')
 const statsLoading = ref(false)
 const showOrders = ref(true)
 const showPaid = ref(true)
@@ -69,6 +70,7 @@ let trendChart: echarts.ECharts | null = null
 
 async function loadOrderStats() {
   statsLoading.value = true
+  orderError.value = ''
   try {
     const data = await getOrderStats({
       date_from: dateFrom.value || undefined,
@@ -77,9 +79,13 @@ async function loadOrderStats() {
     })
     orderStats.value = data.items
     orderSummary.value = data.summary
-  } catch {
+  } catch (e: unknown) {
     orderStats.value = []
     orderSummary.value = null
+    const status = (e as { response?: { status?: number } })?.response?.status
+    orderError.value = status === 403
+      ? '暂无查看权限，请联系管理员开通「财务管理-创收统计」（订单管理已并入该权限）'
+      : '加载订单数据失败'
   } finally {
     statsLoading.value = false
     renderTrend()
@@ -249,8 +255,11 @@ async function loadLessons() {
     lessonStats.value = st
     bySubject.value = sub.items
     byTeacher.value = tea.items
-  } catch {
-    finError.value = '加载课时创收数据失败'
+  } catch (e: unknown) {
+    const status = (e as { response?: { status?: number } })?.response?.status
+    finError.value = status === 403
+      ? '暂无查看权限，请联系管理员开通「财务管理-创收统计」'
+      : '加载课时创收数据失败'
   } finally {
     finLoading.value = false
     renderLessons()
@@ -302,6 +311,7 @@ const allRecords = ref<LessonRecordOut[]>([])
 const recordsTotal = ref(0)
 const recordsSummary = ref({ amount_in: '0', amount_out: '0', amount_net: '0' })
 const recordsLoading = ref(false)
+const recordsError = ref('')
 const recordKeyword = ref('')
 const recordType = ref('')
 const recordsPage = ref(1)
@@ -329,8 +339,13 @@ async function loadRecords() {
     allRecords.value = data.items
     recordsTotal.value = data.total
     recordsSummary.value = data.summary
-  } catch {
+    recordsError.value = ''
+  } catch (e: unknown) {
     allRecords.value = []
+    const status = (e as { response?: { status?: number } })?.response?.status
+    recordsError.value = status === 403
+      ? '暂无查看权限，请联系管理员开通「财务管理-课时流水」'
+      : '加载收支流水失败'
   } finally {
     recordsLoading.value = false
   }
@@ -487,6 +502,7 @@ onUnmounted(() => {
 
     <!-- 订单管理 tab -->
     <div v-if="activeTab === 'orders'">
+      <p v-if="orderError" class="error-banner">{{ orderError }}</p>
       <section class="card">
         <div class="card-title">订单趋势</div>
         <div v-if="statsLoading" class="loading-tip">加载中…</div>
@@ -623,6 +639,7 @@ onUnmounted(() => {
 
     <!-- 收支流水 tab -->
     <div v-else-if="activeTab === 'records'">
+      <p v-if="recordsError" class="error-banner">{{ recordsError }}</p>
       <div class="flow-kpis">
         <div class="flow-kpi in">
           <div class="flow-kpi-top">

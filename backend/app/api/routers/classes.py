@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, require_teacher_permission
 from app.core.database import get_db
 from app.crud import classroom as class_crud
-from app.models.enrollment import Class
+from app.models.enrollment import Class, StudentStatus
 from app.models.user import Role, User
 from app.schemas.enrollment import ClassCreate, ClassDetailOut, ClassOut, ClassUpdate, PageOut
 
@@ -121,6 +121,7 @@ def get_class(
             ],
         }
         for s in cls.students
+        if s.status != StudentStatus.ARCHIVED.value
     ]
     return out
 

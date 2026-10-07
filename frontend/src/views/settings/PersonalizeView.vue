@@ -24,6 +24,36 @@ const loginAccent = ref('')
 const loginHero = ref('')
 const sidebarSub = ref('')
 const sidebarTheme = ref('navy')
+// 侧边栏模块排序：与 AdminLayout ADMIN_NAV 一一对应（to 唯一键；权限管理仅管理员可见，照常排）
+const NAV_MODULES = [
+  { to: '/students', label: '学员管理' },
+  { to: '/invitations', label: '招生邀约' },
+  { to: '/classes', label: '班级管理' },
+  { to: '/teachers', label: '教师管理' },
+  { to: '/permissions', label: '权限管理' },
+  { to: '/settings', label: '设置' },
+  { to: '/schedules', label: '排课与考勤' },
+  { to: '/packages', label: '课时包管理' },
+  { to: '/feedbacks', label: '课后反馈' },
+  { to: '/reports', label: '报告·总结' },
+  { to: '/evaluations', label: '学员评估' },
+  { to: '/agents', label: 'Agent 工作台' },
+  { to: '/assignments', label: 'AI 习题' },
+  { to: '/finance', label: '财务管理' },
+]
+const navOrder = ref<string[]>([])
+function orderedModules() {
+  const order = navOrder.value.filter((t) => NAV_MODULES.some((m) => m.to === t))
+  const rest = NAV_MODULES.map((m) => m.to).filter((t) => !order.includes(t))
+  return [...order, ...rest].map((t) => NAV_MODULES.find((m) => m.to === t)!)
+}
+function moveNav(i: number, dir: -1 | 1) {
+  const list = orderedModules().map((m) => m.to)
+  const j = i + dir
+  if (j < 0 || j >= list.length) return
+  ;[list[i], list[j]] = [list[j], list[i]]
+  navOrder.value = list
+}
 const desktopBg = ref('default')
 const customBg = ref('')
 const uiTheme = ref('default')
@@ -81,6 +111,7 @@ async function load() {
     loginHero.value = s.login_hero || ''
     sidebarSub.value = s.sidebar_sub || ''
     sidebarTheme.value = s.sidebar_theme || 'navy'
+    navOrder.value = Array.isArray(s.nav_order) ? s.nav_order : []
     uiTheme.value = s.ui_theme
     if (DESKTOP_BGS.some((b) => b.key === s.desktop_bg)) {
       desktopBg.value = s.desktop_bg
@@ -111,6 +142,7 @@ async function save() {
       login_hero: loginHero.value.trim(),
       sidebar_sub: sidebarSub.value.trim(),
       sidebar_theme: sidebarTheme.value,
+      nav_order: orderedModules().map((m) => m.to),
       desktop_bg: bg || 'default',
       ui_theme: uiTheme.value,
     })
@@ -244,6 +276,19 @@ onMounted(load)
           <span>侧边栏副标题（标题下方小字）</span>
           <input v-model="sidebarSub" type="text" placeholder="如：Child Code Studio" />
         </label>
+        <div class="field" style="margin-top: 12px">
+          <span>模块上下排序（上↑ / 下↓ 调整，保存后所有人侧边栏即时生效）</span>
+          <ul class="nav-order-list">
+            <li v-for="(m, i) in orderedModules()" :key="m.to" class="nav-order-row">
+              <span class="nav-order-num">{{ i + 1 }}</span>
+              <span class="nav-order-label">{{ m.label }}</span>
+              <span class="nav-order-btns">
+                <button class="mini-btn" :disabled="i === 0" @click="moveNav(i, -1)">上移</button>
+                <button class="mini-btn" :disabled="i === orderedModules().length - 1" @click="moveNav(i, 1)">下移</button>
+              </span>
+            </li>
+          </ul>
+        </div>
       </section>
 
       <section class="card">
@@ -590,5 +635,61 @@ h1 {
 }
 .logo-preview-emoji {
   font-size: 30px;
+}
+.nav-order-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.nav-order-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.nav-order-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.nav-order-label {
+  flex: 1;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+.nav-order-btns {
+  display: flex;
+  gap: 6px;
+}
+.mini-btn {
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--ink-2);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.mini-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.mini-btn:not(:disabled):hover {
+  border-color: var(--brand);
+  color: var(--brand-strong);
 }
 </style>

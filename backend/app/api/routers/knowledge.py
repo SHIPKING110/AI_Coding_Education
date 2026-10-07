@@ -127,8 +127,11 @@ def retry_index(doc_id: uuid.UUID, db: Session = Depends(get_db), user: User = D
     if not doc.file_path or not Path(doc.file_path).exists():
         raise HTTPException(status_code=400, detail="源文件已丢失，请删除后重新上传")
     doc = kb_crud.mark_indexing(db, doc)
+    from app.services import llm_context as _llm_ctx2
+
     rag.index_in_background(
         doc_id=doc.id, owner_id=user.id, title=doc.title,
+        resolved=_llm_ctx2.optional_resolved(db, user.id, "agent"),
         file_path=doc.file_path, file_name=doc.file_name or "",
         mark_done=_mark_done, mark_progress=_mark_progress,
     )
