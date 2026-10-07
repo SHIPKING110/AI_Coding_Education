@@ -219,7 +219,7 @@ onMounted(load)
           <label>API Key<input v-model="form.api_key" :type="form.showKey ? 'text' : 'password'" :placeholder="editing ? '留空则不修改' : 'sk-…'" /></label>
           <label>模型名称<input v-model="form.model" placeholder="如：deepseek-chat" /></label>
           <label class="span2">Embedding 模型（可选，用于知识库检索；DeepSeek 无 embedding 接口，需另配如硅基流动/Zhipu）
-            <input v-model="form.embed_model" placeholder="留空则知识库检索不可用" />
+            <input v-model="form.embed_model" placeholder="如千问 text-embedding-v3；留空则知识库检索不可用" />
           </label>
           <label class="check"><input v-model="form.make_default" type="checkbox" /> 设为默认配置</label>
           <label class="check"><input v-model="form.showKey" type="checkbox" /> 显示 Key 明文</label>

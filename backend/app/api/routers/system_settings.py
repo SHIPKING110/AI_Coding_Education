@@ -113,9 +113,15 @@ def read_settings(db: Session = Depends(get_db)) -> dict:
 def update_settings(
     payload: SystemSettingUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_teacher_permission("settings_manage")),
+    user: User = Depends(get_current_user),
 ) -> dict:
-    """更新全局个性化设置（需设置权限，默认管理员；教务默认可写，教师默认不可）。"""
+    """更新全局个性化设置（需个性化 tab 权限或设置总管权限）。"""
+    from app.models.permission import check as _check
+
+    if user.role not in (Role.ADMIN.value, Role.STAFF.value) and not (
+        _check(db, user, "settings_manage") or _check(db, user, "settings_tab_personalize")
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="暂无个性化设置操作权限，请联系管理员开通")
     row = _get_or_create(db)
     data = payload.model_dump(exclude_unset=True)
     if "login_theme" in data and data["login_theme"] not in ALLOWED_LOGIN_THEMES:

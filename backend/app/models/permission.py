@@ -51,11 +51,23 @@ PERMISSION_KEYS: dict[str, str] = {
     "teacher_edit": "教师管理-编辑",
     "teacher_delete": "教师管理-删除",
     "schedule_create": "排课与考勤-查看与新建排课",
+    "schedule_cancel": "排课与考勤-取消排课",
+    "invitation_create": "招生邀约-新建邀约",
     "package_create": "课时包-新建课时包",
+    "package_edit": "课时包-编辑",
     "package_off": "课时包-下架",
+    "assignment_ai": "AI习题-AI出题",
+    "assignment_create": "AI习题-新建作业",
     "order_visible": "订单管理-可见",
     "settings_manage": "设置模块-可见与管理",
+    "settings_tab_personalize": "设置-个性化设置（可见与操作）",
+    "settings_tab_model": "设置-模型配置（可见与操作）",
+    "settings_tab_business": "设置-业务功能设置（可见与操作）",
     "finance_view": "财务管理-可见",
+    "finance_revenue": "财务管理-创收统计",
+    "finance_records": "财务管理-课时流水",
+    "finance_salary": "财务管理-薪资核算（仅看自己）",
+    "finance_salary_all": "财务管理-薪资核算（看全员）",
     "nav_students": "导航可见-学员管理",
     "nav_invitations": "导航可见-招生邀约",
     "nav_classes": "导航可见-班级管理",
@@ -90,11 +102,23 @@ KEY_DEFAULTS: dict[str, bool] = {
     "teacher_edit": False,
     "teacher_delete": False,
     "schedule_create": True,
+    "schedule_cancel": False,
+    "invitation_create": True,
     "package_create": False,
+    "package_edit": False,
     "package_off": False,
+    "assignment_ai": True,
+    "assignment_create": True,
     "order_visible": False,
     "settings_manage": False,
+    "settings_tab_personalize": False,
+    "settings_tab_model": False,
+    "settings_tab_business": False,
     "finance_view": False,
+    "finance_revenue": False,
+    "finance_records": False,
+    "finance_salary": False,
+    "finance_salary_all": False,
     "nav_students": True,
     "nav_invitations": True,
     "nav_classes": True,
@@ -134,11 +158,23 @@ class TeacherPermission(Base):
     teacher_edit: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     teacher_delete: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     schedule_create: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    schedule_cancel: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    invitation_create: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     package_create: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    package_edit: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     package_off: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    assignment_ai: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    assignment_create: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     order_visible: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     settings_manage: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    settings_tab_personalize: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    settings_tab_model: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    settings_tab_business: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     finance_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    finance_revenue: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    finance_records: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    finance_salary: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    finance_salary_all: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     nav_students: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     nav_classes: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     nav_teachers: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")

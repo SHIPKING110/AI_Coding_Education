@@ -5,6 +5,8 @@ import * as echarts from 'echarts'
 
 import PageHead from '@/components/PageHead.vue'
 import OrdersView from '@/views/orders/OrdersView.vue'
+import { myPermissions } from '@/api/permissions'
+import { useAuthStore } from '@/stores/auth'
 import { listCampuses } from '@/api/business'
 import {
   getFinanceBySubject,
@@ -24,6 +26,20 @@ import {
 } from '@/api/enrollment'
 
 const activeTab = ref<'orders' | 'lessons' | 'records' | 'salary'>('orders')
+
+// 财务 tab 精细化可见：教师按 finance_* 键（finance_view 为总开关，后端同样校验）
+const auth = useAuthStore()
+const myPerms = ref<Record<string, boolean>>({})
+const canFin = (key: string): boolean => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value[key] === true || myPerms.value.finance_view === true
+}
+const visibleTabs = computed(() => ({
+  orders: canFin('finance_revenue'),
+  lessons: canFin('finance_revenue'),
+  records: canFin('finance_records'),
+  salary: canFin('finance_salary') || canFin('finance_salary_all'),
+}))
 
 // ---- 通用筛选 ----
 const campuses = ref<{ id: string; name: string }[]>([])
@@ -393,6 +409,16 @@ const subjectMax = computed(() => bySubject.value.reduce((m, x) => Math.max(m, N
 const teacherMax = computed(() => byTeacher.value.reduce((m, x) => Math.max(m, Number(x.commission)), 0))
 
 onMounted(async () => {
+  if (auth.user?.role === 'teacher') {
+    try {
+      myPerms.value = await myPermissions()
+    } catch {
+      myPerms.value = {}
+    }
+    // 默认选中第一个可见 tab，避免落在无权限 tab 上一片空白
+    const first = (['orders', 'lessons', 'records', 'salary'] as const).find((t) => visibleTabs.value[t])
+    if (first) activeTab.value = first
+  }
   defaultRange(13)
   try {
     campuses.value = await listCampuses()
@@ -418,19 +444,19 @@ onUnmounted(() => {
     />
 
     <div class="tabs">
-      <button class="tab" :class="{ active: activeTab === 'orders' }" @click="switchTab('orders')">
+      <button v-if="visibleTabs.orders" class="tab" :class="{ active: activeTab === 'orders' }" @click="switchTab('orders')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
         订单管理
       </button>
-      <button class="tab" :class="{ active: activeTab === 'lessons' }" @click="switchTab('lessons')">
+      <button v-if="visibleTabs.lessons" class="tab" :class="{ active: activeTab === 'lessons' }" @click="switchTab('lessons')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg>
         课时创收
       </button>
-      <button class="tab" :class="{ active: activeTab === 'records' }" @click="switchTab('records')">
+      <button v-if="visibleTabs.records" class="tab" :class="{ active: activeTab === 'records' }" @click="switchTab('records')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4M16 2v4M3 10h18" /></svg>
         收支流水
       </button>
-      <button class="tab" :class="{ active: activeTab === 'salary' }" @click="switchTab('salary')">
+      <button v-if="visibleTabs.salary" class="tab" :class="{ active: activeTab === 'salary' }" @click="switchTab('salary')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M3 9h18" /></svg>
         薪资核算
       </button>

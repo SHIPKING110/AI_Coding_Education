@@ -38,6 +38,7 @@ import { listCampusesApi, listTeachersApi, type UserOut } from '@/api/auth'
 import { listClasses, listStudents, type ClassOut } from '@/api/enrollment'
 import { useAiTasksStore, type UnifiedAiTask } from '@/stores/aiTasks'
 import { useAuthStore } from '@/stores/auth'
+import { myPermissions } from '@/api/permissions'
 import { fmtDateTimeFromIso } from '@/utils/date'
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -47,6 +48,21 @@ import StudentFilter, { type StudentFilterValue } from '@/components/StudentFilt
 
 const auth = useAuthStore()
 const router = useRouter()
+// AI出题 / 新建作业权限：管理员/教务全开；教师按权限管理配置（后端兜底 403）
+const myPerms = ref<Record<string, boolean>>({})
+const can = (key: string): boolean => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value[key] !== false
+}
+const showNoPerm = ref(false)
+const noPermText = ref('')
+function guard(key: string, label: string, action: () => void) {
+  if (can(key)) action()
+  else {
+    noPermText.value = `暂无${label}权限，请联系管理员开通。`
+    showNoPerm.value = true
+  }
+}
 const route = useRoute()
 const canEdit = computed(() => {
   const r = auth.user?.role
@@ -1273,6 +1289,13 @@ watch(publishClassIds, () => {
 })
 
 onMounted(async () => {
+  if (auth.user?.role === 'teacher') {
+    try {
+      myPerms.value = await myPermissions()
+    } catch {
+      myPerms.value = {}
+    }
+  }
   await Promise.all([loadList(), loadFolders()])
   // 从批改页「一键生成补练」跳转而来：自动打开补练草稿
   const draftId = route.query.draft
@@ -1293,11 +1316,11 @@ onMounted(async () => {
     <PageHead title="AI 习题" eyebrow="ASSIGNMENTS" sub="举一反三 / 作业模式生成题目 —— 人工审核编辑后发布到班级或学员">
       <template #actions>
       <div class="head-actions">
-        <button class="btn ai" @click="openAi">
+        <button class="btn ai" @click="guard('assignment_ai', 'AI 出题', openAi)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" /></svg>
           AI 出题
         </button>
-        <button class="btn primary" @click="newAssignment">
+        <button class="btn primary" @click="guard('assignment_create', '新建作业', newAssignment)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14" /></svg>
           新建作业
         </button>
@@ -1448,7 +1471,7 @@ onMounted(async () => {
             <div v-if="editorError" class="err-banner">{{ editorError }}</div>
             <div v-else-if="editorNotice" class="ok-banner">{{ editorNotice }}</div>
             <div class="editor-toolbar">
-              <button class="btn ai small" :disabled="!canEdit" @click="openAi"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" /></svg>AI 出题</button>
+              <button class="btn ai small" :disabled="!canEdit" @click="guard('assignment_ai', 'AI 出题', openAi)"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" /></svg>AI 出题</button>
               <button class="btn pool small" :disabled="!canEdit" @click="openPool('add')"><svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>历史题目</button>
               <button class="btn small" :disabled="!canEdit" @click="saveAssignment">
                 {{ saving ? '保存中…' : '保存草稿' }}
@@ -2130,6 +2153,14 @@ onMounted(async () => {
     </div>
 
     <!-- 删除 / 撤回 确认弹窗 -->
+    <ConfirmDialog
+      :visible="showNoPerm"
+      title="暂无操作权限"
+      :message="noPermText"
+      confirm-text="知道了"
+      @confirm="showNoPerm = false"
+      @cancel="showNoPerm = false"
+    />
     <ConfirmDialog
       :visible="confirmDel"
       title="删除作业"

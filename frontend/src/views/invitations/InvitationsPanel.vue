@@ -2,6 +2,9 @@
 import { computed, onMounted, ref } from 'vue'
 
 import PaginationBar from '@/components/PaginationBar.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { myPermissions } from '@/api/permissions'
+import { useAuthStore } from '@/stores/auth'
 import { listClasses } from '@/api/enrollment'
 import { listUsersApi } from '@/api/client'
 import { listSubjects } from '@/api/business'
@@ -81,6 +84,18 @@ function flash(t: string) {
 
 // 新建/编辑
 const showCreate = ref(false)
+// 操作权限：教师按权限管理配置（后端兜底 403），无权限点击弹提示
+const auth = useAuthStore()
+const myPerms = ref<Record<string, boolean>>({})
+const can = (key: string): boolean => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value[key] !== false
+}
+const showNoPerm = ref(false)
+function guard(key: string, action: () => void) {
+  if (can(key)) action()
+  else showNoPerm.value = true
+}
 const editing = ref<InvitationOut | null>(null)
 const createError = ref('')
 const form = ref({
@@ -443,6 +458,13 @@ async function submitSign() {
 
 onMounted(async () => {
   load()
+  if (auth.user?.role === 'teacher') {
+    try {
+      myPerms.value = await myPermissions()
+    } catch {
+      myPerms.value = {}
+    }
+  }
   try {
     const [s, c, u, all, camps] = await Promise.all([
       listSubjects().catch(() => []),
@@ -498,7 +520,7 @@ onMounted(async () => {
       <span class="filter-sep">—</span>
       <input v-model="dateTo" type="date" class="filter-input" title="记录日期止" @change="onFilter()" />
       <button class="btn primary sm" @click="onFilter()">查询</button>
-      <button class="btn ghost sm" @click="openCreate()">＋ 新建邀约</button>
+      <button class="btn ghost sm" @click="guard('invitation_create', openCreate)">＋ 新建邀约</button>
     </div>
 
     <p v-if="error" class="error-banner">{{ error }}</p>
@@ -523,6 +545,7 @@ onMounted(async () => {
         <div class="invite-meta muted-sm">
           <span>邀约人：{{ inv.staff_name || '—' }}{{ inv.staff_campus ? `（${inv.staff_campus}）` : '' }}</span>
           <span v-if="inv.trial_teacher_name">体验教师：{{ inv.trial_teacher_name }}</span>
+          <span v-if="inv.trial_class_name">排课班级：{{ inv.trial_class_name }}</span>
           <span v-if="inv.created_at">记录于 {{ inv.created_at.slice(0, 16).replace('T', ' ') }}</span>
         </div>
         <p v-if="inv.remark" class="invite-remark">{{ inv.remark }}</p>
@@ -672,6 +695,14 @@ onMounted(async () => {
     <div v-if="previewImg" class="overlay img-overlay" @click="previewImg = ''">
       <img :src="previewImg" class="preview" />
     </div>
+    <ConfirmDialog
+      :visible="showNoPerm"
+      title="暂无操作权限"
+      message="暂无新建邀约权限，请联系管理员开通。"
+      confirm-text="知道了"
+      @confirm="showNoPerm = false"
+      @cancel="showNoPerm = false"
+    />
   </div>
 </template>
 

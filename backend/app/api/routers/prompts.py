@@ -33,6 +33,8 @@ def list_prompt_templates(
     普通用户：system + published + 本人 personal（账号隔离）；
     管理员：额外可见全部 personal（便于管理/发布优秀模板）。
     """
+    # 系统预设幂等补齐：保证报告/反馈五套自带提示词始终存在
+    prompt_crud.ensure_system_presets(db)
     items = prompt_crud.list_visible(db, user.id, is_admin=user.role == Role.ADMIN.value)
     return [_to_out(t) for t in items]
 
@@ -67,6 +69,11 @@ def update_prompt_template(
     if t is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="模板不存在")
     is_admin = user.role == Role.ADMIN.value
+    if t.scope == PromptScope.SYSTEM.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="系统内置模板不可删除，仅可编辑修改",
+        )
     if t.scope == PromptScope.PERSONAL.value and not (is_admin or t.owner_id == user.id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权编辑他人的个人模板")
     if t.scope in (PromptScope.SYSTEM.value, PromptScope.PUBLISHED.value) and not is_admin:

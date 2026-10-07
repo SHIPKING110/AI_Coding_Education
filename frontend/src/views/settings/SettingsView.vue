@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import { myPermissions } from '@/api/permissions'
+import { useAuthStore } from '@/stores/auth'
 import PersonalizeView from '@/views/settings/PersonalizeView.vue'
 import LLMConfigTab from '@/views/settings/LLMConfigTab.vue'
 import {
@@ -33,6 +35,18 @@ import {
 } from '@/api/payroll'
 
 const activeTab = ref<'personalize' | 'business' | 'llm'>('personalize')
+
+// 设置 tab 可见与操作：教师按 settings_tab_* 键（settings_manage 为总开关）
+const myPerms = ref<Record<string, boolean>>({})
+const canSet = (key: string): boolean => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value[key] === true || myPerms.value.settings_manage === true
+}
+const visibleTabs = computed(() => ({
+  personalize: canSet('settings_tab_personalize'),
+  llm: canSet('settings_tab_model'),
+  business: canSet('settings_tab_business'),
+}))
 
 // ---- 校区 ----
 const campuses = ref<CampusOut[]>([])
@@ -74,6 +88,8 @@ function flash(text: string) {
   msg.value = text
   setTimeout(() => (msg.value = ''), 3000)
 }
+
+const auth = useAuthStore()
 
 async function loadAll() {
   error.value = ''
@@ -313,7 +329,18 @@ async function saveRules() {
   }
 }
 
-onMounted(loadAll)
+onMounted(async () => {
+  if (auth.user?.role === 'teacher') {
+    try {
+      myPerms.value = await myPermissions()
+    } catch {
+      myPerms.value = {}
+    }
+    const first = (['personalize', 'llm', 'business'] as const).find((t) => visibleTabs.value[t])
+    if (first) activeTab.value = first
+  }
+  await loadAll()
+})
 </script>
 
 <template>
@@ -325,13 +352,13 @@ onMounted(loadAll)
     >
       <template #actions>
       <div class="tabs">
-        <button class="tab" :class="{ active: activeTab === 'personalize' }" @click="activeTab = 'personalize'">
+        <button v-if="visibleTabs.personalize" class="tab" :class="{ active: activeTab === 'personalize' }" @click="activeTab = 'personalize'">
           个性化设置
         </button>
-        <button class="tab" :class="{ active: activeTab === 'llm' }" @click="activeTab = 'llm'">
+        <button v-if="visibleTabs.llm" class="tab" :class="{ active: activeTab === 'llm' }" @click="activeTab = 'llm'">
           模型配置
         </button>
-        <button class="tab" :class="{ active: activeTab === 'business' }" @click="activeTab = 'business'">
+        <button v-if="visibleTabs.business" class="tab" :class="{ active: activeTab === 'business' }" @click="activeTab = 'business'">
           业务功能设置
         </button>
       </div>
@@ -341,11 +368,11 @@ onMounted(loadAll)
     <p v-if="error" class="error-banner">{{ error }}</p>
     <p v-if="msg" class="success-banner">{{ msg }}</p>
 
-    <PersonalizeView v-if="activeTab === 'personalize'" embedded />
+    <PersonalizeView v-if="activeTab === 'personalize' && visibleTabs.personalize" embedded />
 
-    <LLMConfigTab v-else-if="activeTab === 'llm'" />
+    <LLMConfigTab v-else-if="activeTab === 'llm' && visibleTabs.llm" />
 
-    <div v-else class="biz">
+    <div v-else-if="visibleTabs.business" class="biz">
       <!-- 校区 -->
       <section class="card">
         <h2>校区名称</h2>

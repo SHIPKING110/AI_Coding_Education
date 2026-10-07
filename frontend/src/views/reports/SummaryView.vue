@@ -32,6 +32,7 @@ import {
   type ReportOut,
 } from '@/api/report'
 import { useAuthStore } from '@/stores/auth'
+import { listPromptTemplates, type PromptTemplateOut } from '@/api/prompt'
 import { dayKeyFromIso, parseServerTime } from '@/utils/date'
 
 echarts.use([LineChart, BarChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
@@ -129,6 +130,9 @@ const historyLimit = 10
 const showAiModal = ref(false)
 const aiNote = ref('')
 const aiError = ref('')
+// 提示词模板（报告类系统预设 + 个人模板）：所选模板内容作为写作风格要求
+const aiTemplates = ref<PromptTemplateOut[]>([])
+const aiTemplateId = ref('')
 const aiQuarters = ref<ReportOut[]>([])
 const aiQuartersLoading = ref(false)
 const aiQuarterIds = ref<string[]>([])
@@ -200,9 +204,11 @@ async function pollAiJob() {
       // 仅当任务对应的报告仍是当前编辑器中的报告时才回填，避免切周期后串稿
       if (report.value && report.value.id === aiJobReportId.value) {
         applyAiDraft({ title: st.title, content: st.content ?? {} })
-        showNotice('AI 总结草稿已生成，请编辑后保存')
+        showAiDone.value = true
+        aiDoneMsg.value = 'AI 总结草稿已生成，已自动回填到编辑器，请检查编辑后保存。'
       } else {
-        showNotice('AI 总结草稿已生成，请在历史记录中打开对应报告查看（已回填到该报告的编辑器需重新打开）')
+        showAiDone.value = true
+        aiDoneMsg.value = 'AI 总结草稿已生成，请在历史记录中打开对应报告查看（已回填到该报告的编辑器需重新打开）。'
       }
       clearAiJobState()
     } else if (st.status === 'failed') {
@@ -235,10 +241,19 @@ async function submitAiJob() {
     return
   }
   aiError.value = ''
+  // AI 生成门禁（与 PPT 同口径，避免空内容浪费 token）：年度已选季度总结时放行
+  if (!(activeTab.value === 'yearly' && aiQuarterIds.value.length > 0)) {
+    const reason = summaryEmptyReason()
+    if (reason) {
+      aiError.value = 'AI 生成需要实质内容：正文为空且期间统计全零，请先填写总结内容或确认周期内有数据后再生成（避免浪费 token 生成无意义内容）'
+      return
+    }
+  }
   try {
     const job = await createAiDraftJob(report.value.id, {
       extra_note: aiNote.value || null,
       ...(activeTab.value === 'yearly' ? { source_quarter_ids: aiQuarterIds.value } : {}),
+      template_id: aiTemplateId.value || null,
     })
     aiJobId.value = job.job_id
     aiJobReportId.value = report.value.id
@@ -797,6 +812,10 @@ async function confirmGenPpt() {
 const showPptResult = ref(false)
 const pptResult = ref<{ ok: boolean; message: string } | null>(null)
 
+/** AI 草稿生成成功弹窗（替代顶部横幅/toast，避免用户注意不到） */
+const showAiDone = ref(false)
+const aiDoneMsg = ref('')
+
 /** 结果弹窗确认：成功时直接打开下载/预览，失败时关闭 */
 function confirmPptResult() {
   showPptResult.value = false
@@ -805,7 +824,7 @@ function confirmPptResult() {
   }
 }
 
-function openAI() {
+async function openAI() {
   if (!report.value) {
     showError('请先保存草稿，再生成 AI 总结')
     return
@@ -814,6 +833,16 @@ function openAI() {
   aiError.value = ''
   aiQuarterIds.value = []
   aiQuarters.value = []
+  // 加载报告类提示词模板，默认选中当前总结类型对应的系统预设
+  try {
+    const all = await listPromptTemplates()
+    aiTemplates.value = all.filter((t) => t.scope !== 'system' || t.name.startsWith('【报告'))
+    const want = activeTab.value === 'quarterly' ? '【报告·季度总结】' : '【报告·年度总结】'
+    aiTemplateId.value = aiTemplates.value.find((t) => t.name.startsWith(want))?.id ?? aiTemplates.value[0]?.id ?? ''
+  } catch {
+    aiTemplates.value = []
+    aiTemplateId.value = ''
+  }
   showAiModal.value = true
   if (activeTab.value === 'yearly') {
     loadAiQuarters()
@@ -1252,6 +1281,14 @@ onBeforeUnmount(() => {
             本年度暂无已发布季度总结，将回退为周报口径生成，建议先完善各季度总结。
           </p>
         </div>
+        <label v-if="aiTemplates.length">
+          提示词模板
+          <select v-model="aiTemplateId">
+            <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
+              {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
+            </option>
+          </select>
+        </label>
         <label>
           补充说明（可选）
           <textarea v-autogrow v-model="aiNote" rows="3" placeholder="想强调的重点、遗漏事项等…" />
@@ -1310,6 +1347,16 @@ onBeforeUnmount(() => {
       :cancel-text="pptResult?.ok ? '稍后' : undefined"
       @confirm="confirmPptResult"
       @cancel="showPptResult = false"
+    />
+
+    <!-- AI 草稿生成成功弹窗 -->
+    <ConfirmDialog
+      :visible="showAiDone"
+      title="AI 草稿已生成"
+      :message="aiDoneMsg"
+      confirm-text="知道了"
+      @confirm="showAiDone = false"
+      @cancel="showAiDone = false"
     />
 
     <!-- 新建草稿二次确认：编辑器有未保存改动时提示 -->

@@ -297,7 +297,7 @@ onMounted(async () => {
         </div>
         <div class="unit-price">约 ¥{{ (Number(p.price) / p.total_lessons).toFixed(2) }} / 课时</div>
         <div class="card-ops">
-          <button class="op-btn edit" @click="guard('package_create', '编辑课时包', () => openEdit(p))">编辑</button>
+          <button class="op-btn edit" @click="guard('package_edit', '编辑课时包', () => openEdit(p))">编辑</button>
           <button v-if="p.status === 'active'" class="op-btn danger" @click="guard('package_off', '下架课时包', () => deactivate(p))">下架</button>
           <span v-else class="inactive-note">已停售</span>
         </div>

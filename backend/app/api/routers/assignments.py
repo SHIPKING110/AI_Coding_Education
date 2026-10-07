@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import get_current_user, require_roles
+from app.api.deps import get_current_user, require_roles, require_teacher_permission
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.crud import assignment as assignment_crud
@@ -163,7 +163,7 @@ def _normalize_ai_questions(items: object) -> list[dict]:
 def ai_generate(
     payload: AiGenerateIn,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*ASSIGN_ROLES)),
+    user: User = Depends(require_teacher_permission("assignment_ai")),
 ) -> AiTaskOut:
     """AI 出题（FR-AI-01 / FR-AI-04），异步任务：
 
@@ -209,7 +209,7 @@ def ai_generate(
 def ai_refine(
     payload: AiRefineIn,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*ASSIGN_ROLES)),
+    user: User = Depends(require_teacher_permission("assignment_ai")),
 ) -> AiTaskOut:
     """对话优化单题（FR-AI-05），异步任务：按教师修改要求重新生成题目。"""
     from app.services import llm_context as _llm_ctx
@@ -527,7 +527,7 @@ def list_assignments(
 def create_assignment(
     payload: AssignmentCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*ASSIGN_ROLES)),
+    user: User = Depends(require_teacher_permission("assignment_create")),
 ) -> AssignmentOut:
     """新建作业（草稿）：标题 + 说明 + 题目列表（可选班级/截止时间）。"""
     assignment = assignment_crud.create(

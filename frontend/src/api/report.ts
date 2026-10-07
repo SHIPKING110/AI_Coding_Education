@@ -358,7 +358,7 @@ export async function reportAiDraft(
 /** 提交 AI 草稿异步任务：立即返回 job_id，可关弹窗/切页面后轮询取结果 */
 export async function createAiDraftJob(
   id: string,
-  payload: { extra_note?: string | null; source_quarter_ids?: string[] },
+  payload: { extra_note?: string | null; source_quarter_ids?: string[]; template_id?: string | null },
 ): Promise<AiDraftJobOut> {
   const { data } = await http.post<AiDraftJobOut>(`/reports/${id}/ai-draft-jobs`, payload, {
     timeout: 15000,

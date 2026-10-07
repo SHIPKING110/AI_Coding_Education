@@ -316,12 +316,18 @@ def update_schedule(
 def cancel_schedule(
     schedule_id: uuid.UUID,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*MANAGE_ROLES)),
+    user: User = Depends(require_teacher_permission("schedule_cancel")),
 ) -> None:
     s = schedule_crud.get(db, schedule_id)
     if s is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
     _require_own_schedule(s, user)
+    # 对账门禁：已有学员操作（请假/已到）时不允许直接取消，否则账对不上
+    if attendance_crud.acted_count(db, schedule_id) > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="该排课已有学员请假或考勤记录，无法直接取消；如需调整请先联系教务处理考勤后再试",
+        )
     schedule_crud.cancel(db, s)
 
 

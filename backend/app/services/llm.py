@@ -297,6 +297,7 @@ def generate_report_summary(
     report_type: str,
     material: str,
     extra_note: str | None = None,
+    style_note: str | None = None,
 ) -> dict[str, Any]:
     """按报告类型生成日报/周报草稿（结构化 JSON）。
 
@@ -332,6 +333,7 @@ def generate_report_summary(
         f"{schema_hint}\n\n"
         f"素材信息：\n{material}\n"
         + (f"\n教师补充说明：{extra_note}\n" if extra_note else "")
+        + (f"\n写作风格要求（来自所选提示词模板）：\n{style_note}\n" if style_note else "")
     )
     raw = _invoke(prompt)
     return _parse_report_json(raw, report_type)
@@ -343,6 +345,7 @@ def generate_period_summary(
     material: str,
     extra_note: str | None = None,
     from_quarters: bool = False,
+    style_note: str | None = None,
 ) -> dict[str, Any]:
     """按季度/年度素材生成总结草稿（结构化 JSON）。
 
@@ -382,6 +385,7 @@ def generate_period_summary(
         f"{schema_hint}\n\n"
         f"素材信息：\n{material}\n"
         + (f"\n教师补充说明：{extra_note}\n" if extra_note else "")
+        + (f"\n写作风格要求（来自所选提示词模板）：\n{style_note}\n" if style_note else "")
     )
     raw = _invoke(prompt)
     return _parse_report_json(raw, report_type)

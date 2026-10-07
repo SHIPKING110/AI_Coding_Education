@@ -10,15 +10,30 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_teacher_permission
+from app.api.deps import get_current_user, require_teacher_permission
 from app.core.database import get_db
 from app.models.business import RevenueLedger
 from app.models.enrollment import Order, OrderStatus
-from app.models.user import User
+from app.models.user import Role, User
+
+
+def _require_finance(db: Session, user: User, *keys: str) -> None:
+    """财务 tab 级权限：管理员/教务放行；教师需 finance_view（全开）或任一指定 tab 键。"""
+    if user.role in (Role.ADMIN.value, Role.STAFF.value):
+        return
+    if user.role != Role.TEACHER.value:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    from app.models.permission import check as _check
+
+    if _check(db, user, "finance_view") or any(_check(db, user, k) for k in keys):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN, detail="暂无该财务查看权限，请联系管理员开通"
+    )
 
 router = APIRouter(prefix="/finance", tags=["finance"])
 
@@ -63,9 +78,10 @@ def finance_records(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(get_current_user),
 ) -> dict:
     """总流水：全学员课时流水 + 金额汇总（调课时带单价的计入金额）。"""
+    _require_finance(db, user, "finance_records")
     from app.models.enrollment import LessonRecord as _LR
     from app.models.enrollment import Student as _ST
 
@@ -143,6 +159,7 @@ def finance_overview(
     _: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """创收总览：按粒度分桶的创收/绩效/退款/实收 + 合计。"""
+    _require_finance(db, user, "finance_revenue")
     if granularity not in ("day", "month", "quarter", "year"):
         granularity = "day"
     start, end = _range(date_from, date_to)
@@ -224,6 +241,7 @@ def finance_by_subject(
     _: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """按科目：消耗课时/创收/绩效。"""
+    _require_finance(db, user, "finance_revenue")
     start, end = _range(date_from, date_to)
     rows = db.execute(
         select(
@@ -259,6 +277,7 @@ def finance_by_teacher(
     _: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """按教师：带课节数/消耗课时/绩效工资。"""
+    _require_finance(db, user, "finance_revenue")
     from app.models.user import User as UserModel
 
     start, end = _range(date_from, date_to)
@@ -308,6 +327,7 @@ def finance_order_stats(
     _: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """订单管理 tab 图表：按下单日期的各状态订单数/金额 + 退款金额。"""
+    _require_finance(db, user, "finance_revenue")
     start, end = _range(date_from, date_to)
     from app.models.enrollment import Student as _Student2
 
@@ -397,6 +417,7 @@ def finance_lesson_stats(
     _: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """课时创收：应耗课时（排课计划）/消耗课时（考勤账本）/课耗率/创收/绩效/盈收。"""
+    _require_finance(db, user, "finance_revenue")
     from app.models.business import Subject as _Subject
     from app.models.enrollment import Class as _Class
     from app.models.schedule import Schedule as _Schedule

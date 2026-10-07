@@ -927,7 +927,7 @@ onMounted(async () => {
       <div class="modal tpl-modal">
         <h2>提示词模板</h2>
         <p class="batch-hint">
-          模板用于 AI 生成课堂评价。系统模板开箱即用；「我的」模板仅自己可见；
+          模板用于 AI 生成课堂评价。系统模板开箱即用（可编辑、不可删除）；「我的」模板仅自己可见；
           <template v-if="isAdmin">管理员可将模板「发布」给全校教师使用。</template>
           <template v-else>发布需管理员操作。</template>
         </p>
@@ -952,7 +952,8 @@ onMounted(async () => {
                     <button v-if="tplCanEdit(t)" class="tpl-btn" @click="editTpl(t)">编辑</button>
                     <button v-if="isAdmin && key === 'personal'" class="tpl-btn" @click="publishTpl(t)">发布</button>
                     <button v-if="isAdmin && key === 'published'" class="tpl-btn" @click="unpublishTpl(t)">撤回</button>
-                    <button v-if="tplCanEdit(t)" class="tpl-btn danger" @click="removeTpl(t)">删除</button>
+                    <button v-if="tplCanEdit(t) && key !== 'system'" class="tpl-btn danger" @click="removeTpl(t)" title="系统模板不可删除，仅可编辑">删除</button>
+                    <span v-if="key === 'system'" class="tpl-sys-tip" title="系统模板可编辑、不可删除">系统模板·可改不可删</span>
                   </div>
                 </div>
               </div>
@@ -1762,6 +1763,10 @@ h1 {
 }
 .tpl-btn.danger:hover {
   background: var(--danger-soft);
+}
+.tpl-sys-tip {
+  font-size: 11px;
+  color: var(--ink-3);
 }
 .tpl-form {
   border-left: 1px solid var(--line);

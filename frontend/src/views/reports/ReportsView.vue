@@ -24,8 +24,10 @@ import {
   type WeeklyStatsOut,
 } from '@/api/report'
 import { toastApiError } from '@/stores/toast'
+import { listPromptTemplates, type PromptTemplateOut } from '@/api/prompt'
 import { useAuthStore } from '@/stores/auth'
 import PageHead from '@/components/PageHead.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import SummaryView from '@/views/reports/SummaryView.vue'
@@ -135,10 +137,29 @@ const historyTotal = ref(0)
 const historyOffset = ref(0)
 const historyLimit = 10
 
+/** AI 生成门禁（与后端 ai-draft 门禁同口径）：正文全空且统计全零则拦截，避免浪费 token */
+function aiEmptyReason(): string {
+  const fields = FIELD_MAP[activeTab.value as keyof typeof FIELD_MAP] ?? []
+  const hasText = fields.some((f) => (form.value.fields[f.key] ?? '').trim())
+  if (hasText) return ''
+  const s = activeTab.value === 'daily' ? dailyStats.value : weeklyStats.value
+  const allZero =
+    !s || [(s as { schedules?: number }).schedules, (s as { attended?: number }).attended, (s as { consumed_lessons?: number }).consumed_lessons].every((v) => (v ?? 0) === 0)
+  if (!allZero) return ''
+  return '暂无实质内容：报告内容为空且期间统计全零，请先填写报告内容或确认期间内有排课数据后再生成（避免浪费 token 生成无意义内容）'
+}
+
+// 生成成功弹窗（替代顶部横幅，避免用户注意不到）
+const showAiDone = ref(false)
+const aiDoneMsg = ref('')
+
 // —— AI 草稿弹窗（后台任务：提交即关弹窗，完成后顶部任务条回填，不锁页面） ——
 const showAiModal = ref(false)
 const aiNote = ref('')
 const aiError = ref('')
+// 提示词模板（报告类系统预设 + 个人模板）：所选模板内容作为写作风格要求
+const aiTemplates = ref<PromptTemplateOut[]>([])
+const aiTemplateId = ref('')
 const aiJobStatus = ref<'idle' | 'pending' | 'running' | 'succeeded' | 'failed'>('idle')
 const aiJobElapsed = ref(0)
 const aiJobError = ref('')
@@ -203,9 +224,11 @@ async function pollDailyWeeklyAiJob() {
           const v = c[f.key]
           if (v) form.value.fields[f.key] = v
         }
-        showNotice('AI 报告草稿已生成，请编辑后保存')
+        showAiDone.value = true
+        aiDoneMsg.value = 'AI 报告草稿已生成，已自动回填到编辑器，请检查编辑后保存。'
       } else {
-        showNotice('AI 报告草稿已生成，请在历史记录中打开对应报告查看')
+        showAiDone.value = true
+        aiDoneMsg.value = 'AI 报告草稿已生成，请在历史记录中打开对应报告查看。'
       }
       clearAiJobState()
     } else if (st.status === 'failed') {
@@ -477,6 +500,16 @@ async function openAI() {
   }
   aiNote.value = ''
   aiError.value = ''
+  // 加载报告类提示词模板（系统预设 + 个人模板），默认选中当前报告类型对应的系统预设
+  try {
+    const all = await listPromptTemplates()
+    aiTemplates.value = all.filter((t) => t.scope !== 'system' || t.name.startsWith('【报告'))
+    const want = activeTab.value === 'daily' ? '【报告·日报】' : '【报告·周报】'
+    aiTemplateId.value = aiTemplates.value.find((t) => t.name.startsWith(want))?.id ?? aiTemplates.value[0]?.id ?? ''
+  } catch {
+    aiTemplates.value = []
+    aiTemplateId.value = ''
+  }
   showAiModal.value = true
 }
 
@@ -488,8 +521,16 @@ async function generateAI() {
     return
   }
   aiError.value = ''
+  const emptyReason = aiEmptyReason()
+  if (emptyReason) {
+    aiError.value = emptyReason
+    return
+  }
   try {
-    const job = await createAiDraftJob(report.value.id, { extra_note: aiNote.value || null })
+    const job = await createAiDraftJob(report.value.id, {
+      extra_note: aiNote.value || null,
+      template_id: aiTemplateId.value || null,
+    })
     aiJobStatus.value = 'pending'
     aiJobElapsed.value = 0
     aiJobError.value = ''
@@ -1065,6 +1106,14 @@ onBeforeUnmount(() => {
       <div class="modal ai-modal">
         <h2>AI 生成{{ activeTab === 'daily' ? '日报' : '周报' }}</h2>
         <p class="batch-hint">AI 将基于{{ activeTab === 'daily' ? '今日排课/考勤' : '本周统计数据与日报' }}生成草稿，回填到表单，请审核修改后保存、提交。</p>
+        <label v-if="aiTemplates.length">
+          提示词模板
+          <select v-model="aiTemplateId">
+            <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
+              {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
+            </option>
+          </select>
+        </label>
         <label>
           补充说明（可选）
           <textarea v-autogrow v-model="aiNote" rows="3" placeholder="想强调的重点、遗漏事项等…"></textarea>
@@ -1079,6 +1128,16 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- AI 生成成功弹窗 -->
+    <ConfirmDialog
+      :visible="showAiDone"
+      title="AI 草稿已生成"
+      :message="aiDoneMsg"
+      confirm-text="知道了"
+      @confirm="showAiDone = false"
+      @cancel="showAiDone = false"
+    />
     </template>
   </div>
 </template>

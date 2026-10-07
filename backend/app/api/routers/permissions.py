@@ -39,11 +39,23 @@ class PermissionUpdate(BaseModel):
     teacher_edit: bool | None = None
     teacher_delete: bool | None = None
     schedule_create: bool | None = None
+    schedule_cancel: bool | None = None
+    invitation_create: bool | None = None
     package_create: bool | None = None
+    package_edit: bool | None = None
     package_off: bool | None = None
+    assignment_ai: bool | None = None
+    assignment_create: bool | None = None
     order_visible: bool | None = None
     settings_manage: bool | None = None
+    settings_tab_personalize: bool | None = None
+    settings_tab_model: bool | None = None
+    settings_tab_business: bool | None = None
     finance_view: bool | None = None
+    finance_revenue: bool | None = None
+    finance_records: bool | None = None
+    finance_salary: bool | None = None
+    finance_salary_all: bool | None = None
 
 
 def _row_out(teacher: User, row: TeacherPermission | None) -> dict:
