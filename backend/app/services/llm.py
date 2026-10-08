@@ -284,8 +284,19 @@ def generate_feedback_evaluation(
         "homework": homework,
     }
     prompt = fill_template(template_content, values)
+    material = (
+        "\n\n【本堂课素材（必须引用，禁止编造素材之外的事实）】"
+        f"\n学员：{student_name or '（未填写）'}"
+        f"\n班级：{class_name or '（未填写）'}｜科目：{subject or '（未填写）'}"
+        f"\n课题：{topic or '（未填写）'}"
+        f"\n课题内容：{content or '（未填写）'}"
+        f"\n课堂表现：{performance or '（未填写）'}"
+        f"\n今日作业：{homework or '（未填写）'}"
+    )
     prompt += (
-        "\n\n请直接输出课堂评价正文（100-300 字，1-3 段）："
+        material
+        + "\n\n请直接输出课堂评价正文（100-300 字，1-3 段）："
+        "开头必须点出本堂课的科目与课题，并引用 1-2 个上面素材中的课堂细节；"
         "如果已提供现有课堂评价，请在其基础上润色完善（保留事实、优化措辞、适当补充细节）；"
         "否则按模板要求直接生成。只输出评价正文，不要输出标题、JSON 或多余说明。"
     )

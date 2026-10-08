@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { listCampusesApi, listTeachersApi, type UserOut } from '@/api/auth'
 import { listClasses, type ClassOut } from '@/api/enrollment'
@@ -90,6 +90,24 @@ const aiRow = ref<FbRow | null>(null)
 const aiTemplates = ref<PromptTemplateOut[]>([])
 const aiTemplateId = ref('')
 const aiGenerating = ref(false)
+// 后台任务态：关闭弹窗后仍保留，顶部进度条持续展示直到完成
+const aiTaskName = ref('')
+const aiTaskFeedbackId = ref('')
+const aiElapsed = ref(0)
+let aiTimer: ReturnType<typeof setInterval> | null = null
+function startAiTimer() {
+  stopAiTimer()
+  aiElapsed.value = 0
+  aiTimer = setInterval(() => {
+    aiElapsed.value += 1
+  }, 1000)
+}
+function stopAiTimer() {
+  if (aiTimer) {
+    clearInterval(aiTimer)
+    aiTimer = null
+  }
+}
 const aiSelectedTemplate = computed(
   () => aiTemplates.value.find((t) => t.id === aiTemplateId.value) ?? null,
 )
@@ -313,7 +331,7 @@ async function openAiModal(r: FbRow) {
   showAiModal.value = true
 }
 
-/** AI 生成/润色课堂评价（FR-FB-03）：选择模板后调用后端，回填课堂评价输入框 */
+/** AI 生成/润色课堂评价（FR-FB-03）：提交后即进后台，关闭弹窗不中断，顶部进度条持续展示 */
 async function aiEnhance() {
   const r = aiRow.value
   if (!r || !r.feedback_id) return
@@ -321,26 +339,48 @@ async function aiEnhance() {
     aiTplError.value = '请选择提示词模板'
     return
   }
+  if (aiGenerating.value) {
+    aiTplError.value = '已有 AI 任务在后台生成中，请等待完成后再提交'
+    return
+  }
+  // 快照提交参数：生成期间用户改表单不影响本次任务；完成后按 feedback_id 回填
+  const fid = r.feedback_id
+  const payload = {
+    title: r.title || null,
+    topic: r.topic || null,
+    content: r.content || null,
+    performance: r.performance || null,
+    evaluation: r.evaluation || null,
+    homework: r.homework || null,
+    template_id: aiTemplateId.value,
+  }
   aiGenerating.value = true
   aiTplError.value = ''
+  aiTaskName.value = r.student_name
+  aiTaskFeedbackId.value = fid
+  startAiTimer()
+  showAiModal.value = false
+  showNotice(`AI 正在后台生成「${r.student_name}」的课堂评价（约 20-60 秒），完成后自动回填`)
   try {
-    const draft = await aiEnhanceFeedback(r.feedback_id, {
-      title: r.title || null,
-      topic: r.topic || null,
-      content: r.content || null,
-      performance: r.performance || null,
-      evaluation: r.evaluation || null,
-      homework: r.homework || null,
-      template_id: aiTemplateId.value,
-    })
-    if (draft.evaluation != null) r.evaluation = draft.evaluation
+    const draft = await aiEnhanceFeedback(fid, payload)
+    const target = rows.value.find((x) => x.feedback_id === fid)
+    if (target && draft.evaluation != null) target.evaluation = draft.evaluation
+    if (aiRow.value && aiRow.value.feedback_id === fid && draft.evaluation != null) {
+      aiRow.value.evaluation = draft.evaluation
+    }
     aiUsedCount.value += 1
-    showNotice(`「${r.student_name}」AI 课堂评价已生成，可继续编辑或再次润色`)
-    showAiModal.value = false
+    showNotice(`「${aiTaskName.value}」AI 课堂评价已生成，已回填到课堂评价框，可继续编辑或再次润色`)
   } catch (e: any) {
-    aiTplError.value = e?.response?.data?.detail || 'AI 课堂评价生成失败'
+    const msg = e?.response?.data?.detail || 'AI 课堂评价生成失败'
+    aiTplError.value = msg
+    showError(msg)
+    // 失败时重新打开弹窗方便重试
+    if (aiRow.value && aiRow.value.feedback_id === fid) showAiModal.value = true
   } finally {
     aiGenerating.value = false
+    aiTaskName.value = ''
+    aiTaskFeedbackId.value = ''
+    stopAiTimer()
   }
 }
 
@@ -616,6 +656,10 @@ onMounted(async () => {
   await Promise.all([loadTeacherOptions(), loadClassOptions()])
   await loadAll()
 })
+
+onBeforeUnmount(() => {
+  stopAiTimer()
+})
 </script>
 
 <template>
@@ -696,6 +740,17 @@ onMounted(async () => {
 
     <p v-if="error" class="error-banner">{{ error }}</p>
     <p v-if="notice" class="notice-banner">{{ notice }}</p>
+
+    <!-- AI 后台任务条：弹窗关闭后仍在生成，此处持续展示进度 -->
+    <div v-if="aiGenerating" class="ai-job-bar">
+      <div class="ai-job-main">
+        <span class="ai-job-dot" />
+        <span>AI 正在后台生成「{{ aiTaskName }}」的课堂评价，已用时 {{ aiElapsed }} 秒（通常 20-60 秒），可继续编辑其他内容…</span>
+      </div>
+      <div class="ai-job-actions">
+        <button class="btn ghost small" @click="showAiModal = true">后台运行中，可忽略</button>
+      </div>
+    </div>
 
     <!-- 排课选择（仅已完成） -->
     <div class="schedule-picker">
@@ -898,7 +953,8 @@ onMounted(async () => {
       <div class="modal ai-modal">
         <h2>AI 课堂评价</h2>
         <p class="batch-hint">
-          为「{{ aiRow.student_name }}」选择提示词模板，AI 将结合课题/课堂表现/作业生成课堂评价，写入「课堂评价」输入框，可编辑后再润色。
+          为「{{ aiRow.student_name }}」选择提示词模板，AI 将结合科目/课题/课题内容/课堂表现/作业生成课堂评价，写入「课堂评价」输入框，可编辑后再润色。
+          提交后即进后台生成，可直接关闭弹窗继续操作，顶部进度条会持续展示直到完成。
         </p>
         <label>
           提示词模板
@@ -917,7 +973,7 @@ onMounted(async () => {
           <button class="btn ghost" @click="showAiModal = false">取消</button>
           <button class="btn primary" @click="aiEnhance" :disabled="aiGenerating || !aiTemplateId">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l1.9 5.1L19 9l-5.1 1.9L12 16l-1.9-5.1L5 9l5.1-1.9L12 2zM19 16l.9 2.1L22 19l-2.1.9L19 22l-.9-2.1L16 19l2.1-.9L19 16z" /></svg>
-            {{ aiGenerating ? '生成中…' : aiRow.evaluation ? '润色' : '生成' }}
+            {{ aiGenerating ? `后台生成中 ${aiElapsed}s…` : aiRow.evaluation ? '提交后台润色' : '提交后台生成' }}
           </button>
         </div>
       </div>
@@ -1153,6 +1209,43 @@ h1 {
   border-radius: 10px;
   margin-bottom: 14px;
   font-size: 13px;
+}
+
+/* AI 后台任务条（与报告/总结页同款）：弹窗关闭后仍展示进度 */
+.ai-job-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  margin: 0 0 14px;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  color: #4338ca;
+}
+.ai-job-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-job-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #6366f1;
+  animation: ai-pulse 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes ai-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+.ai-job-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 /* 排课选择器（仅已完成） */

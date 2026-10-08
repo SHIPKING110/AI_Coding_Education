@@ -4,7 +4,6 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
 import { getUnreadCount, listNotifications, markNotificationRead, type NotificationOut } from '@/api/client'
 import { myPermissions } from '@/api/permissions'
-import { getSystemSettings } from '@/api/system'
 import { useAiTasksStore } from '@/stores/aiTasks'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
@@ -295,18 +294,11 @@ const navItems = computed(() =>
   }),
 )
 
-/** 侧边栏排序（个性化设置 → 模块上下排序，全局生效） */
-const navOrderMap = ref(new Map<string, number>())
-async function loadNavOrder() {
-  try {
-    const s = await getSystemSettings()
-    const list = Array.isArray(s.nav_order) ? s.nav_order : []
-    navOrderMap.value = new Map(list.map((t, i) => [t, i]))
-  } catch {
-    navOrderMap.value = new Map()
-  }
-}
-onMounted(loadNavOrder)
+/** 侧边栏排序（个性化设置 → 模块上下排序，全局生效）：订阅 theme.navOrder，保存后即时重排 */
+const navOrderMap = computed(() => new Map(theme.navOrder.map((t, i) => [t, i])))
+onMounted(() => {
+  if (!theme.loaded) void theme.load()
+})
 </script>
 
 <template>

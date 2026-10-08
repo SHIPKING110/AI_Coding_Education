@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { myPermissions } from '@/api/permissions'
 import { useAuthStore } from '@/stores/auth'
 import PersonalizeView from '@/views/settings/PersonalizeView.vue'
@@ -83,6 +84,9 @@ const rules = ref<CommissionRuleOut[]>([])
 
 const msg = ref('')
 const error = ref('')
+const showSaveDialog = ref(false)
+const saveDialogOk = ref(true)
+const saveDialogMsg = ref('')
 
 function flash(text: string) {
   msg.value = text
@@ -233,8 +237,14 @@ async function saveFinance() {
     financeNote.value = out.note || ''
     flash('财务设置已保存（新消耗按此比例记账，历史账本不变）')
   } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+    saveDialogOk.value = false
+    saveDialogMsg.value = e?.response?.data?.detail || '保存失败'
+    showSaveDialog.value = true
+    return
   }
+  saveDialogOk.value = true
+  saveDialogMsg.value = '财务设置已保存（新消耗按此比例记账，历史账本不变）'
+  showSaveDialog.value = true
 }
 
 function pctToRatio(pct: string): string {
@@ -325,8 +335,14 @@ async function saveRules() {
     )
     flash('提成规则已保存（薪资核算按新单价）')
   } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+    saveDialogOk.value = false
+    saveDialogMsg.value = e?.response?.data?.detail || '保存失败'
+    showSaveDialog.value = true
+    return
   }
+  saveDialogOk.value = true
+  saveDialogMsg.value = '提成规则已保存，薪资核算将按新单价执行。'
+  showSaveDialog.value = true
 }
 
 onMounted(async () => {
@@ -556,6 +572,14 @@ onMounted(async () => {
         <div class="add-row"><button class="btn primary sm" @click="saveRules">保存提成规则</button></div>
       </section>
     </div>
+    <ConfirmDialog
+      :visible="showSaveDialog"
+      :title="saveDialogOk ? '保存成功' : '保存失败'"
+      :message="saveDialogMsg"
+      confirm-text="知道了"
+      @confirm="showSaveDialog = false"
+      @cancel="showSaveDialog = false"
+    />
   </div>
 </template>
 

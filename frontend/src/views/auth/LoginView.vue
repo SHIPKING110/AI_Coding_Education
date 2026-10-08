@@ -56,6 +56,7 @@ async function onSubmit() {
       </div>
       <h1>{{ theme.loginTitle }}</h1>
       <p class="sub">{{ theme.loginSubtitle }}</p>
+      <p v-if="theme.loginHero && theme.loginTheme !== 'poster'" class="hero">{{ theme.loginHero }}</p>
 
       <form @submit.prevent="onSubmit">
         <label>
@@ -225,6 +226,17 @@ h1 {
   color: var(--login-sub);
   font-size: 12.5px;
   margin: 8px 0 22px;
+}
+.sub:has(+ .hero) {
+  margin-bottom: 8px;
+}
+.hero {
+  text-align: center;
+  color: var(--login-sub);
+  opacity: 0.85;
+  font-size: 12px;
+  margin: 0 0 22px;
+  line-height: 1.6;
 }
 label {
   display: block;

@@ -6,6 +6,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { getSystemSettings, updateSystemSettings, uploadSettingImage } from '@/api/system'
 import { DESKTOP_BGS, LOGIN_THEMES, SIDEBAR_THEMES, UI_THEMES, useThemeStore } from '@/stores/theme'
 import BrandLogo from '@/components/BrandLogo.vue'
@@ -63,6 +64,9 @@ const error = ref('')
 const doneMsg = ref('')
 const uploading = ref(false)
 const uploadError = ref('')
+const showResult = ref(false)
+const resultOk = ref(true)
+const resultMsg = ref('')
 const bgFileInput = ref<HTMLInputElement | null>(null)
 const logoFileInput = ref<HTMLInputElement | null>(null)
 const isBgImageUrl = computed(() => /^(\/|https?:\/\/)/.test(customBg.value.trim()))
@@ -155,8 +159,14 @@ async function save() {
       customBg.value = bg
     }
     doneMsg.value = '已保存，全局生效（含登录页与各端桌面背景）。'
+    resultOk.value = true
+    resultMsg.value = '个性化设置已保存，全局生效（含登录页与各端桌面背景）。'
+    showResult.value = true
   } catch (e: any) {
     error.value = e?.response?.data?.detail || '保存失败'
+    resultOk.value = false
+    resultMsg.value = error.value
+    showResult.value = true
   } finally {
     saving.value = false
   }
@@ -198,7 +208,7 @@ onMounted(load)
 
       <section class="card">
         <h2>登录品牌（标题 / Logo / 强调色）</h2>
-        <p class="muted">登录框标题、副标题、Logo 与按钮颜色，保存后登录页即时换装。</p>
+        <p class="muted">主标题、副标题、海报副文案在全部 4 个登录主题的登录卡片上都会显示（“品牌海报”主题还会在左侧大字区再展示一次）。Logo 与强调色同样全主题生效。</p>
         <div class="brand-grid">
           <label class="field">
             <span>主标题</span>
@@ -210,7 +220,7 @@ onMounted(load)
           </label>
         </div>
         <label class="field">
-          <span>海报副文案（品牌海报主题左侧底部）</span>
+          <span>海报副文案（全主题登录卡片副标题下方小字；品牌海报主题同时在左侧大字区展示）</span>
           <input v-model="loginHero" type="text" placeholder="如：排课 · 考勤 · 课时 · 反馈，一站式教务" />
         </label>
         <div class="field">
@@ -345,6 +355,22 @@ onMounted(load)
         </div>
       </section>
     </template>
+
+    <!-- 嵌入在“设置”页时 PageHead 被隐藏，底部常驻保存条保证随时可存 -->
+    <div class="save-bar" :class="{ embedded }">
+      <span class="save-bar-tip">调整后记得保存，保存后全局生效</span>
+      <button class="btn primary" :disabled="saving" @click="save">
+        {{ saving ? '保存中…' : '保存设置' }}
+      </button>
+    </div>
+    <ConfirmDialog
+      :visible="showResult"
+      :title="resultOk ? '保存成功' : '保存失败'"
+      :message="resultMsg"
+      confirm-text="知道了"
+      @confirm="showResult = false"
+      @cancel="showResult = false"
+    />
   </div>
 </template>
 
@@ -691,5 +717,28 @@ h1 {
 .mini-btn:not(:disabled):hover {
   border-color: var(--brand);
   color: var(--brand-strong);
+}
+.save-bar {
+  position: sticky;
+  bottom: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.12);
+}
+.save-bar-tip {
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.save-bar .btn {
+  flex-shrink: 0;
 }
 </style>
