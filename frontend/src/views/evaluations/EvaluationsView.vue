@@ -1339,7 +1339,10 @@ onBeforeUnmount(() => {
                 {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
               </option>
             </select>
-            <button class="link-btn" type="button" @click="showTplManage = true">管理评估模板</button>
+            <button class="tpl-manage-btn" type="button" @click="showTplManage = true" title="查看、新建、编辑提示词模板">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+              管理评估模板
+            </button>
           </div>
           <div class="ai-row">
             <textarea v-autogrow v-model="aiInstruction" rows="2" placeholder="对话式优化指令，如：把语气更亲切，突出逻辑思维的进步" />
@@ -1754,6 +1757,13 @@ onBeforeUnmount(() => {
     />
 
     <PptAgentDialog ref="pptAgentRef" />
+    <PromptTemplateManager
+      :visible="showTplManage"
+      scene="evaluation"
+      title="评估提示词模板管理"
+      @close="showTplManage = false"
+      @changed="loadAiTemplates"
+    />
   </div>
 </template>
 
@@ -3127,6 +3137,44 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 10px;
   align-items: flex-end;
+}
+.tpl-row {
+  align-items: center;
+}
+.tpl-select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.tpl-manage-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  border: none;
+  background: rgba(255, 255, 255, 0.94);
+  color: #4338ca;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 9px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.25);
+}
+.tpl-manage-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.3);
+}
+.tpl-manage-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 .ai-row textarea {

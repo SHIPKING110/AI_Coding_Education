@@ -215,6 +215,22 @@ def ensure_system_presets(db: Session) -> int:
             t.scene = "evaluation"
         else:
             t.scene = "feedback"
+    # 纠偏：历史版本曾把报告/评估预设误标为 feedback，按名称前缀强制归位
+    mislabeled = db.scalars(
+        select(PromptTemplate).where(PromptTemplate.scope == PromptScope.SYSTEM.value)
+    ).all()
+    for t in mislabeled:
+        want = (
+            "report"
+            if t.name.startswith("【报告")
+            else "evaluation"
+            if t.name.startswith("【评估")
+            else "feedback"
+            if t.name.startswith("【反馈")
+            else None
+        )
+        if want and t.scene != want:
+            t.scene = want
     # 曾用名迁移：季度总结模板改名（内容已优化，老库同步改名避免重复出现两条）
     renamed = db.scalars(
         select(PromptTemplate).where(

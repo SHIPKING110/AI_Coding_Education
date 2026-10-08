@@ -1112,15 +1112,18 @@ onBeforeUnmount(() => {
       <div class="modal ai-modal">
         <h2>AI 生成{{ activeTab === 'daily' ? '日报' : '周报' }}</h2>
         <p class="batch-hint">AI 将基于{{ activeTab === 'daily' ? '今日排课/考勤' : '本周统计数据与日报' }}生成草稿，回填到表单，请审核修改后保存、提交。</p>
-        <label v-if="aiTemplates.length">
-          提示词模板
-          <select v-model="aiTemplateId">
-            <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
-              {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
-            </option>
-          </select>
+        <label v-if="aiTemplates.length" class="ai-tpl-label">
+          提示词模板（日报 / 周报 / 季度 / 年度共用库）
+          <span class="ai-tpl-row">
+            <select v-model="aiTemplateId">
+              <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
+                {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
+              </option>
+            </select>
+            <button class="tpl-manage-btn" type="button" @click="showTplManage = true" title="新建 / 编辑报告模板（含季度·年度预设）">⚙ 管理模板</button>
+          </span>
         </label>
-        <button class="link-btn" type="button" @click="showTplManage = true">管理报告模板（新建/编辑）</button>
+        <button v-else class="tpl-manage-btn" type="button" @click="showTplManage = true">⚙ 管理报告模板（日报 / 周报 / 季度 / 年度）</button>
         <label>
           补充说明（可选）
           <textarea v-autogrow v-model="aiNote" rows="3" placeholder="想强调的重点、遗漏事项等…"></textarea>
@@ -1634,6 +1637,38 @@ onBeforeUnmount(() => {
 .btn.small {
   padding: 7px 12px;
   font-size: 12.5px;
+}
+.ai-tpl-label {
+  display: block;
+}
+.ai-tpl-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.ai-tpl-row select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.tpl-manage-btn {
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tpl-manage-btn:hover {
+  filter: brightness(1.06);
 }
 .btn:disabled {
   opacity: 0.5;

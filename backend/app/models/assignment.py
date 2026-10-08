@@ -16,7 +16,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
+from app.core.database import Base, enum_values
 from app.models.enrollment import Student
 from app.models.user import User
 
@@ -80,7 +80,7 @@ class Assignment(Base):
     title: Mapped[str] = mapped_column(String(160))
     # 作业模式：classwork=课堂作业（答案默认收起，仅发学员账号）/ homework=课后作业（常规班级发布）
     mode: Mapped[str] = mapped_column(
-        Enum(AssignmentMode, native_enum=False, length=16),
+        Enum(AssignmentMode, native_enum=False, values_callable=enum_values, length=16),
         default=AssignmentMode.HOMEWORK,
         index=True,
     )
@@ -98,7 +98,7 @@ class Assignment(Base):
     folder: Mapped["AssignmentFolder | None"] = relationship()
     deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(
-        Enum(AssignmentStatus, native_enum=False, length=16),
+        Enum(AssignmentStatus, native_enum=False, values_callable=enum_values, length=16),
         default=AssignmentStatus.DRAFT,
         index=True,
     )
@@ -188,7 +188,7 @@ class Question(Base):
     )
     order_no: Mapped[int] = mapped_column(Integer, default=1)
     type: Mapped[str] = mapped_column(
-        Enum(QuestionType, native_enum=False, length=24), index=True
+        Enum(QuestionType, native_enum=False, values_callable=enum_values, length=24), index=True
     )
     stem: Mapped[str] = mapped_column(Text)  # 题干
     options: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 选择题选项
@@ -228,7 +228,7 @@ class Submission(Base):
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 满分（题目数×1，或自定义）
     status: Mapped[str] = mapped_column(
-        Enum(SubmissionStatus, native_enum=False, length=24),
+        Enum(SubmissionStatus, native_enum=False, values_callable=enum_values, length=24),
         default=SubmissionStatus.NOT_SUBMITTED,
         index=True,
     )

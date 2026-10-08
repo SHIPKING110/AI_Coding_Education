@@ -5,7 +5,7 @@ from datetime import date, datetime
 from sqlalchemy import JSON, Date, DateTime, Enum, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
+from app.core.database import Base, enum_values
 from app.models.enrollment import Class, Student
 from app.models.user import User
 
@@ -46,7 +46,7 @@ class Evaluation(Base):
     # 家长会 PPT（FR-EV-05，uploads/ppt/ 相对路径）
     ppt_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(
-        Enum(EvaluationStatus, native_enum=False, length=16), default=EvaluationStatus.DRAFT
+        Enum(EvaluationStatus, native_enum=False, values_callable=enum_values, length=16), default=EvaluationStatus.DRAFT
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

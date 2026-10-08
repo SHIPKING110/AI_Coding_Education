@@ -156,7 +156,7 @@ def finance_overview(
     date_to: str | None = Query(default=None, description="YYYY-MM-DD"),
     campus: str | None = Query(default=None, description="按校区筛选（学员校区）"),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """创收总览：按粒度分桶的创收/绩效/退款/实收 + 合计。"""
     _require_finance(db, user, "finance_revenue")
@@ -238,7 +238,7 @@ def finance_by_subject(
     date_from: str | None = Query(default=None),
     date_to: str | None = Query(default=None),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """按科目：消耗课时/创收/绩效。"""
     _require_finance(db, user, "finance_revenue")
@@ -274,7 +274,7 @@ def finance_by_teacher(
     date_from: str | None = Query(default=None),
     date_to: str | None = Query(default=None),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """按教师：带课节数/消耗课时/绩效工资。"""
     _require_finance(db, user, "finance_revenue")
@@ -324,7 +324,7 @@ def finance_order_stats(
     date_to: str | None = Query(default=None),
     campus: str | None = Query(default=None, description="按校区筛选"),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """订单管理 tab 图表：按下单日期的各状态订单数/金额 + 退款金额。"""
     _require_finance(db, user, "finance_revenue")
@@ -414,7 +414,7 @@ def finance_lesson_stats(
     date_to: str | None = Query(default=None),
     campus: str | None = Query(default=None, description="按校区筛选"),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(require_teacher_permission("finance_view")),
 ) -> dict:
     """课时创收：应耗课时（排课计划）/消耗课时（考勤账本）/课耗率/创收/绩效/盈收。"""
     _require_finance(db, user, "finance_revenue")

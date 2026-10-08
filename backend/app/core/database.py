@@ -1,3 +1,5 @@
+import enum
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
@@ -6,6 +8,15 @@ from app.core.config import get_settings
 
 class Base(DeclarativeBase):
     """所有 ORM 模型的基类。"""
+
+
+def enum_values(e: type[enum.Enum]) -> list[str]:
+    """SQLAlchemy Enum 列统一按成员 value（小写）存取。
+
+    默认行为按成员名（ADMIN/SCHEDULED…）校验，库里历史数据是小写 value
+    （admin/scheduled…），读行直接 LookupError 全页 500；所有模型统一用它。
+    """
+    return [m.value for m in e]
 
 
 settings = get_settings()

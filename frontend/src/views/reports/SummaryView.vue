@@ -1287,15 +1287,18 @@ onBeforeUnmount(() => {
             本年度暂无已发布季度总结，将回退为周报口径生成，建议先完善各季度总结。
           </p>
         </div>
-        <label v-if="aiTemplates.length">
-          提示词模板
-          <select v-model="aiTemplateId">
-            <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
-              {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
-            </option>
-          </select>
+        <label v-if="aiTemplates.length" class="ai-tpl-label">
+          提示词模板（日报 / 周报 / 季度 / 年度共用库）
+          <span class="ai-tpl-row">
+            <select v-model="aiTemplateId">
+              <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
+                {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
+              </option>
+            </select>
+            <button class="tpl-manage-btn" type="button" @click="showTplManage = true" title="新建 / 编辑总结模板（含季度·年度预设）">⚙ 管理模板</button>
+          </span>
         </label>
-        <button class="link-btn" type="button" @click="showTplManage = true">管理总结模板（新建/编辑）</button>
+        <button v-else class="tpl-manage-btn" type="button" @click="showTplManage = true">⚙ 管理总结模板（季度 / 年度预设在此）</button>
         <label>
           补充说明（可选）
           <textarea v-autogrow v-model="aiNote" rows="3" placeholder="想强调的重点、遗漏事项等…" />
@@ -1857,6 +1860,38 @@ onBeforeUnmount(() => {
   font-weight: 600;
   cursor: pointer;
   padding: 0 2px;
+}
+.ai-tpl-label {
+  display: block;
+}
+.ai-tpl-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.ai-tpl-row select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.tpl-manage-btn {
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tpl-manage-btn:hover {
+  filter: brightness(1.06);
 }
 .link-btn:hover {
   text-decoration: underline;
