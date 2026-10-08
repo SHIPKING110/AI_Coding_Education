@@ -141,16 +141,28 @@ def feedback_editor_rows(
     """反馈编辑器行：该排课班级的全部学员 + 各自考勤状态 + 已有反馈。
 
     请假(leave)学员不需要反馈（前端置灰/变色）；签到(attended)学员展示反馈编辑区。
+    同一班级同一天的多节课共用一次反馈：考勤/已有反馈按同组排课合并匹配
+    （组内任一节签到即需反馈，任一节已发即算完成；新建落到组内最早一节）。
     """
     s = schedule_crud.get(db, schedule_id)
     if s is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="排课不存在")
 
     students = attendance_crud.all_students_for_schedule(db, s)
-    attend_map = {
-        a.student_id: a.status for a in attendance_crud.list_for_schedule(db, schedule_id)
-    }
-    feedback_map = {f.student_id: f for f in feedback_crud.list_by_schedule(db, schedule_id)}
+    group_ids = feedback_crud.group_schedule_ids(db, s)
+    attend_rows = attendance_crud.list_for_schedules(db, group_ids)
+    attend_map: dict[uuid.UUID, str] = {}
+    for a in attend_rows:
+        # 组内任一节签到即视为签到；否则保留请假/未标记
+        if a.status == "attended":
+            attend_map[a.student_id] = a.status
+        else:
+            attend_map.setdefault(a.student_id, a.status)
+    feedback_map: dict[uuid.UUID, Feedback] = {}
+    for f in feedback_crud.list_by_schedules(db, group_ids):
+        cur = feedback_map.get(f.student_id)
+        if cur is None or (cur.status != "published" and f.status == "published"):
+            feedback_map[f.student_id] = f
 
     rows: list[FeedbackEditorRow] = []
     for stu in students:

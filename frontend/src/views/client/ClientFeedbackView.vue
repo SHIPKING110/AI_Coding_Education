@@ -137,14 +137,22 @@ watch(
           <div v-if="fb.media_urls && fb.media_urls.length" class="media-row">
             <span class="label">课堂照片</span>
             <div class="media-grid">
-              <img
-                v-for="(url, i) in fb.media_urls"
-                :key="i"
-                :src="url"
-                alt="课堂照片"
-                class="media-thumb"
-                loading="lazy"
-              />
+              <template v-for="(url, i) in fb.media_urls" :key="i">
+                <video
+                  v-if="/\.(mp4|webm|mov|m4v|avi)(\?|$)/i.test(url)"
+                  :src="url"
+                  controls
+                  preload="metadata"
+                  class="media-thumb"
+                />
+                <img
+                  v-else
+                  :src="url"
+                  alt="课堂照片"
+                  class="media-thumb"
+                  loading="lazy"
+                />
+              </template>
             </div>
           </div>
         </div>

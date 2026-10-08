@@ -28,6 +28,7 @@ import {
 } from '@/api/prompt'
 import { useAuthStore } from '@/stores/auth'
 import PageHead from '@/components/PageHead.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import { addDays, dayKey, fmtDateTimeFromIso, mondayOf, toLocalNaiveIso } from '@/utils/date'
 
@@ -107,6 +108,18 @@ function stopAiTimer() {
     clearInterval(aiTimer)
     aiTimer = null
   }
+}
+
+/** AI 失败原因转中文：超时 / 断网 / 限流单独提示，避免一律“生成失败” */
+function aiErrorText(e: any): string {
+  if (e?.response?.data?.detail) return e.response.data.detail
+  if (e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message ?? '')) {
+    return 'AI 生成超时（超过 120 秒无响应），可能是模型繁忙，请稍后重试'
+  }
+  if (!e?.response && (e?.code === 'ERR_NETWORK' || /network/i.test(e?.message ?? ''))) {
+    return '网络连接失败，请检查网络后重试'
+  }
+  return 'AI 课堂评价生成失败，请稍后重试'
 }
 const aiSelectedTemplate = computed(
   () => aiTemplates.value.find((t) => t.id === aiTemplateId.value) ?? null,
@@ -371,7 +384,7 @@ async function aiEnhance() {
     aiUsedCount.value += 1
     showNotice(`「${aiTaskName.value}」AI 课堂评价已生成，已回填到课堂评价框，可继续编辑或再次润色`)
   } catch (e: any) {
-    const msg = e?.response?.data?.detail || 'AI 课堂评价生成失败'
+    const msg = aiErrorText(e)
     aiTplError.value = msg
     showError(msg)
     // 失败时重新打开弹窗方便重试
@@ -446,13 +459,25 @@ async function saveTpl() {
   }
 }
 
-async function removeTpl(t: PromptTemplateOut) {
-  if (!window.confirm(`确认删除提示词模板「${t.name}」？`)) return
+const showTplDeleteConfirm = ref(false)
+const tplDeleting = ref<PromptTemplateOut | null>(null)
+function removeTpl(t: PromptTemplateOut) {
+  tplDeleting.value = t
+  showTplDeleteConfirm.value = true
+}
+async function confirmTplDelete() {
+  const t = tplDeleting.value
+  showTplDeleteConfirm.value = false
+  if (!t) {
+    return
+  }
   try {
     await deletePromptTemplate(t.id)
     await loadTplTemplates()
   } catch (e: any) {
     tplNotice.value = e?.response?.data?.detail || '删除失败'
+  } finally {
+    tplDeleting.value = null
   }
 }
 
@@ -487,8 +512,13 @@ function tplScopeLabel(scope: string): string {
 }
 
 async function saveRow(r: FbRow) {
+  await saveRowQuiet(r, true)
+}
+
+/** 静默保存一行：返回 null=成功，字符串=失败原因；notify=true 时保留单行提示 */
+async function saveRowQuiet(r: FbRow, notify = false): Promise<string | null> {
   const s = selectedSchedule.value
-  if (!s) return
+  if (!s) return '无排课上下文'
   r.saving = true
   try {
     const base = {
@@ -509,52 +539,91 @@ async function saveRow(r: FbRow) {
       r.feedback_id = f.id
       r.status = f.status
     }
-    showNotice(`「${r.student_name}」反馈已保存`)
+    if (notify) showNotice(`「${r.student_name}」反馈已保存`)
     refreshScheduleStatus()
+    return null
   } catch (e: any) {
-    showError(e?.response?.data?.detail || '保存失败')
+    const msg = e?.response?.data?.detail || '保存失败'
+    if (notify) showError(msg)
+    return msg
   } finally {
     r.saving = false
   }
 }
 
 const savingAll = ref(false)
+// 批量操作结果弹窗：顶部横幅易错过，改用弹窗汇总成功/跳过/失败
+const showBatchResult = ref(false)
+const batchResultTitle = ref('')
+const batchResultMsg = ref('')
 async function saveAll() {
   savingAll.value = true
   error.value = ''
+  let ok = 0
+  const failed: string[] = []
+  let skipped = 0
   for (const r of editableRows.value) {
-    if (r.status === 'published') continue
-    await saveRow(r)
+    if (r.status === 'published') {
+      skipped += 1
+      continue
+    }
+    const err = await saveRowQuiet(r)
+    if (err) failed.push(`「${r.student_name}」${err}`)
+    else ok += 1
   }
   savingAll.value = false
-  showNotice(`已保存 ${editableRows.value.length} 名学员反馈`)
   refreshScheduleStatus()
+  batchResultTitle.value = failed.length ? '全部保存（部分失败）' : '全部保存完成'
+  batchResultMsg.value =
+    `成功保存 ${ok} 名` +
+    (skipped ? `，跳过已发送 ${skipped} 名` : '') +
+    (failed.length ? `；失败 ${failed.length} 名：${failed.join('；')}` : '')
+  showBatchResult.value = true
 }
 
 async function publishRow(r: FbRow) {
+  await publishRowQuiet(r, true)
+}
+
+async function publishRowQuiet(r: FbRow, notify = false): Promise<string | null> {
   if (!r.feedback_id) {
-    showError(`「${r.student_name}」尚未保存，请先保存再发送给家长`)
-    return
+    const msg = '尚未保存，请先保存再发送'
+    if (notify) showError(`「${r.student_name}」${msg}`)
+    return msg
   }
   r.saving = true
   try {
     const f = await publishFeedback(r.feedback_id)
     r.status = f.status
-    showNotice(`「${r.student_name}」反馈已发送给家长`)
+    if (notify) showNotice(`「${r.student_name}」反馈已发送给家长`)
     refreshScheduleStatus()
+    return null
   } catch (e: any) {
-    showError(e?.response?.data?.detail || '发送失败')
+    const msg = e?.response?.data?.detail || '发送失败'
+    if (notify) showError(msg)
+    return msg
   } finally {
     r.saving = false
   }
 }
 
 /** 撤回已发送反馈为草稿（重新编辑后再次发送），防止发错/误发 */
-async function unpublishRow(r: FbRow) {
+const showRecallConfirm = ref(false)
+const recallRow = ref<FbRow | null>(null)
+function unpublishRow(r: FbRow) {
   if (!r.feedback_id) {
     return
   }
-  if (!window.confirm(`确认撤回「${r.student_name}」的反馈？撤回后可重新编辑并再次发送给家长。`)) return
+  recallRow.value = r
+  showRecallConfirm.value = true
+}
+async function confirmRecall() {
+  const r = recallRow.value
+  showRecallConfirm.value = false
+  if (!r || !r.feedback_id) {
+    recallRow.value = null
+    return
+  }
   r.saving = true
   try {
     const f = await unpublishFeedback(r.feedback_id)
@@ -565,21 +634,35 @@ async function unpublishRow(r: FbRow) {
     showError(e?.response?.data?.detail || '撤回失败')
   } finally {
     r.saving = false
+    recallRow.value = null
   }
 }
 
 async function publishAll() {
   error.value = ''
+  let ok = 0
+  const failed: string[] = []
+  let skipped = 0
   for (const r of editableRows.value) {
     if (!r.feedback_id) {
-      showError(`「${r.student_name}」未保存，跳过发送。请先保存或批量保存后再发送`)
+      failed.push(`「${r.student_name}」未保存，跳过发送（请先保存）`)
       continue
     }
-    if (r.status === 'published') continue
-    await publishRow(r)
+    if (r.status === 'published') {
+      skipped += 1
+      continue
+    }
+    const err = await publishRowQuiet(r)
+    if (err) failed.push(`「${r.student_name}」${err}`)
+    else ok += 1
   }
-  showNotice('批量发送完成')
   refreshScheduleStatus()
+  batchResultTitle.value = failed.length ? '全部发送（部分未发送）' : '全部发送完成'
+  batchResultMsg.value =
+    `成功发送 ${ok} 名` +
+    (skipped ? `，跳过已发送 ${skipped} 名` : '') +
+    (failed.length ? `；未发送 ${failed.length} 名：${failed.join('；')}` : '')
+  showBatchResult.value = true
 }
 
 let statusRefresh = 0
@@ -632,7 +715,17 @@ function removeMedia(r: FbRow, url: string) {
 }
 
 function mediaUrl(url: string): string {
-  return url.startsWith('http') ? url : `http://localhost:8000${url}`
+  // 后端返回 /uploads/... 相对路径：走同源相对地址（经网关/nginx 代理），避免写死 localhost:8000
+  if (/^https?:\/\//i.test(url)) return url
+  return url.startsWith('/') ? url : `/${url}`
+}
+
+function isVideoUrl(url: string): boolean {
+  return /\.(mp4|webm|mov|m4v|avi)(\?|$)/i.test(url)
+}
+
+function isImageUrl(url: string): boolean {
+  return /\.(png|jpe?g|gif|webp|bmp)(\?|$)/i.test(url)
 }
 
 // 筛选联动：
@@ -714,7 +807,7 @@ onBeforeUnmount(() => {
     <div class="stats-row">
       <div class="stat-card">
         <span class="stat-num" style="color: #6366f1">{{ stats.pending }}</span>
-        <span class="stat-label">待反馈学员</span>
+        <span class="stat-label" title="按（班级·天·学员）去重：同一班级同一天多节课只算一次">待反馈学员</span>
       </div>
       <div class="stat-card">
         <span class="stat-num" style="color: #059669">{{ stats.feedback_done }}</span>
@@ -757,8 +850,9 @@ onBeforeUnmount(() => {
       <div class="schedule-picker-head">
         <span class="sp-title">选择已上完的排课</span>
         <span v-if="filtersLoading" class="sp-loading">加载中…</span>
-        <span v-else class="sp-count">{{ completedSchedules.length }} 节</span>
+        <span v-else class="sp-count" title="同一班级同一天的多节课合并为一条，一天只反馈一次">{{ completedSchedules.length }} 个班级·日</span>
       </div>
+      <p class="sp-hint">同一班级同一天的多节课合并为一条，一天只反馈一次；统计按（班级·天·学员）去重。</p>
       <div v-if="completedSchedules.length === 0 && !filtersLoading" class="sp-empty">
         当前筛选条件下暂无已上完的排课
       </div>
@@ -776,6 +870,7 @@ onBeforeUnmount(() => {
             <div class="schedule-body">
               <div class="schedule-name">
                 {{ s.class_name }}
+                <span v-if="(s.group_count ?? 1) > 1" class="group-chip" :title="`本组含 ${s.group_count} 节课，反馈一次即可`">1 天 {{ s.group_count }} 节·合并反馈</span>
                 <span class="status-pill" :class="s.all_done ? 'done' : 'todo'">
                   {{ s.all_done ? '已全部反馈' : `待反馈 ${Math.max(s.attended - s.feedback_done, 0)} 人` }}
                 </span>
@@ -883,8 +978,11 @@ onBeforeUnmount(() => {
             </button>
             <div v-if="r.media_urls.length" class="media-list">
               <div v-for="u in r.media_urls" :key="u" class="media-item">
-                <img v-if="u.match(/\.(png|jpe?g|gif|webp|bmp)(\?|$)/i)" :src="mediaUrl(u)" alt="素材" />
-                <span v-else class="video-tag">🎬 视频</span>
+                <a v-if="isImageUrl(u)" :href="mediaUrl(u)" target="_blank" rel="noopener" class="media-link">
+                  <img :src="mediaUrl(u)" alt="素材" />
+                </a>
+                <video v-else-if="isVideoUrl(u)" :src="mediaUrl(u)" controls preload="metadata" />
+                <a v-else :href="mediaUrl(u)" target="_blank" rel="noopener" class="file-tag">📎 附件</a>
                 <button class="media-del" title="移除" @click="removeMedia(r, u)">×</button>
               </div>
             </div>
@@ -911,6 +1009,38 @@ onBeforeUnmount(() => {
         全部发送给家长
       </button>
     </div>
+
+    <!-- 删除模板确认弹窗（替代原生 confirm，风格统一） -->
+    <ConfirmDialog
+      :visible="showTplDeleteConfirm"
+      title="删除提示词模板？"
+      :message="tplDeleting ? `确认删除模板「${tplDeleting.name}」？删除后使用该模板的 AI 生成将回退到系统默认模板。` : ''"
+      confirm-text="确认删除"
+      danger
+      @confirm="confirmTplDelete"
+      @cancel="showTplDeleteConfirm = false; tplDeleting = null"
+    />
+
+    <!-- 撤回确认弹窗（替代原生 confirm，风格统一） -->
+    <ConfirmDialog
+      :visible="showRecallConfirm"
+      title="撤回反馈重新编辑？"
+      :message="recallRow ? `确认撤回「${recallRow.student_name}」的反馈？撤回后家长端将看不到该条反馈，可重新编辑并再次发送。` : ''"
+      confirm-text="撤回并编辑"
+      danger
+      @confirm="confirmRecall"
+      @cancel="showRecallConfirm = false; recallRow = null"
+    />
+
+    <!-- 批量保存/发送结果弹窗（替代顶部横幅，避免错过） -->
+    <ConfirmDialog
+      :visible="showBatchResult"
+      :title="batchResultTitle"
+      :message="batchResultMsg"
+      confirm-text="知道了"
+      @confirm="showBatchResult = false"
+      @cancel="showBatchResult = false"
+    />
 
     <!-- 批量填入弹窗 -->
     <div v-if="showBatch" class="overlay" @click.self="showBatch = false">
@@ -1274,6 +1404,21 @@ h1 {
   color: var(--ink-3);
   font-size: 12.5px;
 }
+.sp-hint {
+  color: var(--ink-3);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+.group-chip {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: #eef2ff;
+  color: #4f46e5;
+  border: 1px solid #c7d2fe;
+}
 .sp-empty {
   text-align: center;
   color: var(--ink-3);
@@ -1627,6 +1772,28 @@ h1 {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+.media-link {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.media-item video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #0f172a;
+}
+.file-tag {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 11px;
+  background: #f1f5f9;
+  color: var(--ink-2);
+  text-decoration: none;
 }
 .video-tag {
   display: flex;
