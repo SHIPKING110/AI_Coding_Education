@@ -58,6 +58,12 @@ const selectedScheduleId = ref('')
 const selectedSchedule = computed(() =>
   completedSchedules.value.find((s) => s.id === selectedScheduleId.value),
 )
+/** 我的班级模式：只显示需要反馈的（有待反馈学员）；全部模式：显示所有 */
+const visibleSchedules = computed(() =>
+  viewMode.value === 'mine' && isTeacher.value
+    ? completedSchedules.value.filter((s) => Math.max(s.attended - s.feedback_done, 0) > 0)
+    : completedSchedules.value,
+)
 
 interface FbRow {
   student_id: string
@@ -126,6 +132,11 @@ const aiSelectedTemplate = computed(
 )
 const aiTplError = ref('')
 const aiUsedCount = ref(0)
+// AI 结果弹窗（成功/失败统一用弹窗提示，保证显眼）
+const showAiResult = ref(false)
+const aiResultTitle = ref('')
+const aiResultMsg = ref('')
+const aiResultOk = ref(true)
 // 是否已提示过「AI 需要先保存反馈」的引导
 const aiSaveHintShown = ref(false)
 
@@ -140,6 +151,22 @@ const tplEditing = ref<PromptTemplateOut | null>(null)
 
 const auth = useAuthStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
+const isTeacher = computed(() => auth.user?.role === 'teacher')
+
+// —— 查看方式：我的班级（默认，仅自己所带需反馈的班级）/ 全部班级（教师可见切换；管理员恒为全部） ——
+const viewMode = ref<'mine' | 'all'>(auth.user?.role === 'teacher' ? 'mine' : 'all')
+function applyViewMode() {
+  if (viewMode.value === 'mine' && isTeacher.value && auth.user?.id) {
+    if (teacherId.value !== auth.user.id) teacherId.value = auth.user.id
+    else void loadAll()
+  } else if (viewMode.value === 'all' && isTeacher.value) {
+    if (teacherId.value !== '') teacherId.value = ''
+    else void loadAll()
+  } else {
+    void loadAll()
+  }
+}
+watch(viewMode, applyViewMode)
 
 const mediaInput = ref<HTMLInputElement | null>(null)
 const activeRow = ref<FbRow | null>(null)
@@ -372,23 +399,46 @@ async function aiEnhance() {
   aiTaskName.value = r.student_name
   aiTaskFeedbackId.value = fid
   startAiTimer()
-  showAiModal.value = false
-  showNotice(`AI 正在后台生成「${r.student_name}」的课堂评价（约 20-60 秒），完成后自动回填`)
+  // 生成中保留弹窗：展示显眼的进度条与计时，禁止误关
   try {
     const draft = await aiEnhanceFeedback(fid, payload)
+    const text = (draft as any)?.evaluation ?? ''
+    if (typeof text !== 'string' || !text.trim()) {
+      throw new Error('AI 返回内容为空，请更换模板或补充课题内容后重试')
+    }
+    // 回填：同时更新行数据与弹窗引用，并持久化到后端，避免刷新丢失；
+    // 用反馈 id 精确定位，教师/管理员共用同一链路
     const target = rows.value.find((x) => x.feedback_id === fid)
-    if (target && draft.evaluation != null) target.evaluation = draft.evaluation
-    if (aiRow.value && aiRow.value.feedback_id === fid && draft.evaluation != null) {
-      aiRow.value.evaluation = draft.evaluation
+    if (target) target.evaluation = text
+    if (aiRow.value && aiRow.value.feedback_id === fid) aiRow.value.evaluation = text
+    else if (aiRow.value) aiRow.value.evaluation = text
+    try {
+      const saved = await updateFeedback(fid, {
+        title: payload.title,
+        topic: payload.topic,
+        content: payload.content,
+        performance: payload.performance,
+        evaluation: text,
+        homework: payload.homework,
+        media_urls: target?.media_urls ?? r.media_urls,
+      })
+      if (target) target.status = saved.status
+    } catch {
+      /* 回填已成功，持久化失败仅提示，不阻断 */
     }
     aiUsedCount.value += 1
-    showNotice(`「${aiTaskName.value}」AI 课堂评价已生成，已回填到课堂评价框，可继续编辑或再次润色`)
+    showAiModal.value = false
+    aiResultOk.value = true
+    aiResultTitle.value = 'AI 课堂评价已生成'
+    aiResultMsg.value = `「${aiTaskName.value}」的课堂评价已回填到课堂评价框，可继续编辑或再次润色。`
+    showAiResult.value = true
   } catch (e: any) {
-    const msg = aiErrorText(e)
+    const msg = typeof e?.message === 'string' && !e?.response ? e.message : aiErrorText(e)
     aiTplError.value = msg
-    showError(msg)
-    // 失败时重新打开弹窗方便重试
-    if (aiRow.value && aiRow.value.feedback_id === fid) showAiModal.value = true
+    aiResultOk.value = false
+    aiResultTitle.value = 'AI 生成失败'
+    aiResultMsg.value = msg
+    showAiResult.value = true
   } finally {
     aiGenerating.value = false
     aiTaskName.value = ''
@@ -745,6 +795,10 @@ watch([teacherId], async () => {
 watch([classId, dateStart, dateEnd], loadAll)
 
 onMounted(async () => {
+  // 教师默认只看自己所带需反馈的班级：先锁定本人再加载，避免首屏闪出全校数据
+  if (viewMode.value === 'mine' && isTeacher.value && auth.user?.id) {
+    teacherId.value = auth.user.id
+  }
   await loadCampuses()
   await Promise.all([loadTeacherOptions(), loadClassOptions()])
   await loadAll()
@@ -774,6 +828,32 @@ onBeforeUnmount(() => {
 
     <!-- 筛选栏 -->
     <div class="filter-bar">
+      <div v-if="isTeacher" class="filter-group view-mode-group">
+        <label>查看方式</label>
+        <div class="seg" role="tablist" aria-label="查看方式">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="viewMode === 'mine'"
+            :class="['seg-btn', { active: viewMode === 'mine' }]"
+            title="只显示自己所带需要反馈的班级"
+            @click="viewMode !== 'mine' && ((viewMode = 'mine'), applyViewMode())"
+          >
+            我的班级
+          </button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="viewMode === 'all'"
+            :class="['seg-btn', { active: viewMode === 'all' }]"
+            title="查看全部反馈班级"
+            @click="viewMode !== 'all' && ((viewMode = 'all'), applyViewMode())"
+          >
+            全部班级
+          </button>
+        </div>
+        <span class="view-mode-tip">{{ viewMode === 'mine' ? '仅自己所带需反馈的班级' : '查看全部反馈班级' }}</span>
+      </div>
       <div class="filter-group">
         <label>校区</label>
         <select v-model="campus" class="filter-select">
@@ -783,7 +863,12 @@ onBeforeUnmount(() => {
       </div>
       <div class="filter-group">
         <label>教师</label>
-        <SearchableSelect v-model="teacherId" :options="teacherOptions" placeholder="全部教师" />
+        <SearchableSelect
+          v-model="teacherId"
+          :options="teacherOptions"
+          :placeholder="viewMode === 'mine' && isTeacher ? '仅本人（我的班级）' : '全部教师'"
+          :disabled="viewMode === 'mine' && isTeacher"
+        />
       </div>
       <div class="filter-group">
         <label>班级</label>
@@ -850,15 +935,15 @@ onBeforeUnmount(() => {
       <div class="schedule-picker-head">
         <span class="sp-title">选择已上完的排课</span>
         <span v-if="filtersLoading" class="sp-loading">加载中…</span>
-        <span v-else class="sp-count" title="同一班级同一天的多节课合并为一条，一天只反馈一次">{{ completedSchedules.length }} 个班级·日</span>
+        <span v-else class="sp-count" title="同一班级同一天的多节课合并为一条，一天只反馈一次">{{ visibleSchedules.length }} 个班级·日</span>
       </div>
       <p class="sp-hint">同一班级同一天的多节课合并为一条，一天只反馈一次；统计按（班级·天·学员）去重。</p>
-      <div v-if="completedSchedules.length === 0 && !filtersLoading" class="sp-empty">
+      <div v-if="visibleSchedules.length === 0 && !filtersLoading" class="sp-empty">
         当前筛选条件下暂无已上完的排课
       </div>
       <div v-else class="sp-grid">
         <button
-          v-for="s in completedSchedules"
+          v-for="s in visibleSchedules"
           :key="s.id"
           type="button"
           class="schedule-card"
@@ -1032,6 +1117,17 @@ onBeforeUnmount(() => {
       @cancel="showRecallConfirm = false; recallRow = null"
     />
 
+    <!-- AI 生成结果弹窗（成功/失败统一弹窗，保证显眼） -->
+    <ConfirmDialog
+      :visible="showAiResult"
+      :title="aiResultTitle"
+      :message="aiResultMsg"
+      :danger="!aiResultOk"
+      confirm-text="知道了"
+      @confirm="showAiResult = false"
+      @cancel="showAiResult = false"
+    />
+
     <!-- 批量保存/发送结果弹窗（替代顶部横幅，避免错过） -->
     <ConfirmDialog
       :visible="showBatchResult"
@@ -1098,12 +1194,21 @@ onBeforeUnmount(() => {
         <div v-if="!aiTemplates.length" class="ai-tpl-empty">
           暂无可用模板，请先到「提示词模板」新建。
         </div>
+        <!-- 生成进度：显眼的进度条 + 计时 + 状态文案 -->
+        <div v-if="aiGenerating" class="ai-progress">
+          <div class="ai-progress-head">
+            <span class="ai-spin" />
+            <span>正在生成「{{ aiTaskName }}」的课堂评价… {{ aiElapsed }}s</span>
+          </div>
+          <div class="ai-progress-bar"><span class="ai-progress-fill" /></div>
+          <p class="ai-progress-tip">通常 20-60 秒，请稍候。生成完成后将自动回填到课堂评价框。</p>
+        </div>
         <p v-if="aiTplError" class="error-banner">{{ aiTplError }}</p>
         <div class="modal-actions">
-          <button class="btn ghost" @click="showAiModal = false">取消</button>
+          <button class="btn ghost" :disabled="aiGenerating" @click="showAiModal = false">取消</button>
           <button class="btn primary" @click="aiEnhance" :disabled="aiGenerating || !aiTemplateId">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l1.9 5.1L19 9l-5.1 1.9L12 16l-1.9-5.1L5 9l5.1-1.9L12 2zM19 16l.9 2.1L22 19l-2.1.9L19 22l-.9-2.1L16 19l2.1-.9L19 16z" /></svg>
-            {{ aiGenerating ? `后台生成中 ${aiElapsed}s…` : aiRow.evaluation ? '提交后台润色' : '提交后台生成' }}
+            {{ aiGenerating ? `生成中 ${aiElapsed}s…` : aiRow.evaluation ? '提交后台润色' : '提交后台生成' }}
           </button>
         </div>
       </div>
@@ -1260,6 +1365,44 @@ h1 {
   font-size: 12px;
   color: var(--ink-3);
   font-weight: 500;
+}
+/* 查看方式分段选择：我的班级 / 全部班级 */
+.view-mode-group label {
+  font-weight: 700;
+  color: var(--ink-2);
+}
+.seg {
+  display: inline-flex;
+  padding: 3px;
+  gap: 3px;
+  background: #f1f5f9;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+.seg-btn {
+  border: none;
+  background: transparent;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-3);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.seg-btn:hover {
+  color: var(--ink-2);
+}
+.seg-btn.active {
+  background: var(--surface);
+  color: var(--brand-strong);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+}
+.view-mode-tip {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  margin-top: 2px;
 }
 .filter-select {
   padding: 8px 11px;
@@ -1933,6 +2076,58 @@ h1 {
   color: var(--ink-3);
   font-size: 12.5px;
   padding: 12px 0;
+}
+/* AI 生成中进度：显眼但克制，与页面渐变主色呼应 */
+.ai-progress {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: linear-gradient(135deg, #eef2ff, #ecfeff);
+  border: 1px solid #c7d2fe;
+}
+.ai-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #4338ca;
+}
+.ai-spin {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #c7d2fe;
+  border-top-color: #6366f1;
+  animation: ai-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes ai-spin {
+  to { transform: rotate(360deg); }
+}
+.ai-progress-bar {
+  height: 6px;
+  margin-top: 10px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.15);
+  overflow: hidden;
+}
+.ai-progress-fill {
+  display: block;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #06b6d4);
+  animation: ai-slide 1.2s ease-in-out infinite;
+}
+@keyframes ai-slide {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.ai-progress-tip {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #6366f1;
 }
 
 .tpl-modal {

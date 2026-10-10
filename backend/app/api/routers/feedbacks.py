@@ -317,7 +317,7 @@ def ai_enhance_feedback(
 
     结合模板（template_id 指定，未传则用系统默认模板）+ 当前反馈内容生成评价正文，
     写入 ai_draft 供追溯并返回，由前端回填「课堂评价」输入框人工编辑；
-    未配置 LLM 时降级：记录占位 ai_draft 并返回当前内容（不报错）。
+    调用方无可用 LLM 配置时显式 502（不静默返回空内容，避免前端误报成功）。
     """
     fb = feedback_crud.get(db, feedback_id)
     if fb is None:
@@ -335,13 +335,11 @@ def ai_enhance_feedback(
     from app.services import llm_context as _llm_ctx
     fb_resolved = _llm_ctx.optional_resolved(db, user.id, "feedback")
     if fb_resolved is None:
-        fb.ai_draft = {
-            **current,
-            "note": "未配置 LLM_API_KEY，AI 草稿暂不可用，返回当前内容占位",
-        }
-        db.commit()
-        db.refresh(fb)
-        return FeedbackDraftOut(**current)
+        # 必须显式报错：静默返回空内容会导致前端“已生成”但评价框为空（教师无个人模型配置时必现）
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="学校尚未配置可用的 AI 模型：教师请在「设置 → 模型配置」添加个人模型，或联系管理员检查全局模型配置",
+        )
 
     # 解析提示词模板：优先用户选择，其次系统默认；确保模板对当前用户可见
     template = None
