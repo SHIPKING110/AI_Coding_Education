@@ -1521,6 +1521,7 @@ onMounted(async () => {
               <div class="field">
                 <span class="field-label">题干</span>
                 <textarea
+                  v-autogrow
                   :value="q.stem"
                   class="stem-input"
                   rows="3"
@@ -1592,6 +1593,7 @@ onMounted(async () => {
               <div v-if="q.type === 'code_fill' || q.type === 'programming'" class="field">
                 <span class="field-label">{{ q.type === 'code_fill' ? '参考答案（代码填空）' : '参考代码' }}</span>
                 <textarea
+                  v-autogrow
                   :value="String(q.answer ?? '')"
                   class="code-input"
                   rows="5"
@@ -1666,6 +1668,7 @@ onMounted(async () => {
                   <div class="field">
                     <span class="field-label">解析</span>
                     <textarea
+                      v-autogrow
                       :value="String(q.analysis ?? '')"
                       class="analysis-input"
                       rows="3"
@@ -1913,7 +1916,7 @@ onMounted(async () => {
                   <span class="pool-diff-badge">Lv.{{ item.difficulty }}</span>
                   <span class="pool-source">「{{ item.assignment_title }}」</span>
                 </div>
-                <div class="pool-item-stem">{{ item.stem }}</div>
+                <div class="pool-item-stem" :title="item.stem">{{ item.stem }}</div>
               </div>
             </div>
           </div>

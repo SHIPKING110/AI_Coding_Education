@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { listCampusesApi, listTeachersApi, type UserOut } from '@/api/auth'
 import { listClasses, type ClassOut } from '@/api/enrollment'
@@ -58,17 +58,6 @@ const selectedScheduleId = ref('')
 const selectedSchedule = computed(() =>
   completedSchedules.value.find((s) => s.id === selectedScheduleId.value),
 )
-/** 我的班级模式：只显示需要反馈的（有待反馈学员）；全部模式：显示所有 */
-const feedbackType = ref<'all' | 'done' | 'todo'>('all')
-const visibleSchedules = computed(() => {
-  let list = completedSchedules.value
-  if (viewMode.value === 'mine' && isTeacher.value) {
-    list = list.filter((s) => Math.max(s.attended - s.feedback_done, 0) > 0)
-  }
-  if (feedbackType.value === 'done') list = list.filter((s) => s.all_done)
-  else if (feedbackType.value === 'todo') list = list.filter((s) => !s.all_done)
-  return list
-})
 
 interface FbRow {
   student_id: string
@@ -172,6 +161,15 @@ function applyViewMode() {
   }
 }
 watch(viewMode, applyViewMode)
+
+/** 我的班级 = 仅自己所带；需/已反馈的区分交给反馈类型筛选（教师默认待反馈，即“需要反馈的班级”） */
+const feedbackType = ref<'all' | 'done' | 'todo'>(auth.user?.role === 'teacher' ? 'todo' : 'all')
+const visibleSchedules = computed(() => {
+  let list = completedSchedules.value
+  if (feedbackType.value === 'done') list = list.filter((s) => s.all_done)
+  else if (feedbackType.value === 'todo') list = list.filter((s) => !s.all_done)
+  return list
+})
 
 const mediaInput = ref<HTMLInputElement | null>(null)
 const activeRow = ref<FbRow | null>(null)
@@ -431,6 +429,13 @@ async function aiEnhance() {
     } catch {
       /* 回填已成功，持久化失败仅提示，不阻断 */
     }
+    // AI 回填不触发 input，强制重算评价框高度（directive updated 正常会处理，此处双保险）
+    await nextTick()
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`textarea[data-eval-fid="${fid}"]`)
+        ?.dispatchEvent(new Event('input', { bubbles: true }))
+    })
     aiUsedCount.value += 1
     showAiModal.value = false
     aiResultOk.value = true
@@ -1045,7 +1050,7 @@ onBeforeUnmount(() => {
           <div class="fb-fields">
             <label>
               课题
-              <input v-model="r.topic" type="text" placeholder="如：Python 变量与类型" />
+              <textarea v-autogrow:slim v-model="r.topic" rows="1" placeholder="如：Python 变量与类型"></textarea>
             </label>
             <label>
               课题内容
@@ -1060,7 +1065,7 @@ onBeforeUnmount(() => {
                 课堂评价
                 <span class="eval-tip">AI 生成内容将写入此处，可继续编辑或再次润色</span>
               </span>
-              <textarea v-autogrow v-model="r.evaluation" rows="4" placeholder="对学员本堂课的总体评价（AI 可辅助生成）…"></textarea>
+              <textarea v-autogrow v-model="r.evaluation" rows="4" :data-eval-fid="r.feedback_id" placeholder="对学员本堂课的总体评价（AI 可辅助生成）…"></textarea>
             </label>
             <label>
               今日作业
