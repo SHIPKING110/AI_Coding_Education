@@ -59,11 +59,16 @@ const selectedSchedule = computed(() =>
   completedSchedules.value.find((s) => s.id === selectedScheduleId.value),
 )
 /** 我的班级模式：只显示需要反馈的（有待反馈学员）；全部模式：显示所有 */
-const visibleSchedules = computed(() =>
-  viewMode.value === 'mine' && isTeacher.value
-    ? completedSchedules.value.filter((s) => Math.max(s.attended - s.feedback_done, 0) > 0)
-    : completedSchedules.value,
-)
+const feedbackType = ref<'all' | 'done' | 'todo'>('all')
+const visibleSchedules = computed(() => {
+  let list = completedSchedules.value
+  if (viewMode.value === 'mine' && isTeacher.value) {
+    list = list.filter((s) => Math.max(s.attended - s.feedback_done, 0) > 0)
+  }
+  if (feedbackType.value === 'done') list = list.filter((s) => s.all_done)
+  else if (feedbackType.value === 'todo') list = list.filter((s) => !s.all_done)
+  return list
+})
 
 interface FbRow {
   student_id: string
@@ -852,7 +857,6 @@ onBeforeUnmount(() => {
             全部班级
           </button>
         </div>
-        <span class="view-mode-tip">{{ viewMode === 'mine' ? '仅自己所带需反馈的班级' : '查看全部反馈班级' }}</span>
       </div>
       <div class="filter-group">
         <label>校区</label>
@@ -873,6 +877,14 @@ onBeforeUnmount(() => {
       <div class="filter-group">
         <label>班级</label>
         <SearchableSelect v-model="classId" :options="classOptions" placeholder="全部班级" />
+      </div>
+      <div class="filter-group">
+        <label>反馈类型</label>
+        <select v-model="feedbackType" class="filter-select" title="已反馈：已全部发送；待反馈：未反馈或没反馈完">
+          <option value="all">全部类型</option>
+          <option value="done">已反馈</option>
+          <option value="todo">待反馈</option>
+        </select>
       </div>
       <div class="filter-group">
         <label>日期区间</label>
@@ -1366,11 +1378,7 @@ h1 {
   color: var(--ink-3);
   font-weight: 500;
 }
-/* 查看方式分段选择：我的班级 / 全部班级 */
-.view-mode-group label {
-  font-weight: 700;
-  color: var(--ink-2);
-}
+/* 查看方式分段选择：我的班级 / 全部班级（与相邻下拉同高、同基线） */
 .seg {
   display: inline-flex;
   padding: 3px;
@@ -1382,7 +1390,7 @@ h1 {
 .seg-btn {
   border: none;
   background: transparent;
-  padding: 7px 16px;
+  padding: 6px 15px;
   font-size: 13px;
   font-weight: 600;
   color: var(--ink-3);
@@ -1390,6 +1398,7 @@ h1 {
   cursor: pointer;
   transition: all 0.15s;
   white-space: nowrap;
+  line-height: 1.5;
 }
 .seg-btn:hover {
   color: var(--ink-2);
@@ -1398,11 +1407,6 @@ h1 {
   background: var(--surface);
   color: var(--brand-strong);
   box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
-}
-.view-mode-tip {
-  font-size: 11.5px;
-  color: var(--ink-3);
-  margin-top: 2px;
 }
 .filter-select {
   padding: 8px 11px;
