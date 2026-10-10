@@ -40,7 +40,13 @@ const canCreate = computed(() => {
   if (auth.user?.role !== 'teacher') return true
   return myPerms.value.schedule_create === true
 })
+// 取消排课权限：默认关闭，按需开通（后端同样校验 + 有考勤记录时禁止取消）
+const canCancel = computed(() => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value.schedule_cancel === true
+})
 const showNoPerm = ref(false)
+const noPermText = ref('暂无新建排课权限，请联系管理员开通。')
 
 const schedules = ref<ScheduleOut[]>([])
 const teachers = ref<UserOut[]>([])
@@ -549,6 +555,11 @@ function closeConflict() {
 }
 
 async function removeSchedule(s: ScheduleOut) {
+  if (!canCancel.value) {
+    noPermText.value = '暂无取消排课权限，请联系管理员开通。'
+    showNoPerm.value = true
+    return
+  }
   cancelTarget.value = s
   showCancel.value = true
 }
@@ -626,7 +637,7 @@ onMounted(async () => {
     <PageHead title="排课与考勤" eyebrow="SCHEDULES" sub="周课表 · 同一教师时间冲突自动检测 · 支持每周多节循环排课">
       <template #actions>
       <div class="head-actions">
-        <button class="btn primary" @click="canCreate ? openCreate() : (showNoPerm = true)">
+        <button class="btn primary" @click="canCreate ? openCreate() : (noPermText = '暂无新建排课权限，请联系管理员开通。', showNoPerm = true)">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
           新建排课
         </button>
@@ -945,7 +956,7 @@ onMounted(async () => {
     <ConfirmDialog
       :visible="showNoPerm"
       title="暂无操作权限"
-      message="暂无新建排课权限，请联系管理员开通。"
+      :message="noPermText"
       confirm-text="知道了"
       @confirm="showNoPerm = false"
       @cancel="showNoPerm = false"

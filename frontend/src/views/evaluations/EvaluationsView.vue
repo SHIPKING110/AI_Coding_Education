@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import PromptTemplateManager from '@/components/PromptTemplateManager.vue'
 import EvaluationDetailDialog from '@/components/EvaluationDetailDialog.vue'
 import PptAgentDialog from '@/views/evaluations/components/PptAgentDialog.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
@@ -42,6 +43,8 @@ import {
   unpublishEvaluation,
   updateEvaluation,
 } from '@/api/evaluation'
+import { toastApiError } from '@/stores/toast'
+import { listPromptTemplates, type PromptTemplateOut } from '@/api/prompt'
 import { useAiTasksStore, type UnifiedAiTask } from '@/stores/aiTasks'
 import { useAuthStore } from '@/stores/auth'
 import { cleanListishText } from '@/utils/text'
@@ -83,6 +86,20 @@ const message = ref('')
 const error = ref('')
 const aiNote = ref('')
 const aiInstruction = ref('')
+// 评估提示词模板（系统自带 + 个人/全校）：所选模板正文作为写作风格要求
+const aiTemplates = ref<PromptTemplateOut[]>([])
+const aiTemplateId = ref('')
+const showTplManage = ref(false)
+async function loadAiTemplates() {
+  try {
+    aiTemplates.value = await listPromptTemplates('evaluation')
+    if (!aiTemplateId.value || !aiTemplates.value.some((t) => t.id === aiTemplateId.value)) {
+      aiTemplateId.value = aiTemplates.value[0]?.id ?? ''
+    }
+  } catch {
+    aiTemplates.value = []
+  }
+}
 const detailEv = ref<EvaluationOut | null>(null)
 const showDelete = ref(false)
 const myTaskIds = ref<string[]>([])
@@ -914,13 +931,15 @@ async function runAiDraft() {
   if (!(await save())) return
   if (!current.value) return
   try {
-    const task = await aiDraftEvaluation(current.value.id, { extra_note: aiNote.value || null })
+    const style = aiTemplates.value.find((t) => t.id === aiTemplateId.value)?.content || null
+    const task = await aiDraftEvaluation(current.value.id, { extra_note: aiNote.value || null, style_guide: style })
     myTaskIds.value.push(task.id)
     aiTasks.register(task, 'evaluation')
     setMsg('AI 生成任务已提交，完成后自动回填')
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
     setErr(detail || '提交 AI 任务失败')
+    toastApiError(e)
   }
 }
 
@@ -943,6 +962,7 @@ async function runAiRefine() {
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
     setErr(detail || '提交优化任务失败')
+    toastApiError(e)
   }
 }
 
@@ -1060,6 +1080,7 @@ watch([periodStart, periodEnd], async () => {
 onMounted(async () => {
   window.addEventListener('keydown', onGlobalKeydown)
   await aiTasks.bootstrap()
+  void loadAiTemplates()
   if (!auth.user) await auth.fetchMe()
   const me = auth.user
   if (me?.role === 'teacher') {
@@ -1310,6 +1331,17 @@ onBeforeUnmount(() => {
             <textarea v-autogrow v-model="aiNote" rows="2" placeholder="补充说明 / 想强调的重点（可选），如：更突出编程思维和自信心的成长" />
             <button class="op-btn ai-solid" :disabled="aiBusy" @click="runAiDraft">
               {{ aiBusy ? '生成中…' : 'AI 生成草稿' }}
+            </button>
+          </div>
+          <div v-if="aiTemplates.length" class="ai-row tpl-row">
+            <select v-model="aiTemplateId" class="tpl-select">
+              <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
+                {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
+              </option>
+            </select>
+            <button class="tpl-manage-btn" type="button" @click="showTplManage = true" title="新建 / 编辑评估提示词模板">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+              模板管理
             </button>
           </div>
           <div class="ai-row">
@@ -1725,6 +1757,13 @@ onBeforeUnmount(() => {
     />
 
     <PptAgentDialog ref="pptAgentRef" />
+    <PromptTemplateManager
+      :visible="showTplManage"
+      scene="evaluation"
+      title="评估提示词模板管理"
+      @close="showTplManage = false"
+      @changed="loadAiTemplates"
+    />
   </div>
 </template>
 
@@ -3098,6 +3137,46 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 10px;
   align-items: flex-end;
+}
+.tpl-row {
+  align-items: center;
+}
+.tpl-select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.tpl-manage-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  border: 1px solid #c4b5fd;
+  background: #f5f3ff;
+  color: #6d28d9;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 7px 13px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  box-shadow: none;
+}
+.tpl-manage-btn:hover {
+  background: #ede9fe;
+  border-color: #7c3aed;
+  transform: none;
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.18);
+}
+.tpl-manage-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 .ai-row textarea {

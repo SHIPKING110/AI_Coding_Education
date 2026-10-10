@@ -123,5 +123,8 @@ class CompletedScheduleOut(BaseModel):
     feedback_done: int = 0  # 已发送数（仅 published）
     saved_draft: int = 0  # 草稿数（draft）
     all_done: bool = False  # 是否全部签到学员均已发送
+    group_count: int = 1  # 同组节数：同一班级同一天多节合并为一条时 >1
+    schedule_ids: list[uuid.UUID] = []  # 组内排课 id（新建反馈落到第一条）
+    day: str = ""  # 组日期 YYYY-MM-DD
 
     model_config = ConfigDict(from_attributes=True)

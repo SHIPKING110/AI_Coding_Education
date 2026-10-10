@@ -21,6 +21,24 @@ from app.models.user import User
 router = APIRouter(prefix="/business", tags=["business"])
 
 
+def _require_business_settings(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> User:
+    """业务功能设置 tab 权限：管理员/教务放行；教师需 settings_manage 或 settings_tab_business。"""
+    from app.models.permission import check as _check
+    from app.models.user import Role as _Role
+
+    if user.role in (_Role.ADMIN.value, _Role.STAFF.value):
+        return user
+    if user.role == _Role.TEACHER.value and (
+        _check(db, user, "settings_manage") or _check(db, user, "settings_tab_business")
+    ):
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN, detail="暂无业务功能设置操作权限，请联系管理员开通"
+    )
+
+
 # ---------- 校区 ----------
 
 class CampusIn(BaseModel):
@@ -53,7 +71,7 @@ def list_campuses(
 def create_campus(
     payload: CampusIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("settings_manage")),
+    _: User = Depends(_require_business_settings),
 ) -> dict:
     if db.scalar(select(Campus.id).where(Campus.name == payload.name.strip())):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="校区名称已存在")
@@ -422,14 +440,26 @@ class PayrollIn(BaseModel):
 def compute_payroll_entry(
     payload: PayrollIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(get_current_user),
 ) -> dict:
+    from app.models.permission import check as _perm_check
+    from app.models.user import Role as _Role
     from app.models.user import User as _U
-    user = db.get(_U, payload.user_id)
-    if user is None:
+    # 薪资核算：教师需 finance_salary_all 才能核算他人；仅 finance_salary 只能核算自己
+    if user.role == _Role.TEACHER.value:
+        if str(payload.user_id) != str(user.id) and not _perm_check(db, user, "finance_salary_all"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只能核算自己的薪资")
+        if str(payload.user_id) == str(user.id) and not (
+            _perm_check(db, user, "finance_salary") or _perm_check(db, user, "finance_salary_all")
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="暂无薪资核算权限，请联系管理员开通")
+    elif user.role not in (_Role.ADMIN.value, _Role.STAFF.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    target = db.get(_U, payload.user_id)
+    if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="人员不存在")
     return business_crud.compute_payroll(
-        db, user=user, month=payload.month,
+        db, user=target, month=payload.month,
         counts={"invite_count": payload.invite_count, "trial_count": payload.trial_count,
                 "convert_count": payload.convert_count, "renew_count": payload.renew_count,
                 "refer_count": payload.refer_count, "trial_lesson_count": payload.trial_lesson_count},
@@ -441,7 +471,7 @@ def compute_payroll_entry(
 def auto_compute_payroll(
     month: str = Query(description="YYYY-MM"),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(require_teacher_permission("finance_salary_all")),
 ) -> dict:
     """薪资自动核算：进入工作台/切换月份时触发。手工确认锁定（auto=false）的不覆盖，其余按业务数据重算。"""
     from sqlalchemy import select as _select
@@ -478,14 +508,29 @@ def auto_compute_payroll(
 def list_payroll(
     month: str | None = Query(default=None, description="YYYY-MM"),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(get_current_user),
 ) -> dict:
     from sqlalchemy import select as _select
     from app.models.business import PayrollEntry as _PE
+    from app.models.permission import check as _perm_check
+    from app.models.user import Role as _Role
     from app.models.user import User as _U
+    # 薪资可见范围：finance_salary_all 看全员；finance_salary 仅看自己；管理员/教务不受限
+    own_only = False
+    if user.role not in (_Role.ADMIN.value, _Role.STAFF.value, _Role.TEACHER.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    if user.role == _Role.TEACHER.value:
+        if _perm_check(db, user, "finance_salary_all"):
+            own_only = False
+        elif _perm_check(db, user, "finance_salary") or _perm_check(db, user, "finance_view"):
+            own_only = True
+        else:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="暂无薪资查看权限，请联系管理员开通")
     stmt = _select(_PE)
     if month:
         stmt = stmt.where(_PE.month == month)
+    if own_only:
+        stmt = stmt.where(_PE.user_id == user.id)
     stmt = stmt.order_by(_PE.month.desc(), _PE.total.desc()).limit(200)
     rows = list(db.scalars(stmt).all())
     users = {u.id: u for u in db.scalars(_select(_U)).all()} if rows else {}
@@ -510,16 +555,24 @@ def list_payroll(
 def workbench_overview(
     month: str | None = Query(default=None),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("finance_view")),
+    user: User = Depends(get_current_user),
 ) -> dict:
     """教务工作台：一线人员薪资总览（基本工资+各项提成），默认当月。"""
     from datetime import datetime as _dt
     from sqlalchemy import select as _select
     from app.models.business import PayrollEntry as _PE
+    from app.models.permission import check as _perm_check
     from app.models.user import Role as _Role
     from app.models.user import User as _U
     mon = month or _dt.now().strftime("%Y-%m")
+    if user.role not in (_Role.ADMIN.value, _Role.STAFF.value, _Role.TEACHER.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     users = list(db.scalars(_select(_U).where(_U.role.in_([_Role.STAFF.value, _Role.TEACHER.value]))).all())
+    # 薪资范围隔离：仅 finance_salary 的教师只能看到自己（管理员/教务/有 finance_view 的不受限）
+    if user.role == _Role.TEACHER.value and not _perm_check(db, user, "finance_salary_all"):
+        if not (_perm_check(db, user, "finance_salary") or _perm_check(db, user, "finance_view")):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="暂无薪资查看权限，请联系管理员开通")
+        users = [u for u in users if u.id == user.id]
     entries = {e.user_id: e for e in db.scalars(_select(_PE).where(_PE.month == mon)).all()}
     rules = {r.key: str(r.amount) for r in business_crud.list_rules(db)}
     # 当月欠费消耗产生的绩效（学员未缴费，风险提示）

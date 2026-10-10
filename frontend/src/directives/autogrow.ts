@@ -7,31 +7,39 @@ import type { Directive } from 'vue'
 
 const MAX_HEIGHT = 340
 const MIN_HEIGHT = 64
+const MIN_HEIGHT_SLIM = 36
 
-function fit(el: HTMLTextAreaElement) {
+function fit(el: HTMLTextAreaElement, slim = false) {
+  const min = slim ? MIN_HEIGHT_SLIM : MIN_HEIGHT
   el.style.overflowY = 'hidden'
   el.style.height = 'auto'
-  const h = Math.max(MIN_HEIGHT, Math.min(el.scrollHeight, MAX_HEIGHT))
+  const h = Math.max(min, Math.min(el.scrollHeight, MAX_HEIGHT))
   el.style.height = `${h}px`
   el.style.overflowY = el.scrollHeight > MAX_HEIGHT ? 'auto' : 'hidden'
 }
 
 function onInput(e: Event) {
-  fit(e.target as HTMLTextAreaElement)
+  const el = e.target as HTMLTextAreaElement
+  fit(el, el.dataset.autogrowSlim === '1')
+}
+
+function markSlim(el: HTMLTextAreaElement, binding: { arg?: unknown }) {
+  if (binding?.arg === 'slim') el.dataset.autogrowSlim = '1'
 }
 
 export const autogrow: Directive<HTMLTextAreaElement> = {
-  mounted(el) {
+  mounted(el, binding) {
     el.classList.add('autogrow-ta')
-    requestAnimationFrame(() => fit(el))
+    markSlim(el, binding)
+    requestAnimationFrame(() => fit(el, el.dataset.autogrowSlim === '1'))
     el.addEventListener('input', onInput)
     // v-model 程序回填（AI 回填/撤销修改/载入编辑）不触发 input，用 updated + ResizeObserver 兜底
-    const ro = new ResizeObserver(() => fit(el))
+    const ro = new ResizeObserver(() => fit(el, el.dataset.autogrowSlim === '1'))
     ro.observe(el)
     ;(el as unknown as { __autogrowRo?: ResizeObserver }).__autogrowRo = ro
   },
   updated(el) {
-    requestAnimationFrame(() => fit(el))
+    requestAnimationFrame(() => fit(el, el.dataset.autogrowSlim === '1'))
   },
   unmounted(el) {
     el.removeEventListener('input', onInput)

@@ -183,6 +183,9 @@ class ReportAiDraftIn(BaseModel):
     source_quarter_ids: list[uuid.UUID] | None = Field(
         default=None, description="年度总结素材来源：已发布季度总结 id 列表（仅 yearly 有效）"
     )
+    template_id: uuid.UUID | None = Field(
+        default=None, description="所选提示词模板 id（报告类系统预设/个人模板），其内容作为写作风格要求"
+    )
 
 
 class ReportAiDraftOut(BaseModel):

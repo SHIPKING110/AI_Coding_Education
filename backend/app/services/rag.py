@@ -52,7 +52,64 @@ def get_collection():
     return client.get_or_create_collection(COLLECTION_NAME)
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
+_embed_client_cache: dict = {}
+
+
+def _api_embeddings(resolved):
+    from langchain_openai import OpenAIEmbeddings
+
+    key = (resolved.base_url or "", resolved.api_key or "", resolved.embed_model or "")
+    client = _embed_client_cache.get(key)
+    if client is None:
+        client = OpenAIEmbeddings(
+            model=resolved.embed_model,
+            api_key=resolved.api_key,
+            base_url=resolved.base_url or None,
+            timeout=60,
+            max_retries=1,
+            # 非 OpenAI 厂商不支持按模型查上下文长度，关掉该探测
+            check_embedding_ctx_length=False,
+        )
+        _embed_client_cache[key] = client
+    return client
+
+
+def embed_texts(texts: list[str], resolved=None) -> list[list[float]]:
+    """向量化。resolved 缺省时取当前请求上下文（路由层 use_teacher_llm 已压入）。
+
+    - 有个人配置：走模型商 embedding API（免本地拉取，生产可用）；
+      未填 embedding 模型则抛中文引导（部分厂商如 DeepSeek 无 embedding 接口）。
+    - 无个人配置：回退本地 Qwen（开发机已下载权重时可用）。
+    """
+    from app.services import llm_context as _ctx
+    from app.services.llm import LLMConfigError
+
+    if resolved is None:
+        resolved = _ctx.get_current()
+    use_api = (
+        resolved is not None
+        and bool((resolved.embed_model or "").strip())
+    )
+    if use_api:
+        try:
+            vecs = _api_embeddings(resolved).embed_documents(list(texts))
+        except LLMConfigError:
+            raise
+        except Exception as e:
+            from app.services.llm import friendly_llm_error
+
+            raise LLMConfigError(friendly_llm_error(e)) from e
+        return [[float(x) for x in v] for v in vecs]
+    if resolved is not None and not use_api and resolved.config_id is not None:
+        # 教师自配但没填 embedding 模型：明确引导（部分厂商如 DeepSeek 无 embedding 接口）
+        raise LLMConfigError(
+            f"模型「{resolved.config_name or resolved.model}」未填写 embedding 模型，"
+            "请到 设置 → 模型配置 中补充（如硅基流动/Zhipu 的 embedding 模型）后再试"
+        )
+    if not MODEL_DIR.exists():
+        raise LLMConfigError(
+            "未配置 embedding 模型：请到 设置 → 模型配置 添加并填写 embedding 模型"
+        )
     model = get_embed_model()
     embs = model.encode(texts, convert_to_numpy=False)
     if hasattr(embs, "tolist"):
@@ -190,10 +247,18 @@ def retrieve(
 
 
 def index_in_background(*, doc_id: uuid.UUID, owner_id: uuid.UUID, title: str,
-                        file_path: str, file_name: str, mark_done, mark_progress=None) -> None:
+                        file_path: str, file_name: str, mark_done, mark_progress=None,
+                        resolved=None) -> None:
     """后台线程：解析 → 切块 → 入库 → 回调落状态，不阻塞上传接口。"""
 
     def _run():
+        from app.services import llm_context as _llm_ctx
+
+        # 后台线程不继承请求上下文，用提交时快照的个人配置做 embedding
+        with _llm_ctx.use_llm(resolved):
+            _run_inner()
+
+    def _run_inner():
         try:
             if mark_progress is not None:
                 mark_progress(doc_id, "parse", 10, "正在解析文档…")

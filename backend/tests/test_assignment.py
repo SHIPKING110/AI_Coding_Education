@@ -371,7 +371,12 @@ def test_assignment_ai_generate_similar(client, monkeypatch):
     assert q1["answer"] is True
 
     # 未配置 LLM -> 400 降级提示
-    monkeypatch.setattr(llm, "is_llm_configured", lambda: False)
+    from app.services import llm_context as _llm_ctx
+    monkeypatch.setattr(
+        _llm_ctx, "require_llm", lambda *a, **k: (_ for _ in ()).throw(
+            llm.LLMConfigError("未配置模型")
+        ),
+    )
     r_no = client.post(
         "/api/assignments/ai-generate",
         json={"mode": "similar", "count": 1, "difficulty": 3, "source_question": "x"},

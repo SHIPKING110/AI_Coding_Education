@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import JSON, DateTime, Enum, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
+from app.core.database import Base, enum_values
 from app.models.user import User
 
 
@@ -42,7 +42,7 @@ class Report(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     type: Mapped[str] = mapped_column(
-        Enum(ReportType, native_enum=False, length=16), index=True
+        Enum(ReportType, native_enum=False, values_callable=enum_values, length=16), index=True
     )
     teacher_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     # 周期：日报=当日（start==end）；周报=周一~周日；季度/年度=起止日期
@@ -53,7 +53,7 @@ class Report(Base):
     stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     ppt_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(
-        Enum(ReportStatus, native_enum=False, length=16), default=ReportStatus.DRAFT
+        Enum(ReportStatus, native_enum=False, values_callable=enum_values, length=16), default=ReportStatus.DRAFT
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

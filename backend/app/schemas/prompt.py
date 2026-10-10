@@ -9,6 +9,7 @@ class PromptTemplateCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=100)
     content: str = Field(min_length=1)
+    scene: str = Field(default="feedback", pattern="^(feedback|report|evaluation)$")
 
 
 class PromptTemplateUpdate(BaseModel):
@@ -25,6 +26,7 @@ class PromptTemplateOut(BaseModel):
     name: str
     content: str
     scope: str  # system | personal | published
+    scene: str = "feedback"  # feedback | report | evaluation
     owner_id: uuid.UUID | None = None
     owner_name: str | None = None
     created_at: datetime

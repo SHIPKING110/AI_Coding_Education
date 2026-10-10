@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { listCampusesApi, listTeachersApi, type UserOut } from '@/api/auth'
 import { listClasses, type ClassOut } from '@/api/enrollment'
@@ -28,6 +28,7 @@ import {
 } from '@/api/prompt'
 import { useAuthStore } from '@/stores/auth'
 import PageHead from '@/components/PageHead.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import { addDays, dayKey, fmtDateTimeFromIso, mondayOf, toLocalNaiveIso } from '@/utils/date'
 
@@ -90,11 +91,46 @@ const aiRow = ref<FbRow | null>(null)
 const aiTemplates = ref<PromptTemplateOut[]>([])
 const aiTemplateId = ref('')
 const aiGenerating = ref(false)
+// 后台任务态：关闭弹窗后仍保留，顶部进度条持续展示直到完成
+const aiTaskName = ref('')
+const aiTaskFeedbackId = ref('')
+const aiElapsed = ref(0)
+let aiTimer: ReturnType<typeof setInterval> | null = null
+function startAiTimer() {
+  stopAiTimer()
+  aiElapsed.value = 0
+  aiTimer = setInterval(() => {
+    aiElapsed.value += 1
+  }, 1000)
+}
+function stopAiTimer() {
+  if (aiTimer) {
+    clearInterval(aiTimer)
+    aiTimer = null
+  }
+}
+
+/** AI 失败原因转中文：超时 / 断网 / 限流单独提示，避免一律“生成失败” */
+function aiErrorText(e: any): string {
+  if (e?.response?.data?.detail) return e.response.data.detail
+  if (e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message ?? '')) {
+    return 'AI 生成超时（超过 120 秒无响应），可能是模型繁忙，请稍后重试'
+  }
+  if (!e?.response && (e?.code === 'ERR_NETWORK' || /network/i.test(e?.message ?? ''))) {
+    return '网络连接失败，请检查网络后重试'
+  }
+  return 'AI 课堂评价生成失败，请稍后重试'
+}
 const aiSelectedTemplate = computed(
   () => aiTemplates.value.find((t) => t.id === aiTemplateId.value) ?? null,
 )
 const aiTplError = ref('')
 const aiUsedCount = ref(0)
+// AI 结果弹窗（成功/失败统一用弹窗提示，保证显眼）
+const showAiResult = ref(false)
+const aiResultTitle = ref('')
+const aiResultMsg = ref('')
+const aiResultOk = ref(true)
 // 是否已提示过「AI 需要先保存反馈」的引导
 const aiSaveHintShown = ref(false)
 
@@ -109,6 +145,31 @@ const tplEditing = ref<PromptTemplateOut | null>(null)
 
 const auth = useAuthStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
+const isTeacher = computed(() => auth.user?.role === 'teacher')
+
+// —— 查看方式：我的班级（默认，仅自己所带需反馈的班级）/ 全部班级（教师可见切换；管理员恒为全部） ——
+const viewMode = ref<'mine' | 'all'>(auth.user?.role === 'teacher' ? 'mine' : 'all')
+function applyViewMode() {
+  if (viewMode.value === 'mine' && isTeacher.value && auth.user?.id) {
+    if (teacherId.value !== auth.user.id) teacherId.value = auth.user.id
+    else void loadAll()
+  } else if (viewMode.value === 'all' && isTeacher.value) {
+    if (teacherId.value !== '') teacherId.value = ''
+    else void loadAll()
+  } else {
+    void loadAll()
+  }
+}
+watch(viewMode, applyViewMode)
+
+/** 我的班级 = 仅自己所带；需/已反馈的区分交给反馈类型筛选（教师默认待反馈，即“需要反馈的班级”） */
+const feedbackType = ref<'all' | 'done' | 'todo'>(auth.user?.role === 'teacher' ? 'todo' : 'all')
+const visibleSchedules = computed(() => {
+  let list = completedSchedules.value
+  if (feedbackType.value === 'done') list = list.filter((s) => s.all_done)
+  else if (feedbackType.value === 'todo') list = list.filter((s) => !s.all_done)
+  return list
+})
 
 const mediaInput = ref<HTMLInputElement | null>(null)
 const activeRow = ref<FbRow | null>(null)
@@ -301,7 +362,7 @@ async function openAiModal(r: FbRow) {
   }
   // 加载可选模板并打开弹窗
   try {
-    aiTemplates.value = await listPromptTemplates()
+    aiTemplates.value = await listPromptTemplates('feedback')
     aiTemplateId.value = aiTemplates.value[0]?.id ?? ''
     aiTplError.value = ''
   } catch {
@@ -313,7 +374,7 @@ async function openAiModal(r: FbRow) {
   showAiModal.value = true
 }
 
-/** AI 生成/润色课堂评价（FR-FB-03）：选择模板后调用后端，回填课堂评价输入框 */
+/** AI 生成/润色课堂评价（FR-FB-03）：提交后即进后台，关闭弹窗不中断，顶部进度条持续展示 */
 async function aiEnhance() {
   const r = aiRow.value
   if (!r || !r.feedback_id) return
@@ -321,26 +382,78 @@ async function aiEnhance() {
     aiTplError.value = '请选择提示词模板'
     return
   }
+  if (aiGenerating.value) {
+    aiTplError.value = '已有 AI 任务在后台生成中，请等待完成后再提交'
+    return
+  }
+  // 快照提交参数：生成期间用户改表单不影响本次任务；完成后按 feedback_id 回填
+  const fid = r.feedback_id
+  const payload = {
+    title: r.title || null,
+    topic: r.topic || null,
+    content: r.content || null,
+    performance: r.performance || null,
+    evaluation: r.evaluation || null,
+    homework: r.homework || null,
+    template_id: aiTemplateId.value,
+  }
   aiGenerating.value = true
   aiTplError.value = ''
+  aiTaskName.value = r.student_name
+  aiTaskFeedbackId.value = fid
+  startAiTimer()
+  // 生成中保留弹窗：展示显眼的进度条与计时，禁止误关
   try {
-    const draft = await aiEnhanceFeedback(r.feedback_id, {
-      title: r.title || null,
-      topic: r.topic || null,
-      content: r.content || null,
-      performance: r.performance || null,
-      evaluation: r.evaluation || null,
-      homework: r.homework || null,
-      template_id: aiTemplateId.value,
+    const draft = await aiEnhanceFeedback(fid, payload)
+    const text = (draft as any)?.evaluation ?? ''
+    if (typeof text !== 'string' || !text.trim()) {
+      throw new Error('AI 返回内容为空，请更换模板或补充课题内容后重试')
+    }
+    // 回填：同时更新行数据与弹窗引用，并持久化到后端，避免刷新丢失；
+    // 用反馈 id 精确定位，教师/管理员共用同一链路
+    const target = rows.value.find((x) => x.feedback_id === fid)
+    if (target) target.evaluation = text
+    if (aiRow.value && aiRow.value.feedback_id === fid) aiRow.value.evaluation = text
+    else if (aiRow.value) aiRow.value.evaluation = text
+    try {
+      const saved = await updateFeedback(fid, {
+        title: payload.title,
+        topic: payload.topic,
+        content: payload.content,
+        performance: payload.performance,
+        evaluation: text,
+        homework: payload.homework,
+        media_urls: target?.media_urls ?? r.media_urls,
+      })
+      if (target) target.status = saved.status
+    } catch {
+      /* 回填已成功，持久化失败仅提示，不阻断 */
+    }
+    // AI 回填不触发 input，强制重算评价框高度（directive updated 正常会处理，此处双保险）
+    await nextTick()
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`textarea[data-eval-fid="${fid}"]`)
+        ?.dispatchEvent(new Event('input', { bubbles: true }))
     })
-    if (draft.evaluation != null) r.evaluation = draft.evaluation
     aiUsedCount.value += 1
-    showNotice(`「${r.student_name}」AI 课堂评价已生成，可继续编辑或再次润色`)
     showAiModal.value = false
+    aiResultOk.value = true
+    aiResultTitle.value = 'AI 课堂评价已生成'
+    aiResultMsg.value = `「${aiTaskName.value}」的课堂评价已回填到课堂评价框，可继续编辑或再次润色。`
+    showAiResult.value = true
   } catch (e: any) {
-    aiTplError.value = e?.response?.data?.detail || 'AI 课堂评价生成失败'
+    const msg = typeof e?.message === 'string' && !e?.response ? e.message : aiErrorText(e)
+    aiTplError.value = msg
+    aiResultOk.value = false
+    aiResultTitle.value = 'AI 生成失败'
+    aiResultMsg.value = msg
+    showAiResult.value = true
   } finally {
     aiGenerating.value = false
+    aiTaskName.value = ''
+    aiTaskFeedbackId.value = ''
+    stopAiTimer()
   }
 }
 
@@ -349,7 +462,7 @@ async function loadTplTemplates() {
   tplLoading.value = true
   tplError.value = ''
   try {
-    tplTemplates.value = await listPromptTemplates()
+    tplTemplates.value = await listPromptTemplates('feedback')
   } catch {
     tplError.value = '提示词模板加载失败'
   } finally {
@@ -393,6 +506,7 @@ async function saveTpl() {
       await createPromptTemplate({
         name: tplForm.value.name.trim(),
         content: tplForm.value.content.trim(),
+        scene: 'feedback',
       })
     }
     tplEditing.value = null
@@ -405,13 +519,25 @@ async function saveTpl() {
   }
 }
 
-async function removeTpl(t: PromptTemplateOut) {
-  if (!window.confirm(`确认删除提示词模板「${t.name}」？`)) return
+const showTplDeleteConfirm = ref(false)
+const tplDeleting = ref<PromptTemplateOut | null>(null)
+function removeTpl(t: PromptTemplateOut) {
+  tplDeleting.value = t
+  showTplDeleteConfirm.value = true
+}
+async function confirmTplDelete() {
+  const t = tplDeleting.value
+  showTplDeleteConfirm.value = false
+  if (!t) {
+    return
+  }
   try {
     await deletePromptTemplate(t.id)
     await loadTplTemplates()
   } catch (e: any) {
     tplNotice.value = e?.response?.data?.detail || '删除失败'
+  } finally {
+    tplDeleting.value = null
   }
 }
 
@@ -446,8 +572,13 @@ function tplScopeLabel(scope: string): string {
 }
 
 async function saveRow(r: FbRow) {
+  await saveRowQuiet(r, true)
+}
+
+/** 静默保存一行：返回 null=成功，字符串=失败原因；notify=true 时保留单行提示 */
+async function saveRowQuiet(r: FbRow, notify = false): Promise<string | null> {
   const s = selectedSchedule.value
-  if (!s) return
+  if (!s) return '无排课上下文'
   r.saving = true
   try {
     const base = {
@@ -468,52 +599,91 @@ async function saveRow(r: FbRow) {
       r.feedback_id = f.id
       r.status = f.status
     }
-    showNotice(`「${r.student_name}」反馈已保存`)
+    if (notify) showNotice(`「${r.student_name}」反馈已保存`)
     refreshScheduleStatus()
+    return null
   } catch (e: any) {
-    showError(e?.response?.data?.detail || '保存失败')
+    const msg = e?.response?.data?.detail || '保存失败'
+    if (notify) showError(msg)
+    return msg
   } finally {
     r.saving = false
   }
 }
 
 const savingAll = ref(false)
+// 批量操作结果弹窗：顶部横幅易错过，改用弹窗汇总成功/跳过/失败
+const showBatchResult = ref(false)
+const batchResultTitle = ref('')
+const batchResultMsg = ref('')
 async function saveAll() {
   savingAll.value = true
   error.value = ''
+  let ok = 0
+  const failed: string[] = []
+  let skipped = 0
   for (const r of editableRows.value) {
-    if (r.status === 'published') continue
-    await saveRow(r)
+    if (r.status === 'published') {
+      skipped += 1
+      continue
+    }
+    const err = await saveRowQuiet(r)
+    if (err) failed.push(`「${r.student_name}」${err}`)
+    else ok += 1
   }
   savingAll.value = false
-  showNotice(`已保存 ${editableRows.value.length} 名学员反馈`)
   refreshScheduleStatus()
+  batchResultTitle.value = failed.length ? '全部保存（部分失败）' : '全部保存完成'
+  batchResultMsg.value =
+    `成功保存 ${ok} 名` +
+    (skipped ? `，跳过已发送 ${skipped} 名` : '') +
+    (failed.length ? `；失败 ${failed.length} 名：${failed.join('；')}` : '')
+  showBatchResult.value = true
 }
 
 async function publishRow(r: FbRow) {
+  await publishRowQuiet(r, true)
+}
+
+async function publishRowQuiet(r: FbRow, notify = false): Promise<string | null> {
   if (!r.feedback_id) {
-    showError(`「${r.student_name}」尚未保存，请先保存再发送给家长`)
-    return
+    const msg = '尚未保存，请先保存再发送'
+    if (notify) showError(`「${r.student_name}」${msg}`)
+    return msg
   }
   r.saving = true
   try {
     const f = await publishFeedback(r.feedback_id)
     r.status = f.status
-    showNotice(`「${r.student_name}」反馈已发送给家长`)
+    if (notify) showNotice(`「${r.student_name}」反馈已发送给家长`)
     refreshScheduleStatus()
+    return null
   } catch (e: any) {
-    showError(e?.response?.data?.detail || '发送失败')
+    const msg = e?.response?.data?.detail || '发送失败'
+    if (notify) showError(msg)
+    return msg
   } finally {
     r.saving = false
   }
 }
 
 /** 撤回已发送反馈为草稿（重新编辑后再次发送），防止发错/误发 */
-async function unpublishRow(r: FbRow) {
+const showRecallConfirm = ref(false)
+const recallRow = ref<FbRow | null>(null)
+function unpublishRow(r: FbRow) {
   if (!r.feedback_id) {
     return
   }
-  if (!window.confirm(`确认撤回「${r.student_name}」的反馈？撤回后可重新编辑并再次发送给家长。`)) return
+  recallRow.value = r
+  showRecallConfirm.value = true
+}
+async function confirmRecall() {
+  const r = recallRow.value
+  showRecallConfirm.value = false
+  if (!r || !r.feedback_id) {
+    recallRow.value = null
+    return
+  }
   r.saving = true
   try {
     const f = await unpublishFeedback(r.feedback_id)
@@ -524,21 +694,35 @@ async function unpublishRow(r: FbRow) {
     showError(e?.response?.data?.detail || '撤回失败')
   } finally {
     r.saving = false
+    recallRow.value = null
   }
 }
 
 async function publishAll() {
   error.value = ''
+  let ok = 0
+  const failed: string[] = []
+  let skipped = 0
   for (const r of editableRows.value) {
     if (!r.feedback_id) {
-      showError(`「${r.student_name}」未保存，跳过发送。请先保存或批量保存后再发送`)
+      failed.push(`「${r.student_name}」未保存，跳过发送（请先保存）`)
       continue
     }
-    if (r.status === 'published') continue
-    await publishRow(r)
+    if (r.status === 'published') {
+      skipped += 1
+      continue
+    }
+    const err = await publishRowQuiet(r)
+    if (err) failed.push(`「${r.student_name}」${err}`)
+    else ok += 1
   }
-  showNotice('批量发送完成')
   refreshScheduleStatus()
+  batchResultTitle.value = failed.length ? '全部发送（部分未发送）' : '全部发送完成'
+  batchResultMsg.value =
+    `成功发送 ${ok} 名` +
+    (skipped ? `，跳过已发送 ${skipped} 名` : '') +
+    (failed.length ? `；未发送 ${failed.length} 名：${failed.join('；')}` : '')
+  showBatchResult.value = true
 }
 
 let statusRefresh = 0
@@ -591,7 +775,17 @@ function removeMedia(r: FbRow, url: string) {
 }
 
 function mediaUrl(url: string): string {
-  return url.startsWith('http') ? url : `http://localhost:8000${url}`
+  // 后端返回 /uploads/... 相对路径：走同源相对地址（经网关/nginx 代理），避免写死 localhost:8000
+  if (/^https?:\/\//i.test(url)) return url
+  return url.startsWith('/') ? url : `/${url}`
+}
+
+function isVideoUrl(url: string): boolean {
+  return /\.(mp4|webm|mov|m4v|avi)(\?|$)/i.test(url)
+}
+
+function isImageUrl(url: string): boolean {
+  return /\.(png|jpe?g|gif|webp|bmp)(\?|$)/i.test(url)
 }
 
 // 筛选联动：
@@ -611,9 +805,17 @@ watch([teacherId], async () => {
 watch([classId, dateStart, dateEnd], loadAll)
 
 onMounted(async () => {
+  // 教师默认只看自己所带需反馈的班级：先锁定本人再加载，避免首屏闪出全校数据
+  if (viewMode.value === 'mine' && isTeacher.value && auth.user?.id) {
+    teacherId.value = auth.user.id
+  }
   await loadCampuses()
   await Promise.all([loadTeacherOptions(), loadClassOptions()])
   await loadAll()
+})
+
+onBeforeUnmount(() => {
+  stopAiTimer()
 })
 </script>
 
@@ -636,6 +838,31 @@ onMounted(async () => {
 
     <!-- 筛选栏 -->
     <div class="filter-bar">
+      <div v-if="isTeacher" class="filter-group view-mode-group">
+        <label>查看方式</label>
+        <div class="seg" role="tablist" aria-label="查看方式">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="viewMode === 'mine'"
+            :class="['seg-btn', { active: viewMode === 'mine' }]"
+            title="只显示自己所带需要反馈的班级"
+            @click="viewMode !== 'mine' && ((viewMode = 'mine'), applyViewMode())"
+          >
+            我的班级
+          </button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="viewMode === 'all'"
+            :class="['seg-btn', { active: viewMode === 'all' }]"
+            title="查看全部反馈班级"
+            @click="viewMode !== 'all' && ((viewMode = 'all'), applyViewMode())"
+          >
+            全部班级
+          </button>
+        </div>
+      </div>
       <div class="filter-group">
         <label>校区</label>
         <select v-model="campus" class="filter-select">
@@ -645,11 +872,24 @@ onMounted(async () => {
       </div>
       <div class="filter-group">
         <label>教师</label>
-        <SearchableSelect v-model="teacherId" :options="teacherOptions" placeholder="全部教师" />
+        <SearchableSelect
+          v-model="teacherId"
+          :options="teacherOptions"
+          :placeholder="viewMode === 'mine' && isTeacher ? '仅本人（我的班级）' : '全部教师'"
+          :disabled="viewMode === 'mine' && isTeacher"
+        />
       </div>
       <div class="filter-group">
         <label>班级</label>
         <SearchableSelect v-model="classId" :options="classOptions" placeholder="全部班级" />
+      </div>
+      <div class="filter-group">
+        <label>反馈类型</label>
+        <select v-model="feedbackType" class="filter-select" title="已反馈：已全部发送；待反馈：未反馈或没反馈完">
+          <option value="all">全部类型</option>
+          <option value="done">已反馈</option>
+          <option value="todo">待反馈</option>
+        </select>
       </div>
       <div class="filter-group">
         <label>日期区间</label>
@@ -669,7 +909,7 @@ onMounted(async () => {
     <div class="stats-row">
       <div class="stat-card">
         <span class="stat-num" style="color: #6366f1">{{ stats.pending }}</span>
-        <span class="stat-label">待反馈学员</span>
+        <span class="stat-label" title="按（班级·天·学员）去重：同一班级同一天多节课只算一次">待反馈学员</span>
       </div>
       <div class="stat-card">
         <span class="stat-num" style="color: #059669">{{ stats.feedback_done }}</span>
@@ -696,19 +936,31 @@ onMounted(async () => {
     <p v-if="error" class="error-banner">{{ error }}</p>
     <p v-if="notice" class="notice-banner">{{ notice }}</p>
 
+    <!-- AI 后台任务条：弹窗关闭后仍在生成，此处持续展示进度 -->
+    <div v-if="aiGenerating" class="ai-job-bar">
+      <div class="ai-job-main">
+        <span class="ai-job-dot" />
+        <span>AI 正在后台生成「{{ aiTaskName }}」的课堂评价，已用时 {{ aiElapsed }} 秒（通常 20-60 秒），可继续编辑其他内容…</span>
+      </div>
+      <div class="ai-job-actions">
+        <button class="btn ghost small" @click="showAiModal = true">后台运行中，可忽略</button>
+      </div>
+    </div>
+
     <!-- 排课选择（仅已完成） -->
     <div class="schedule-picker">
       <div class="schedule-picker-head">
         <span class="sp-title">选择已上完的排课</span>
         <span v-if="filtersLoading" class="sp-loading">加载中…</span>
-        <span v-else class="sp-count">{{ completedSchedules.length }} 节</span>
+        <span v-else class="sp-count" title="同一班级同一天的多节课合并为一条，一天只反馈一次">{{ visibleSchedules.length }} 个班级·日</span>
       </div>
-      <div v-if="completedSchedules.length === 0 && !filtersLoading" class="sp-empty">
+      <p class="sp-hint">同一班级同一天的多节课合并为一条，一天只反馈一次；统计按（班级·天·学员）去重。</p>
+      <div v-if="visibleSchedules.length === 0 && !filtersLoading" class="sp-empty">
         当前筛选条件下暂无已上完的排课
       </div>
       <div v-else class="sp-grid">
         <button
-          v-for="s in completedSchedules"
+          v-for="s in visibleSchedules"
           :key="s.id"
           type="button"
           class="schedule-card"
@@ -720,6 +972,7 @@ onMounted(async () => {
             <div class="schedule-body">
               <div class="schedule-name">
                 {{ s.class_name }}
+                <span v-if="(s.group_count ?? 1) > 1" class="group-chip" :title="`本组含 ${s.group_count} 节课，反馈一次即可`">1 天 {{ s.group_count }} 节·合并反馈</span>
                 <span class="status-pill" :class="s.all_done ? 'done' : 'todo'">
                   {{ s.all_done ? '已全部反馈' : `待反馈 ${Math.max(s.attended - s.feedback_done, 0)} 人` }}
                 </span>
@@ -797,7 +1050,7 @@ onMounted(async () => {
           <div class="fb-fields">
             <label>
               课题
-              <input v-model="r.topic" type="text" placeholder="如：Python 变量与类型" />
+              <textarea v-autogrow:slim v-model="r.topic" rows="1" placeholder="如：Python 变量与类型"></textarea>
             </label>
             <label>
               课题内容
@@ -812,7 +1065,7 @@ onMounted(async () => {
                 课堂评价
                 <span class="eval-tip">AI 生成内容将写入此处，可继续编辑或再次润色</span>
               </span>
-              <textarea v-autogrow v-model="r.evaluation" rows="4" placeholder="对学员本堂课的总体评价（AI 可辅助生成）…"></textarea>
+              <textarea v-autogrow v-model="r.evaluation" rows="4" :data-eval-fid="r.feedback_id" placeholder="对学员本堂课的总体评价（AI 可辅助生成）…"></textarea>
             </label>
             <label>
               今日作业
@@ -827,8 +1080,11 @@ onMounted(async () => {
             </button>
             <div v-if="r.media_urls.length" class="media-list">
               <div v-for="u in r.media_urls" :key="u" class="media-item">
-                <img v-if="u.match(/\.(png|jpe?g|gif|webp|bmp)(\?|$)/i)" :src="mediaUrl(u)" alt="素材" />
-                <span v-else class="video-tag">🎬 视频</span>
+                <a v-if="isImageUrl(u)" :href="mediaUrl(u)" target="_blank" rel="noopener" class="media-link">
+                  <img :src="mediaUrl(u)" alt="素材" />
+                </a>
+                <video v-else-if="isVideoUrl(u)" :src="mediaUrl(u)" controls preload="metadata" />
+                <a v-else :href="mediaUrl(u)" target="_blank" rel="noopener" class="file-tag">📎 附件</a>
                 <button class="media-del" title="移除" @click="removeMedia(r, u)">×</button>
               </div>
             </div>
@@ -855,6 +1111,49 @@ onMounted(async () => {
         全部发送给家长
       </button>
     </div>
+
+    <!-- 删除模板确认弹窗（替代原生 confirm，风格统一） -->
+    <ConfirmDialog
+      :visible="showTplDeleteConfirm"
+      title="删除提示词模板？"
+      :message="tplDeleting ? `确认删除模板「${tplDeleting.name}」？删除后使用该模板的 AI 生成将回退到系统默认模板。` : ''"
+      confirm-text="确认删除"
+      danger
+      @confirm="confirmTplDelete"
+      @cancel="showTplDeleteConfirm = false; tplDeleting = null"
+    />
+
+    <!-- 撤回确认弹窗（替代原生 confirm，风格统一） -->
+    <ConfirmDialog
+      :visible="showRecallConfirm"
+      title="撤回反馈重新编辑？"
+      :message="recallRow ? `确认撤回「${recallRow.student_name}」的反馈？撤回后家长端将看不到该条反馈，可重新编辑并再次发送。` : ''"
+      confirm-text="撤回并编辑"
+      danger
+      @confirm="confirmRecall"
+      @cancel="showRecallConfirm = false; recallRow = null"
+    />
+
+    <!-- AI 生成结果弹窗（成功/失败统一弹窗，保证显眼） -->
+    <ConfirmDialog
+      :visible="showAiResult"
+      :title="aiResultTitle"
+      :message="aiResultMsg"
+      :danger="!aiResultOk"
+      confirm-text="知道了"
+      @confirm="showAiResult = false"
+      @cancel="showAiResult = false"
+    />
+
+    <!-- 批量保存/发送结果弹窗（替代顶部横幅，避免错过） -->
+    <ConfirmDialog
+      :visible="showBatchResult"
+      :title="batchResultTitle"
+      :message="batchResultMsg"
+      confirm-text="知道了"
+      @confirm="showBatchResult = false"
+      @cancel="showBatchResult = false"
+    />
 
     <!-- 批量填入弹窗 -->
     <div v-if="showBatch" class="overlay" @click.self="showBatch = false">
@@ -897,7 +1196,8 @@ onMounted(async () => {
       <div class="modal ai-modal">
         <h2>AI 课堂评价</h2>
         <p class="batch-hint">
-          为「{{ aiRow.student_name }}」选择提示词模板，AI 将结合课题/课堂表现/作业生成课堂评价，写入「课堂评价」输入框，可编辑后再润色。
+          为「{{ aiRow.student_name }}」选择提示词模板，AI 将结合科目/课题/课题内容/课堂表现/作业生成课堂评价，写入「课堂评价」输入框，可编辑后再润色。
+          提交后即进后台生成，可直接关闭弹窗继续操作，顶部进度条会持续展示直到完成。
         </p>
         <label>
           提示词模板
@@ -911,12 +1211,21 @@ onMounted(async () => {
         <div v-if="!aiTemplates.length" class="ai-tpl-empty">
           暂无可用模板，请先到「提示词模板」新建。
         </div>
+        <!-- 生成进度：显眼的进度条 + 计时 + 状态文案 -->
+        <div v-if="aiGenerating" class="ai-progress">
+          <div class="ai-progress-head">
+            <span class="ai-spin" />
+            <span>正在生成「{{ aiTaskName }}」的课堂评价… {{ aiElapsed }}s</span>
+          </div>
+          <div class="ai-progress-bar"><span class="ai-progress-fill" /></div>
+          <p class="ai-progress-tip">通常 20-60 秒，请稍候。生成完成后将自动回填到课堂评价框。</p>
+        </div>
         <p v-if="aiTplError" class="error-banner">{{ aiTplError }}</p>
         <div class="modal-actions">
-          <button class="btn ghost" @click="showAiModal = false">取消</button>
+          <button class="btn ghost" :disabled="aiGenerating" @click="showAiModal = false">取消</button>
           <button class="btn primary" @click="aiEnhance" :disabled="aiGenerating || !aiTemplateId">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l1.9 5.1L19 9l-5.1 1.9L12 16l-1.9-5.1L5 9l5.1-1.9L12 2zM19 16l.9 2.1L22 19l-2.1.9L19 22l-.9-2.1L16 19l2.1-.9L19 16z" /></svg>
-            {{ aiGenerating ? '生成中…' : aiRow.evaluation ? '润色' : '生成' }}
+            {{ aiGenerating ? `生成中 ${aiElapsed}s…` : aiRow.evaluation ? '提交后台润色' : '提交后台生成' }}
           </button>
         </div>
       </div>
@@ -927,7 +1236,7 @@ onMounted(async () => {
       <div class="modal tpl-modal">
         <h2>提示词模板</h2>
         <p class="batch-hint">
-          模板用于 AI 生成课堂评价。系统模板开箱即用；「我的」模板仅自己可见；
+          模板用于 AI 生成课堂评价。系统模板开箱即用（可编辑、不可删除）；「我的」模板仅自己可见；
           <template v-if="isAdmin">管理员可将模板「发布」给全校教师使用。</template>
           <template v-else>发布需管理员操作。</template>
         </p>
@@ -952,7 +1261,8 @@ onMounted(async () => {
                     <button v-if="tplCanEdit(t)" class="tpl-btn" @click="editTpl(t)">编辑</button>
                     <button v-if="isAdmin && key === 'personal'" class="tpl-btn" @click="publishTpl(t)">发布</button>
                     <button v-if="isAdmin && key === 'published'" class="tpl-btn" @click="unpublishTpl(t)">撤回</button>
-                    <button v-if="tplCanEdit(t)" class="tpl-btn danger" @click="removeTpl(t)">删除</button>
+                    <button v-if="tplCanEdit(t) && key !== 'system'" class="tpl-btn danger" @click="removeTpl(t)" title="系统模板不可删除，仅可编辑">删除</button>
+                    <span v-if="key === 'system'" class="tpl-sys-tip" title="系统模板可编辑、不可删除">系统模板·可改不可删</span>
                   </div>
                 </div>
               </div>
@@ -1073,6 +1383,36 @@ h1 {
   color: var(--ink-3);
   font-weight: 500;
 }
+/* 查看方式分段选择：我的班级 / 全部班级（与相邻下拉同高、同基线） */
+.seg {
+  display: inline-flex;
+  padding: 3px;
+  gap: 3px;
+  background: #f1f5f9;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+.seg-btn {
+  border: none;
+  background: transparent;
+  padding: 6px 15px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-3);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  line-height: 1.5;
+}
+.seg-btn:hover {
+  color: var(--ink-2);
+}
+.seg-btn.active {
+  background: var(--surface);
+  color: var(--brand-strong);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+}
 .filter-select {
   padding: 8px 11px;
   border: 1px solid var(--line);
@@ -1153,6 +1493,43 @@ h1 {
   font-size: 13px;
 }
 
+/* AI 后台任务条（与报告/总结页同款）：弹窗关闭后仍展示进度 */
+.ai-job-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  margin: 0 0 14px;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  color: #4338ca;
+}
+.ai-job-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-job-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #6366f1;
+  animation: ai-pulse 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes ai-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+.ai-job-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 /* 排课选择器（仅已完成） */
 .schedule-picker {
   background: var(--surface);
@@ -1178,6 +1555,21 @@ h1 {
 .sp-count {
   color: var(--ink-3);
   font-size: 12.5px;
+}
+.sp-hint {
+  color: var(--ink-3);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+.group-chip {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: #eef2ff;
+  color: #4f46e5;
+  border: 1px solid #c7d2fe;
 }
 .sp-empty {
   text-align: center;
@@ -1533,6 +1925,28 @@ h1 {
   height: 100%;
   object-fit: cover;
 }
+.media-link {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.media-item video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #0f172a;
+}
+.file-tag {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 11px;
+  background: #f1f5f9;
+  color: var(--ink-2);
+  text-decoration: none;
+}
 .video-tag {
   display: flex;
   align-items: center;
@@ -1672,6 +2086,58 @@ h1 {
   font-size: 12.5px;
   padding: 12px 0;
 }
+/* AI 生成中进度：显眼但克制，与页面渐变主色呼应 */
+.ai-progress {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: linear-gradient(135deg, #eef2ff, #ecfeff);
+  border: 1px solid #c7d2fe;
+}
+.ai-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #4338ca;
+}
+.ai-spin {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #c7d2fe;
+  border-top-color: #6366f1;
+  animation: ai-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes ai-spin {
+  to { transform: rotate(360deg); }
+}
+.ai-progress-bar {
+  height: 6px;
+  margin-top: 10px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.15);
+  overflow: hidden;
+}
+.ai-progress-fill {
+  display: block;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #06b6d4);
+  animation: ai-slide 1.2s ease-in-out infinite;
+}
+@keyframes ai-slide {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.ai-progress-tip {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #6366f1;
+}
 
 .tpl-modal {
   width: 720px;
@@ -1762,6 +2228,10 @@ h1 {
 }
 .tpl-btn.danger:hover {
   background: var(--danger-soft);
+}
+.tpl-sys-tip {
+  font-size: 11px;
+  color: var(--ink-3);
 }
 .tpl-form {
   border-left: 1px solid var(--line);

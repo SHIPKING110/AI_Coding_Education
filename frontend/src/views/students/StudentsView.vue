@@ -6,7 +6,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import StudentFilter, { type StudentFilterValue } from '@/components/StudentFilter.vue'
 import { pinyinInitials } from '@/utils/pinyin'
-import { listCampusesApi, listTeachersApi, registerApi, resetUserPasswordApi } from '@/api/auth'
+import { listCampusesApi, listTeachersApi, loginApi, registerApi, resetUserPasswordApi } from '@/api/auth'
 import {
   adjustLessonBalance,
   createStudent,
@@ -29,6 +29,7 @@ import {
   type StudentCreate,
   type StudentOut,
 } from '@/api/enrollment'
+import { toastApiError, useToastStore } from '@/stores/toast'
 import { listUsersApi } from '@/api/client'
 import { listSubjects, type SubjectOut } from '@/api/business'
 import { myPermissions } from '@/api/permissions'
@@ -91,7 +92,7 @@ const total = ref(0)
 
 const showForm = ref(false)
 const editing = ref<StudentOut | null>(null)
-const form = ref<StudentCreate>({ name: '', phone: '', campus: '', lesson_balance: 0, class_ids: [], source: '', referrer: '' })
+const form = ref<StudentCreate>({ name: '', phone: '', gender: '', campus: '', lesson_balance: 0, class_ids: [], source: '', referrer: '' })
 const formError = ref('')
 
 const showRecords = ref(false)
@@ -357,7 +358,8 @@ async function submitRenew() {
       note: renewNote.value || null,
     })
     showRenew.value = false
-    await loadCollection()
+    if (viewMode.value === 'collection') await loadCollection()
+    else await load()
   } catch (e: any) {
     renewError.value = e?.response?.data?.detail || '续费失败'
   } finally {
@@ -503,14 +505,14 @@ const parentUserLabel = computed(() => {
   const s = editing.value
   if (!s?.parent_user_id) return ''
   const u = parentUsers.value.find((x) => x.id === s.parent_user_id)
-  return u ? `${u.name}（${u.username}）` : s.parent_user_id.slice(0, 8)
+  return u ? `${u.name}（登录名：${u.username}）` : s.parent_user_id.slice(0, 8)
 })
 
 const studentUserLabel = computed(() => {
   const s = editing.value
   if (!s?.student_user_id) return ''
   const u = studentUsers.value.find((x) => x.id === s.student_user_id)
-  return u ? `${u.name}（${u.username}）` : s.student_user_id.slice(0, 8)
+  return u ? `${u.name}（登录名：${u.username}）` : s.student_user_id.slice(0, 8)
 })
 
 // —— 新客户账号创建（默认密码 123456）——
@@ -522,6 +524,8 @@ const showCreateStudent = ref(false)
 const createStudentUsername = ref('')
 const creatingStudentUser = ref(false)
 const createStudentError = ref('')
+// 账号创建成功回执（显示真实登录名，已用该值调过登录校验）
+const createOkMsg = ref('')
 
 // —— 管理员重置已绑定账号密码（默认 123456）——
 const resetTarget = ref<{ kind: 'parent' | 'student'; id: string; label: string } | null>(null)
@@ -538,10 +542,16 @@ function openCreateParentForm() {
 
 function openCreateStudentForm() {
   showCreateStudent.value = !showCreateStudent.value
-  // 学员账号：登录名默认=姓名缩写+家长电话（如：露露+138… → ll138…）；用户名必须 ≥3 位
+  // 学员账号：搜索框里若已填账号样式文本（如 bfsm13766356421）则原样采用；
+  // 否则默认=姓名缩写+家长电话；用户名必须 ≥3 位
   const phone = (form.value.phone || '').trim()
-  const abbr = pinyinInitials(form.value.name || '')
-  createStudentUsername.value = showCreateStudent.value && abbr && phone ? `${abbr}${phone}` : ''
+  const search = (studentUserSearch.value || '').trim()
+  if (/^[a-zA-Z0-9]{3,}$/.test(search)) {
+    createStudentUsername.value = showCreateStudent.value ? search : ''
+  } else {
+    const abbr = pinyinInitials(form.value.name || '')
+    createStudentUsername.value = showCreateStudent.value && abbr && phone ? `${abbr}${phone}` : ''
+  }
   createStudentError.value = ''
 }
 
@@ -557,15 +567,21 @@ function onStudentUsernameInput() {
 }
 
 watch(
-  () => [form.value.phone, form.value.name],
+  () => [form.value.phone, form.value.name, studentUserSearch.value],
   () => {
     if (showCreateParent.value && !parentUsernameTouched.value) {
       createParentUsername.value = (form.value.phone || '').trim()
     }
     if (showCreateStudent.value && !studentUsernameTouched.value) {
       const phone = (form.value.phone || '').trim()
-      const abbr = pinyinInitials(form.value.name || '')
-      createStudentUsername.value = abbr && phone ? `${abbr}${phone}` : ''
+      const search = (studentUserSearch.value || '').trim()
+      // 搜索框里直接填了账号样式文本（如 bfsm13766356421）：原样作为登录名
+      if (/^[a-zA-Z0-9]{3,}$/.test(search)) {
+        createStudentUsername.value = search
+      } else {
+        const abbr = pinyinInitials(form.value.name || search || '')
+        createStudentUsername.value = abbr && phone ? `${abbr}${phone}` : ''
+      }
     }
   },
 )
@@ -573,9 +589,14 @@ watch(
 async function createParentAccount() {
   createParentError.value = ''
   const username = createParentUsername.value.trim()
-  const name = parentUserSearch.value.trim()
+  const name = parentUserSearch.value.trim() || (form.value.name.trim() ? `${form.value.name.trim()}的家长` : '')
   if (!username || username.length < 3) {
     createParentError.value = '请填写登录名（至少 3 位字母/数字）'
+    return
+  }
+  // 登录名是手机号样式时校验合规性
+  if (/^1\d{10}$/.test(username) && !/^1[3-9]\d{9}$/.test(username)) {
+    createParentError.value = '登录手机号格式不正确，请输入11位大陆手机号码'
     return
   }
   if (!name) {
@@ -585,15 +606,37 @@ async function createParentAccount() {
   creatingParent.value = true
   try {
     const user = await registerApi({ role: 'parent', username, password: '123456', name })
+    try {
+      await loginApi({ username: user.username, password: '123456' })
+    } catch {
+      createParentError.value = `账号已创建（${user.username}），但登录校验失败，请检查密码或联系管理员`
+      return
+    }
     await loadParentUsers()
     bindParent(user.id)
     showCreateParent.value = false
     createParentError.value = ''
+    batchDone.value = `家长账号 ${user.username} 创建成功，可用该登录名 + 密码 123456 登录`
+    createOkMsg.value = `家长账号 ${user.username} 创建并绑定成功，可用该登录名 + 密码 123456 登录`
   } catch (e: any) {
-    createParentError.value =
-      e?.response?.data?.detail === 'Username already exists'
-        ? '该登录名已被占用，请换一个'
-        : e?.response?.data?.detail || '创建失败，请重试'
+    if (e?.response?.data?.detail === 'Username already exists') {
+      // 登录名已存在：可能是删除学员后残留的 User 行，直接复用绑定（旧账号不再占着）
+      try {
+        const found = await listUsersApi({ role: 'parent', keyword: username, limit: 10 })
+        const reuse = found.items.find((u) => u.username === username)
+        if (reuse) {
+          bindParent(reuse.id)
+          showCreateParent.value = false
+          createParentError.value = ''
+          return
+        }
+      } catch {
+        /* 忽略复用查找失败，走下面的提示 */
+      }
+      createParentError.value = '该登录名已被占用，请换一个'
+    } else {
+      createParentError.value = e?.response?.data?.detail || '创建失败，请重试'
+    }
   } finally {
     creatingParent.value = false
   }
@@ -602,7 +645,7 @@ async function createParentAccount() {
 async function createStudentAccount() {
   createStudentError.value = ''
   const username = createStudentUsername.value.trim()
-  const name = studentUserSearch.value.trim()
+  const name = studentUserSearch.value.trim() || form.value.name.trim()
   if (!username || username.length < 3) {
     createStudentError.value = '请填写登录名（至少 3 位字母/数字）'
     return
@@ -614,15 +657,38 @@ async function createStudentAccount() {
   creatingStudentUser.value = true
   try {
     const user = await registerApi({ role: 'student', username, password: '123456', name })
+    // 创建成功后用真实 username 调一次登录校验：确保该登录名可用于登录（token 丢弃，不切换会话）
+    try {
+      await loginApi({ username: user.username, password: '123456' })
+    } catch {
+      createStudentError.value = `账号已创建（${user.username}），但登录校验失败，请检查密码或联系管理员`
+      return
+    }
     await loadStudentUsers()
     bindStudentUser(user.id)
     showCreateStudent.value = false
     createStudentError.value = ''
+    batchDone.value = `学员账号 ${user.username} 创建成功，可用该登录名 + 密码 123456 登录`
+    createOkMsg.value = `学员账号 ${user.username} 创建并绑定成功，可用该登录名 + 密码 123456 登录`
   } catch (e: any) {
-    createStudentError.value =
-      e?.response?.data?.detail === 'Username already exists'
-        ? '该登录名已被占用，请换一个'
-        : e?.response?.data?.detail || '创建失败，请重试'
+    if (e?.response?.data?.detail === 'Username already exists') {
+      // 登录名已存在：可能是删除学员后残留的 User 行，直接复用绑定（旧账号不再占着）
+      try {
+        const found = await listUsersApi({ role: 'student', keyword: username, limit: 10 })
+        const reuse = found.items.find((u) => u.username === username)
+        if (reuse) {
+          bindStudentUser(reuse.id)
+          showCreateStudent.value = false
+          createStudentError.value = ''
+          return
+        }
+      } catch {
+        /* 忽略复用查找失败，走下面的提示 */
+      }
+      createStudentError.value = '该登录名已被占用，请换一个'
+    } else {
+      createStudentError.value = e?.response?.data?.detail || '创建失败，请重试'
+    }
   } finally {
     creatingStudentUser.value = false
   }
@@ -731,9 +797,10 @@ function onPageChange(p: number) {
 
 function openCreate() {
   editing.value = null
-  form.value = { name: '', phone: '', campus: '', lesson_balance: 0, class_ids: [], source: '', referrer: '' }
+  form.value = { name: '', phone: '', gender: '', campus: '', lesson_balance: 0, class_ids: [], source: '', referrer: '' }
   resetClassPicker()
   formError.value = ''
+  createOkMsg.value = ''
   parentUserSearch.value = ''
   studentUserSearch.value = ''
   parentUsernameTouched.value = false
@@ -792,6 +859,7 @@ function openEdit(s: StudentOut) {
   form.value = {
     name: s.name,
     phone: s.phone,
+    gender: (s as StudentOut & { gender?: string }).gender ?? '',
     campus: s.campus ?? '',
     lesson_balance: s.lesson_balance,
     // 教师只能看到/调整本人所带班级的归属；其他教师的班级不在其管理范围
@@ -803,6 +871,7 @@ function openEdit(s: StudentOut) {
   // 沿用学员校区作为班级选择器的初始校区，便于快速定位同校区班级
   classPickerCampus.value = s.campus ?? ''
   formError.value = ''
+  createOkMsg.value = ''
   parentUserSearch.value = ''
   studentUserSearch.value = ''
   showForm.value = true
@@ -834,6 +903,14 @@ async function submit() {
     formError.value = '请填写学员姓名'
     return
   }
+  const phone = (form.value.phone || '').trim()
+  if (phone && !/^1[3-9]\d{9}$/.test(phone)) {
+    formError.value = '联系电话格式不正确，请输入11位大陆手机号码（如13800000000）'
+    try {
+      useToastStore().error('联系电话格式不正确：请输入11位大陆手机号码')
+    } catch { /* toast 不可用时仅行内提示 */ }
+    return
+  }
   try {
     if (editing.value) {
       if (isTeacher.value) {
@@ -843,6 +920,7 @@ async function submit() {
         await updateStudent(editing.value.id, {
           name: form.value.name,
           phone: form.value.phone || null,
+          gender: form.value.gender || null,
           campus: form.value.campus || null,
           parent_user_id: form.value.parent_user_id,
           student_user_id: form.value.student_user_id,
@@ -864,14 +942,33 @@ async function submit() {
 }
 
 function removeStudent(s: StudentOut) {
+  // 余额非零先本地拦截并弹窗说明（后端同样会 400 拦截）
+  const balance = Number(s.lesson_balance ?? 0)
+  if (Math.abs(balance) >= 0.05) {
+    const reason =
+      balance > 0
+        ? `该学员还有 ${balance} 节课时未消耗，无法直接删除；请先退费/消耗完课时后再删除`
+        : `该学员欠 ${Math.abs(balance)} 节课时，无法直接删除；请先结清欠费后再删除`
+    try {
+      toastApiError({ response: { data: { detail: reason } } })
+    } catch {
+      alert(reason)
+    }
+    return
+  }
   askConfirm({
     title: '删除学员',
     message: `确认删除学员「${s.name}」？删除后该学员将从在读列表移除，历史课时、考勤与评估数据会归档保留，可在需要时恢复。`,
     confirmText: '删除',
     danger: true,
     onConfirm: async () => {
-      await deleteStudent(s.id)
-      await load()
+      try {
+        await deleteStudent(s.id)
+        await load()
+      } catch (e: unknown) {
+        toastApiError(e, '删除失败，请稍后重试')
+        throw e
+      }
     },
   })
 }
@@ -989,14 +1086,15 @@ const filteredCollectionStudents = computed(() =>
     : collectionStudents.value,
 )
 
-/** 一键补建学员账号：登录名默认 st+电话，显示名取学员姓名，密码 123456，成功后就地回填绑定 */
+/** 一键补建学员账号：登录名默认姓名首字母+电话，显示名取学员姓名，密码 123456，成功后就地回填绑定 */
 const batchCreating = ref(false)
 const batchError = ref('')
 const batchDone = ref('')
 
 function defaultStudentUsername(s: StudentOut): string {
   const phone = (s.phone || '').trim()
-  return phone ? `st${phone}` : ''
+  const abbr = pinyinInitials(s.name || '')
+  return abbr && phone ? `${abbr}${phone}` : ''
 }
 
 async function ensureStudentAccount(s: StudentOut): Promise<boolean> {
@@ -1045,7 +1143,7 @@ async function batchCreateMissingAccounts() {
       else break
     }
     if (okCount > 0) {
-      batchDone.value = `已补建 ${okCount} 个学员账号（登录名 st+电话，密码 123456）`
+      batchDone.value = `已补建 ${okCount} 个学员账号（登录名姓名首字母+电话，密码 123456）`
       await loadCollection()
     }
   } finally {
@@ -1138,7 +1236,7 @@ onMounted(async () => {
           </button>
         </template>
         <template v-else>
-          <button class="btn primary" :disabled="batchCreating" title="为当前名单中未绑定学员账号的学员一键补建（登录名 st+电话，密码 123456）" @click="batchCreateMissingAccounts">
+          <button class="btn primary" :disabled="batchCreating" title="为当前名单中未绑定学员账号的学员一键补建（登录名姓名首字母+电话，密码 123456）" @click="batchCreateMissingAccounts">
             {{ batchCreating ? '补建中…' : '一键补建学员账号' }}
           </button>
           <button class="btn ghost" @click="backToStudents">
@@ -1241,7 +1339,7 @@ onMounted(async () => {
               </td>
               <td class="ops">
                 <button class="op-btn primary" @click="guard('student_refund', () => openRenew(s))">续费</button>
-                <button v-if="!s.student_user_id" class="op-btn ok" title="按默认规则补建：登录名 st+电话，密码 123456" @click="createMissingAccount(s)">补建账号</button>
+                <button v-if="!s.student_user_id" class="op-btn ok" title="按默认规则补建：登录名姓名首字母+电话，密码 123456" @click="createMissingAccount(s)">补建账号</button>
                 <button v-if="s.follow_up_status === 'pending'" class="op-btn ok" @click="guard('student_stop', () => markFollowUp(s, 'renewed'))">标已续费</button>
                 <button v-if="s.follow_up_status === 'pending'" class="op-btn warn" @click="guard('student_stop', () => markFollowUp(s, 'stopped'))">标已停课</button>
                 <button v-if="s.follow_up_status !== 'pending'" class="op-btn" @click="guard('student_stop', () => markFollowUp(s, 'pending'))">恢复待跟进</button>
@@ -1256,40 +1354,6 @@ onMounted(async () => {
 
       <PaginationBar :total="collectionTotal" :page="collectionPage" :page-size="collectionPageSize" @update:page="(p) => { collectionPage = p; loadCollection() }" />
 
-      <!-- 续费弹窗 -->
-      <div v-if="showRenew" class="overlay" @click.self="showRenew = false">
-        <div class="modal">
-          <h2>{{ renewTarget?.name }} · 续费入账</h2>
-          <p class="muted">当前余额：{{ renewTarget?.lesson_balance }} 课时</p>
-          <div class="mode-tabs">
-            <button class="mode-tab" :class="{ active: renewMode === 'package' }" @click="renewMode = 'package'">选课包</button>
-            <button class="mode-tab" :class="{ active: renewMode === 'custom' }" @click="renewMode = 'custom'">自定义</button>
-          </div>
-          <label v-if="renewMode === 'package'">
-            课时包
-            <select v-model="renewPackageId">
-              <option value="">请选择课时包</option>
-              <option v-for="p in collectionPackages" :key="p.id" :value="p.id">
-                {{ p.name }} · {{ p.total_lessons }} 课时 · ¥{{ Number(p.price).toFixed(2) }}
-              </option>
-            </select>
-          </label>
-          <template v-else>
-            <div class="row">
-              <label>补充课时 *<input v-model.number="renewCustomLessons" type="number" min="1" /></label>
-              <label>实收金额（元）<input v-model.number="renewCustomAmount" type="number" min="0" step="0.01" /></label>
-            </div>
-          </template>
-          <label>备注<input v-model="renewNote" type="text" placeholder="如：家长微信转账续费" /></label>
-          <p v-if="renewError" class="error">{{ renewError }}</p>
-          <div class="modal-actions">
-            <button class="btn ghost" @click="showRenew = false">取消</button>
-            <button class="btn primary" :disabled="renewSubmitting" @click="submitRenew">
-              {{ renewSubmitting ? '入账中…' : '确认续费' }}
-            </button>
-          </div>
-        </div>
-      </div>
     </template>
 
     <!-- ========== 学员管理主页面 ========== -->
@@ -1400,6 +1464,14 @@ onMounted(async () => {
           <input v-model="form.phone" type="text" />
         </label>
         <label>
+          性别
+          <select v-model="form.gender">
+            <option value="">未填写</option>
+            <option value="male">男</option>
+            <option value="female">女</option>
+          </select>
+        </label>
+        <label>
           所属校区
           <input v-model="form.campus" type="text" list="campus-list" placeholder="如：一校 / 二校 / 三校" />
           <datalist id="campus-list">
@@ -1458,7 +1530,7 @@ onMounted(async () => {
             <div class="class-options">
               <label v-for="c in filteredClasses" :key="c.id" class="class-option">
                 <input v-model="form.class_ids" type="checkbox" :value="c.id" />
-                <span>{{ c.name }}（{{ c.subject }}）</span>
+                <span>{{ c.name }}（{{ c.subject }} · {{ c.student_count ?? 0 }}人）</span>
                 <small v-if="c.teacher_name">{{ c.teacher_name }}</small>
               </label>
               <p v-if="filteredClasses.length === 0" class="no-match">没有匹配的班级</p>
@@ -1500,7 +1572,8 @@ onMounted(async () => {
                   <div v-else class="create-form">
                     <div class="cf-row">
                       <input v-model="createParentUsername" type="text" placeholder="登录名默认=学员电话号码（字母/数字，≥3 位）" @input="onParentUsernameInput" />
-                      <span class="cf-note">显示名：{{ parentUserSearch.trim() || '（先输入姓名）' }}</span>
+                      <span class="cf-note">登录名：{{ createParentUsername.trim() || '（待生成）' }}（创建后即为登录账号，请核对）</span>
+                      <span class="cf-note">显示名：{{ parentUserSearch.trim() || form.name.trim() + '的家长' || '（先输入姓名）' }}</span>
                     </div>
                     <p class="cf-note">密码默认 123456，创建后请及时告知家长</p>
                     <p v-if="createParentError" class="cf-error">{{ createParentError }}</p>
@@ -1544,11 +1617,12 @@ onMounted(async () => {
                 </div>
                 <div class="user-create">
                   <button v-if="!showCreateStudent" class="create-account-btn" type="button" @click="openCreateStudentForm">
-                    ＋ 没有该账号？新建学员账号（登录名默认 st+学员电话号码，密码 123456）
+                    ＋ 没有该账号？新建学员账号（登录名默认姓名首字母+电话，密码 123456）
                   </button>
                   <div v-else class="create-form">
                     <div class="cf-row">
-                      <input v-model="createStudentUsername" type="text" placeholder="登录名默认=st+学员电话号码（字母/数字，≥3 位）" />
+                      <input v-model="createStudentUsername" type="text" placeholder="登录名默认=姓名首字母+电话（如 xy138…，字母/数字，≥3 位）" @input="onStudentUsernameInput" />
+                      <span class="cf-note">登录名：{{ createStudentUsername.trim() || '（待生成）' }}（创建后即为登录账号，请核对）</span>
                       <span class="cf-note">显示名：{{ studentUserSearch.trim() || '（先输入姓名）' }}</span>
                     </div>
                     <p v-if="createStudentError" class="cf-error">{{ createStudentError }}</p>
@@ -1565,6 +1639,7 @@ onMounted(async () => {
           </div>
         </label>
         <p v-if="formError" class="error">{{ formError }}</p>
+        <p v-if="createOkMsg" class="ok">{{ createOkMsg }}</p>
         <div class="modal-actions">
           <button class="btn ghost" @click="showForm = false">取消</button>
           <button class="btn primary" @click="submit">保存</button>
@@ -1745,6 +1820,42 @@ onMounted(async () => {
       @cancel="showNoPerm = false"
     />
     </template>
+
+    <!-- 续费弹窗（根级：首页/缴费名单共用） -->
+      <!-- 续费弹窗 -->
+      <div v-if="showRenew" class="overlay" @click.self="showRenew = false">
+        <div class="modal">
+          <h2>{{ renewTarget?.name }} · 续费入账</h2>
+          <p class="muted">当前余额：{{ renewTarget?.lesson_balance }} 课时</p>
+          <div class="mode-tabs">
+            <button class="mode-tab" :class="{ active: renewMode === 'package' }" @click="renewMode = 'package'">选课包</button>
+            <button class="mode-tab" :class="{ active: renewMode === 'custom' }" @click="renewMode = 'custom'">自定义</button>
+          </div>
+          <label v-if="renewMode === 'package'">
+            课时包
+            <select v-model="renewPackageId">
+              <option value="">请选择课时包</option>
+              <option v-for="p in collectionPackages" :key="p.id" :value="p.id">
+                {{ p.name }} · {{ p.total_lessons }} 课时 · ¥{{ Number(p.price).toFixed(2) }}
+              </option>
+            </select>
+          </label>
+          <template v-else>
+            <div class="row">
+              <label>补充课时 *<input v-model.number="renewCustomLessons" type="number" min="1" /></label>
+              <label>实收金额（元）<input v-model.number="renewCustomAmount" type="number" min="0" step="0.01" /></label>
+            </div>
+          </template>
+          <label>备注<input v-model="renewNote" type="text" placeholder="如：家长微信转账续费" /></label>
+          <p v-if="renewError" class="error">{{ renewError }}</p>
+          <div class="modal-actions">
+            <button class="btn ghost" @click="showRenew = false">取消</button>
+            <button class="btn primary" :disabled="renewSubmitting" @click="submitRenew">
+              {{ renewSubmitting ? '入账中…' : '确认续费' }}
+            </button>
+          </div>
+        </div>
+      </div>
   </div>
 </template>
 
@@ -2032,13 +2143,10 @@ tr.urgent td:first-child {
   color: var(--ink-3);
 }
 .op-btn.primary {
-  border-color: transparent;
-  background: linear-gradient(135deg, #6366f1, #06b6d4);
-  color: #fff;
+  color: var(--brand);
 }
 .op-btn.primary:hover {
-  filter: brightness(1.05);
-  color: #fff;
+  text-decoration: underline;
 }
 .op-btn.ok {
   color: #047857;
@@ -2326,6 +2434,11 @@ tr.urgent td:first-child {
 .error {
   color: var(--danger);
   font-size: 13px;
+}
+.ok {
+  color: var(--success, #047857);
+  font-size: 13px;
+  font-weight: 600;
 }
 .modal-actions {
   display: flex;

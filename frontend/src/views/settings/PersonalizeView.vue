@@ -6,6 +6,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { getSystemSettings, updateSystemSettings, uploadSettingImage } from '@/api/system'
 import { DESKTOP_BGS, LOGIN_THEMES, SIDEBAR_THEMES, UI_THEMES, useThemeStore } from '@/stores/theme'
 import BrandLogo from '@/components/BrandLogo.vue'
@@ -24,6 +25,36 @@ const loginAccent = ref('')
 const loginHero = ref('')
 const sidebarSub = ref('')
 const sidebarTheme = ref('navy')
+// 侧边栏模块排序：与 AdminLayout ADMIN_NAV 一一对应（to 唯一键；权限管理仅管理员可见，照常排）
+const NAV_MODULES = [
+  { to: '/students', label: '学员管理' },
+  { to: '/invitations', label: '招生邀约' },
+  { to: '/classes', label: '班级管理' },
+  { to: '/teachers', label: '教师管理' },
+  { to: '/permissions', label: '权限管理' },
+  { to: '/settings', label: '设置' },
+  { to: '/schedules', label: '排课与考勤' },
+  { to: '/packages', label: '课时包管理' },
+  { to: '/feedbacks', label: '课后反馈' },
+  { to: '/reports', label: '报告·总结' },
+  { to: '/evaluations', label: '学员评估' },
+  { to: '/agents', label: 'Agent 工作台' },
+  { to: '/assignments', label: 'AI 习题' },
+  { to: '/finance', label: '财务管理' },
+]
+const navOrder = ref<string[]>([])
+function orderedModules() {
+  const order = navOrder.value.filter((t) => NAV_MODULES.some((m) => m.to === t))
+  const rest = NAV_MODULES.map((m) => m.to).filter((t) => !order.includes(t))
+  return [...order, ...rest].map((t) => NAV_MODULES.find((m) => m.to === t)!)
+}
+function moveNav(i: number, dir: -1 | 1) {
+  const list = orderedModules().map((m) => m.to)
+  const j = i + dir
+  if (j < 0 || j >= list.length) return
+  ;[list[i], list[j]] = [list[j], list[i]]
+  navOrder.value = list
+}
 const desktopBg = ref('default')
 const customBg = ref('')
 const uiTheme = ref('default')
@@ -33,6 +64,9 @@ const error = ref('')
 const doneMsg = ref('')
 const uploading = ref(false)
 const uploadError = ref('')
+const showResult = ref(false)
+const resultOk = ref(true)
+const resultMsg = ref('')
 const bgFileInput = ref<HTMLInputElement | null>(null)
 const logoFileInput = ref<HTMLInputElement | null>(null)
 const isBgImageUrl = computed(() => /^(\/|https?:\/\/)/.test(customBg.value.trim()))
@@ -81,6 +115,7 @@ async function load() {
     loginHero.value = s.login_hero || ''
     sidebarSub.value = s.sidebar_sub || ''
     sidebarTheme.value = s.sidebar_theme || 'navy'
+    navOrder.value = Array.isArray(s.nav_order) ? s.nav_order : []
     uiTheme.value = s.ui_theme
     if (DESKTOP_BGS.some((b) => b.key === s.desktop_bg)) {
       desktopBg.value = s.desktop_bg
@@ -111,6 +146,7 @@ async function save() {
       login_hero: loginHero.value.trim(),
       sidebar_sub: sidebarSub.value.trim(),
       sidebar_theme: sidebarTheme.value,
+      nav_order: orderedModules().map((m) => m.to),
       desktop_bg: bg || 'default',
       ui_theme: uiTheme.value,
     })
@@ -123,8 +159,14 @@ async function save() {
       customBg.value = bg
     }
     doneMsg.value = '已保存，全局生效（含登录页与各端桌面背景）。'
+    resultOk.value = true
+    resultMsg.value = '个性化设置已保存，全局生效（含登录页与各端桌面背景）。'
+    showResult.value = true
   } catch (e: any) {
     error.value = e?.response?.data?.detail || '保存失败'
+    resultOk.value = false
+    resultMsg.value = error.value
+    showResult.value = true
   } finally {
     saving.value = false
   }
@@ -166,7 +208,7 @@ onMounted(load)
 
       <section class="card">
         <h2>登录品牌（标题 / Logo / 强调色）</h2>
-        <p class="muted">登录框标题、副标题、Logo 与按钮颜色，保存后登录页即时换装。</p>
+        <p class="muted">主标题、副标题、海报副文案在全部 4 个登录主题的登录卡片上都会显示（“品牌海报”主题还会在左侧大字区再展示一次）。Logo 与强调色同样全主题生效。</p>
         <div class="brand-grid">
           <label class="field">
             <span>主标题</span>
@@ -178,7 +220,7 @@ onMounted(load)
           </label>
         </div>
         <label class="field">
-          <span>海报副文案（品牌海报主题左侧底部）</span>
+          <span>海报副文案（全主题登录卡片副标题下方小字；品牌海报主题同时在左侧大字区展示）</span>
           <input v-model="loginHero" type="text" placeholder="如：排课 · 考勤 · 课时 · 反馈，一站式教务" />
         </label>
         <div class="field">
@@ -244,6 +286,19 @@ onMounted(load)
           <span>侧边栏副标题（标题下方小字）</span>
           <input v-model="sidebarSub" type="text" placeholder="如：Child Code Studio" />
         </label>
+        <div class="field" style="margin-top: 12px">
+          <span>模块上下排序（上↑ / 下↓ 调整，保存后所有人侧边栏即时生效）</span>
+          <ul class="nav-order-list">
+            <li v-for="(m, i) in orderedModules()" :key="m.to" class="nav-order-row">
+              <span class="nav-order-num">{{ i + 1 }}</span>
+              <span class="nav-order-label">{{ m.label }}</span>
+              <span class="nav-order-btns">
+                <button class="mini-btn" :disabled="i === 0" @click="moveNav(i, -1)">上移</button>
+                <button class="mini-btn" :disabled="i === orderedModules().length - 1" @click="moveNav(i, 1)">下移</button>
+              </span>
+            </li>
+          </ul>
+        </div>
       </section>
 
       <section class="card">
@@ -300,6 +355,22 @@ onMounted(load)
         </div>
       </section>
     </template>
+
+    <!-- 嵌入在“设置”页时 PageHead 被隐藏，底部常驻保存条保证随时可存 -->
+    <div class="save-bar" :class="{ embedded }">
+      <span class="save-bar-tip">调整后记得保存，保存后全局生效</span>
+      <button class="btn primary" :disabled="saving" @click="save">
+        {{ saving ? '保存中…' : '保存设置' }}
+      </button>
+    </div>
+    <ConfirmDialog
+      :visible="showResult"
+      :title="resultOk ? '保存成功' : '保存失败'"
+      :message="resultMsg"
+      confirm-text="知道了"
+      @confirm="showResult = false"
+      @cancel="showResult = false"
+    />
   </div>
 </template>
 
@@ -590,5 +661,84 @@ h1 {
 }
 .logo-preview-emoji {
   font-size: 30px;
+}
+.nav-order-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.nav-order-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.nav-order-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.nav-order-label {
+  flex: 1;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+.nav-order-btns {
+  display: flex;
+  gap: 6px;
+}
+.mini-btn {
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--ink-2);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.mini-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.mini-btn:not(:disabled):hover {
+  border-color: var(--brand);
+  color: var(--brand-strong);
+}
+.save-bar {
+  position: sticky;
+  bottom: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.12);
+}
+.save-bar-tip {
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.save-bar .btn {
+  flex-shrink: 0;
 }
 </style>

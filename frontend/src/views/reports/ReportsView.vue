@@ -23,8 +23,12 @@ import {
   type ReportType,
   type WeeklyStatsOut,
 } from '@/api/report'
+import { toastApiError } from '@/stores/toast'
+import { listPromptTemplates, type PromptTemplateOut } from '@/api/prompt'
 import { useAuthStore } from '@/stores/auth'
 import PageHead from '@/components/PageHead.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import PromptTemplateManager from '@/components/PromptTemplateManager.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import SummaryView from '@/views/reports/SummaryView.vue'
@@ -134,10 +138,30 @@ const historyTotal = ref(0)
 const historyOffset = ref(0)
 const historyLimit = 10
 
+/** AI 生成门禁（与后端 ai-draft 门禁同口径）：正文全空且统计全零则拦截，避免浪费 token */
+function aiEmptyReason(): string {
+  const fields = FIELD_MAP[activeTab.value as keyof typeof FIELD_MAP] ?? []
+  const hasText = fields.some((f) => (form.value.fields[f.key] ?? '').trim())
+  if (hasText) return ''
+  const s = activeTab.value === 'daily' ? dailyStats.value : weeklyStats.value
+  const allZero =
+    !s || [(s as { schedules?: number }).schedules, (s as { attended?: number }).attended, (s as { consumed_lessons?: number }).consumed_lessons].every((v) => (v ?? 0) === 0)
+  if (!allZero) return ''
+  return '暂无实质内容：报告内容为空且期间统计全零，请先填写报告内容或确认期间内有排课数据后再生成（避免浪费 token 生成无意义内容）'
+}
+
+// 生成成功弹窗（替代顶部横幅，避免用户注意不到）
+const showAiDone = ref(false)
+const aiDoneMsg = ref('')
+
 // —— AI 草稿弹窗（后台任务：提交即关弹窗，完成后顶部任务条回填，不锁页面） ——
 const showAiModal = ref(false)
+const showTplManage = ref(false)
 const aiNote = ref('')
 const aiError = ref('')
+// 提示词模板（报告类系统预设 + 个人模板）：所选模板内容作为写作风格要求
+const aiTemplates = ref<PromptTemplateOut[]>([])
+const aiTemplateId = ref('')
 const aiJobStatus = ref<'idle' | 'pending' | 'running' | 'succeeded' | 'failed'>('idle')
 const aiJobElapsed = ref(0)
 const aiJobError = ref('')
@@ -202,9 +226,11 @@ async function pollDailyWeeklyAiJob() {
           const v = c[f.key]
           if (v) form.value.fields[f.key] = v
         }
-        showNotice('AI 报告草稿已生成，请编辑后保存')
+        showAiDone.value = true
+        aiDoneMsg.value = 'AI 报告草稿已生成，已自动回填到编辑器，请检查编辑后保存。'
       } else {
-        showNotice('AI 报告草稿已生成，请在历史记录中打开对应报告查看')
+        showAiDone.value = true
+        aiDoneMsg.value = 'AI 报告草稿已生成，请在历史记录中打开对应报告查看。'
       }
       clearAiJobState()
     } else if (st.status === 'failed') {
@@ -469,6 +495,19 @@ async function unpublish() {
 }
 
 // —— AI 草稿（后台任务：提交即关弹窗，完成后顶部任务条回填，不锁页面） ——
+async function loadAiTemplates() {
+  // 加载报告类提示词模板（系统预设 + 个人模板），默认选中当前报告类型对应的系统预设
+  try {
+    const all = await listPromptTemplates('report')
+    aiTemplates.value = all
+    const want = activeTab.value === 'daily' ? '【报告·日报】' : '【报告·周报】'
+    aiTemplateId.value = aiTemplates.value.find((t) => t.name.startsWith(want))?.id ?? aiTemplates.value[0]?.id ?? ''
+  } catch {
+    aiTemplates.value = []
+    aiTemplateId.value = ''
+  }
+}
+
 async function openAI() {
   if (!report.value) {
     showError('请先保存草稿，再生成 AI 报告')
@@ -476,6 +515,7 @@ async function openAI() {
   }
   aiNote.value = ''
   aiError.value = ''
+  await loadAiTemplates()
   showAiModal.value = true
 }
 
@@ -487,8 +527,16 @@ async function generateAI() {
     return
   }
   aiError.value = ''
+  const emptyReason = aiEmptyReason()
+  if (emptyReason) {
+    aiError.value = emptyReason
+    return
+  }
   try {
-    const job = await createAiDraftJob(report.value.id, { extra_note: aiNote.value || null })
+    const job = await createAiDraftJob(report.value.id, {
+      extra_note: aiNote.value || null,
+      template_id: aiTemplateId.value || null,
+    })
     aiJobStatus.value = 'pending'
     aiJobElapsed.value = 0
     aiJobError.value = ''
@@ -499,6 +547,7 @@ async function generateAI() {
     startAiJobTimers()
   } catch (e: any) {
     aiError.value = e?.response?.data?.detail || 'AI 任务提交失败'
+    toastApiError(e)
   }
 }
 
@@ -1063,6 +1112,18 @@ onBeforeUnmount(() => {
       <div class="modal ai-modal">
         <h2>AI 生成{{ activeTab === 'daily' ? '日报' : '周报' }}</h2>
         <p class="batch-hint">AI 将基于{{ activeTab === 'daily' ? '今日排课/考勤' : '本周统计数据与日报' }}生成草稿，回填到表单，请审核修改后保存、提交。</p>
+        <label v-if="aiTemplates.length" class="ai-tpl-label">
+          提示词模板（日报 / 周报 / 季度 / 年度共用库）
+          <span class="ai-tpl-row">
+            <select v-model="aiTemplateId">
+              <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
+                {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
+              </option>
+            </select>
+            <button class="tpl-manage-btn" type="button" @click="showTplManage = true" title="新建 / 编辑报告模板（含季度·年度预设）">⚙ 管理模板</button>
+          </span>
+        </label>
+        <button v-else class="tpl-manage-btn" type="button" @click="showTplManage = true">⚙ 管理报告模板（日报 / 周报 / 季度 / 年度）</button>
         <label>
           补充说明（可选）
           <textarea v-autogrow v-model="aiNote" rows="3" placeholder="想强调的重点、遗漏事项等…"></textarea>
@@ -1077,6 +1138,23 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- AI 生成成功弹窗 -->
+    <ConfirmDialog
+      :visible="showAiDone"
+      title="AI 草稿已生成"
+      :message="aiDoneMsg"
+      confirm-text="知道了"
+      @confirm="showAiDone = false"
+      @cancel="showAiDone = false"
+    />
+    <PromptTemplateManager
+      :visible="showTplManage"
+      scene="report"
+      title="报告提示词模板管理"
+      @close="showTplManage = false"
+      @changed="loadAiTemplates"
+    />
     </template>
   </div>
 </template>
@@ -1559,6 +1637,38 @@ onBeforeUnmount(() => {
 .btn.small {
   padding: 7px 12px;
   font-size: 12.5px;
+}
+.ai-tpl-label {
+  display: block;
+}
+.ai-tpl-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.ai-tpl-row select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.tpl-manage-btn {
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tpl-manage-btn:hover {
+  filter: brightness(1.06);
 }
 .btn:disabled {
   opacity: 0.5;

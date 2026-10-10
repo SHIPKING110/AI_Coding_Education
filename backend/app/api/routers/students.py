@@ -152,6 +152,7 @@ def create_student(
         class_ids=payload.class_ids,
         source=payload.source,
         referrer=payload.referrer,
+        gender=payload.gender,
     )
     if payload.package_id is not None:
         try:
@@ -233,6 +234,7 @@ def update_student(
         parent_user_id=payload.parent_user_id,
         student_user_id=payload.student_user_id,
         class_ids=payload.class_ids,
+        gender=payload.gender,
     )
     return _to_out(student, db)
 
@@ -252,6 +254,21 @@ def update_student_classes(
     """
     student = student_crud.get(db, student_id)
     if student is None:
+        # 已归档学员：允许直接解除其班级关联（清理僵尸数据），不允许转入新班级
+        from app.models.enrollment import Student as _Student
+        from app.models.enrollment import StudentClass as _StudentClass
+
+        raw = db.get(_Student, student_id)
+        if raw is not None and str(raw.status) == StudentStatus.ARCHIVED.value:
+            if payload.class_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="该学员已归档，只能解除班级关联，不能转入新班级",
+                )
+            db.execute(_StudentClass.__table__.delete().where(_StudentClass.student_id == student_id))
+            db.commit()
+            db.refresh(raw)
+            return _to_out(raw, db)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
     if user.role == Role.TEACHER.value:
         from app.models.permission import check as _perm_check
@@ -416,6 +433,24 @@ def refund_student(
     }
 
 
+@router.delete("/{student_id}/bindings/{kind}", response_model=StudentOut)
+def unbind_student_account(
+    student_id: uuid.UUID,
+    kind: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_teacher_permission("student_edit")),
+) -> StudentOut:
+    """解绑家长/学员登录账号（kind=parent|student），账号本身保留可重绑。"""
+    student = student_crud.get(db, student_id)
+    if student is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    try:
+        student = student_crud.unbind_account(db, student, kind)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return _to_out(student, db)
+
+
 @router.delete("/{student_id}", status_code=status.HTTP_204_NO_CONTENT)
 def archive_student(
     student_id: uuid.UUID,
@@ -426,4 +461,7 @@ def archive_student(
     student = student_crud.get(db, student_id)
     if student is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+    block_reason = student_crud.archive_block_reason(student)
+    if block_reason is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=block_reason)
     student_crud.archive(db, student)

@@ -5,6 +5,8 @@ import * as echarts from 'echarts'
 
 import PageHead from '@/components/PageHead.vue'
 import OrdersView from '@/views/orders/OrdersView.vue'
+import { myPermissions } from '@/api/permissions'
+import { useAuthStore } from '@/stores/auth'
 import { listCampuses } from '@/api/business'
 import {
   getFinanceBySubject,
@@ -25,6 +27,20 @@ import {
 
 const activeTab = ref<'orders' | 'lessons' | 'records' | 'salary'>('orders')
 
+// 财务 tab 精细化可见：教师按 finance_* 键（finance_view 为总开关，后端同样校验）
+const auth = useAuthStore()
+const myPerms = ref<Record<string, boolean>>({})
+const canFin = (key: string): boolean => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value[key] === true || myPerms.value.finance_view === true
+}
+const visibleTabs = computed(() => ({
+  orders: canFin('finance_revenue'),
+  lessons: canFin('finance_revenue'),
+  records: canFin('finance_records'),
+  salary: canFin('finance_salary') || canFin('finance_salary_all'),
+}))
+
 // ---- 通用筛选 ----
 const campuses = ref<{ id: string; name: string }[]>([])
 const campus = ref('')
@@ -43,6 +59,7 @@ function defaultRange(days = 13) {
 // ---- 订单管理 ----
 const orderStats = ref<OrderStatBucket[]>([])
 const orderSummary = ref<OrderStatsSummary | null>(null)
+const orderError = ref('')
 const statsLoading = ref(false)
 const showOrders = ref(true)
 const showPaid = ref(true)
@@ -53,6 +70,7 @@ let trendChart: echarts.ECharts | null = null
 
 async function loadOrderStats() {
   statsLoading.value = true
+  orderError.value = ''
   try {
     const data = await getOrderStats({
       date_from: dateFrom.value || undefined,
@@ -61,9 +79,13 @@ async function loadOrderStats() {
     })
     orderStats.value = data.items
     orderSummary.value = data.summary
-  } catch {
+  } catch (e: unknown) {
     orderStats.value = []
     orderSummary.value = null
+    const status = (e as { response?: { status?: number } })?.response?.status
+    orderError.value = status === 403
+      ? '暂无查看权限，请联系管理员开通「财务管理-创收统计」（订单管理已并入该权限）'
+      : '加载订单数据失败'
   } finally {
     statsLoading.value = false
     renderTrend()
@@ -233,8 +255,11 @@ async function loadLessons() {
     lessonStats.value = st
     bySubject.value = sub.items
     byTeacher.value = tea.items
-  } catch {
-    finError.value = '加载课时创收数据失败'
+  } catch (e: unknown) {
+    const status = (e as { response?: { status?: number } })?.response?.status
+    finError.value = status === 403
+      ? '暂无查看权限，请联系管理员开通「财务管理-创收统计」'
+      : '加载课时创收数据失败'
   } finally {
     finLoading.value = false
     renderLessons()
@@ -286,6 +311,7 @@ const allRecords = ref<LessonRecordOut[]>([])
 const recordsTotal = ref(0)
 const recordsSummary = ref({ amount_in: '0', amount_out: '0', amount_net: '0' })
 const recordsLoading = ref(false)
+const recordsError = ref('')
 const recordKeyword = ref('')
 const recordType = ref('')
 const recordsPage = ref(1)
@@ -313,8 +339,13 @@ async function loadRecords() {
     allRecords.value = data.items
     recordsTotal.value = data.total
     recordsSummary.value = data.summary
-  } catch {
+    recordsError.value = ''
+  } catch (e: unknown) {
     allRecords.value = []
+    const status = (e as { response?: { status?: number } })?.response?.status
+    recordsError.value = status === 403
+      ? '暂无查看权限，请联系管理员开通「财务管理-课时流水」'
+      : '加载收支流水失败'
   } finally {
     recordsLoading.value = false
   }
@@ -393,6 +424,16 @@ const subjectMax = computed(() => bySubject.value.reduce((m, x) => Math.max(m, N
 const teacherMax = computed(() => byTeacher.value.reduce((m, x) => Math.max(m, Number(x.commission)), 0))
 
 onMounted(async () => {
+  if (auth.user?.role === 'teacher') {
+    try {
+      myPerms.value = await myPermissions()
+    } catch {
+      myPerms.value = {}
+    }
+    // 默认选中第一个可见 tab，避免落在无权限 tab 上一片空白
+    const first = (['orders', 'lessons', 'records', 'salary'] as const).find((t) => visibleTabs.value[t])
+    if (first) activeTab.value = first
+  }
   defaultRange(13)
   try {
     campuses.value = await listCampuses()
@@ -418,19 +459,19 @@ onUnmounted(() => {
     />
 
     <div class="tabs">
-      <button class="tab" :class="{ active: activeTab === 'orders' }" @click="switchTab('orders')">
+      <button v-if="visibleTabs.orders" class="tab" :class="{ active: activeTab === 'orders' }" @click="switchTab('orders')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
         订单管理
       </button>
-      <button class="tab" :class="{ active: activeTab === 'lessons' }" @click="switchTab('lessons')">
+      <button v-if="visibleTabs.lessons" class="tab" :class="{ active: activeTab === 'lessons' }" @click="switchTab('lessons')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg>
         课时创收
       </button>
-      <button class="tab" :class="{ active: activeTab === 'records' }" @click="switchTab('records')">
+      <button v-if="visibleTabs.records" class="tab" :class="{ active: activeTab === 'records' }" @click="switchTab('records')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4M16 2v4M3 10h18" /></svg>
         收支流水
       </button>
-      <button class="tab" :class="{ active: activeTab === 'salary' }" @click="switchTab('salary')">
+      <button v-if="visibleTabs.salary" class="tab" :class="{ active: activeTab === 'salary' }" @click="switchTab('salary')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M3 9h18" /></svg>
         薪资核算
       </button>
@@ -461,6 +502,7 @@ onUnmounted(() => {
 
     <!-- 订单管理 tab -->
     <div v-if="activeTab === 'orders'">
+      <p v-if="orderError" class="error-banner">{{ orderError }}</p>
       <section class="card">
         <div class="card-title">订单趋势</div>
         <div v-if="statsLoading" class="loading-tip">加载中…</div>
@@ -597,6 +639,7 @@ onUnmounted(() => {
 
     <!-- 收支流水 tab -->
     <div v-else-if="activeTab === 'records'">
+      <p v-if="recordsError" class="error-banner">{{ recordsError }}</p>
       <div class="flow-kpis">
         <div class="flow-kpi in">
           <div class="flow-kpi-top">

@@ -141,16 +141,28 @@ def feedback_editor_rows(
     """反馈编辑器行：该排课班级的全部学员 + 各自考勤状态 + 已有反馈。
 
     请假(leave)学员不需要反馈（前端置灰/变色）；签到(attended)学员展示反馈编辑区。
+    同一班级同一天的多节课共用一次反馈：考勤/已有反馈按同组排课合并匹配
+    （组内任一节签到即需反馈，任一节已发即算完成；新建落到组内最早一节）。
     """
     s = schedule_crud.get(db, schedule_id)
     if s is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="排课不存在")
 
     students = attendance_crud.all_students_for_schedule(db, s)
-    attend_map = {
-        a.student_id: a.status for a in attendance_crud.list_for_schedule(db, schedule_id)
-    }
-    feedback_map = {f.student_id: f for f in feedback_crud.list_by_schedule(db, schedule_id)}
+    group_ids = feedback_crud.group_schedule_ids(db, s)
+    attend_rows = attendance_crud.list_for_schedules(db, group_ids)
+    attend_map: dict[uuid.UUID, str] = {}
+    for a in attend_rows:
+        # 组内任一节签到即视为签到；否则保留请假/未标记
+        if a.status == "attended":
+            attend_map[a.student_id] = a.status
+        else:
+            attend_map.setdefault(a.student_id, a.status)
+    feedback_map: dict[uuid.UUID, Feedback] = {}
+    for f in feedback_crud.list_by_schedules(db, group_ids):
+        cur = feedback_map.get(f.student_id)
+        if cur is None or (cur.status != "published" and f.status == "published"):
+            feedback_map[f.student_id] = f
 
     rows: list[FeedbackEditorRow] = []
     for stu in students:
@@ -305,7 +317,7 @@ def ai_enhance_feedback(
 
     结合模板（template_id 指定，未传则用系统默认模板）+ 当前反馈内容生成评价正文，
     写入 ai_draft 供追溯并返回，由前端回填「课堂评价」输入框人工编辑；
-    未配置 LLM 时降级：记录占位 ai_draft 并返回当前内容（不报错）。
+    调用方无可用 LLM 配置时显式 502（不静默返回空内容，避免前端误报成功）。
     """
     fb = feedback_crud.get(db, feedback_id)
     if fb is None:
@@ -320,14 +332,14 @@ def ai_enhance_feedback(
         "homework": payload.homework if payload.homework is not None else fb.homework,
     }
 
-    if not llm.is_llm_configured():
-        fb.ai_draft = {
-            **current,
-            "note": "未配置 LLM_API_KEY，AI 草稿暂不可用，返回当前内容占位",
-        }
-        db.commit()
-        db.refresh(fb)
-        return FeedbackDraftOut(**current)
+    from app.services import llm_context as _llm_ctx
+    fb_resolved = _llm_ctx.optional_resolved(db, user.id, "feedback")
+    if fb_resolved is None:
+        # 必须显式报错：静默返回空内容会导致前端“已生成”但评价框为空（教师无个人模型配置时必现）
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="学校尚未配置可用的 AI 模型：教师请在「设置 → 模型配置」添加个人模型，或联系管理员检查全局模型配置",
+        )
 
     # 解析提示词模板：优先用户选择，其次系统默认；确保模板对当前用户可见
     template = None
@@ -358,7 +370,7 @@ def ai_enhance_feedback(
     subject = schedule_class.subject if schedule_class else ""
 
     try:
-        evaluation = llm.generate_feedback_evaluation(
+        evaluation = _llm_ctx.run_with(fb_resolved, llm.generate_feedback_evaluation,
             template_content=template.content,
             student_name=student_name,
             class_name=class_name,

@@ -52,13 +52,13 @@ const pageSize = 12
 const total = ref(0)
 
 const showCreate = ref(false)
-const createForm = ref({ name: '', username: '', phone: '', password: '', campus: '', title: '', level: '', baseSalary: '' })
+const createForm = ref({ name: '', username: '', phone: '', password: '', gender: '', campus: '', title: '', level: '', baseSalary: '' })
 const formError = ref('')
 const submitting = ref(false)
 
 const showEdit = ref(false)
 const editing = ref<UserOut | null>(null)
-const editForm = ref({ name: '', phone: '', campus: '', title: '', level: '', baseSalary: '', password: '', status: 'active' })
+const editForm = ref({ name: '', phone: '', gender: '', campus: '', title: '', level: '', baseSalary: '', password: '', status: 'active' })
 
 const showDetail = ref(false)
 const detail = ref<UserOut | null>(null)
@@ -123,7 +123,7 @@ async function loadCampuses() {
 }
 
 function openCreate() {
-  createForm.value = { name: '', username: '', phone: '', password: '', campus: '', title: '', level: '', baseSalary: '' }
+  createForm.value = { name: '', username: '', phone: '', password: '', gender: '', campus: '', title: '', level: '', baseSalary: '' }
   customTitleCreate.value = false
   formError.value = ''
   showCreate.value = true
@@ -148,6 +148,7 @@ async function submitCreate() {
       username: f.username.trim(),
       phone: f.phone.trim() || null,
       password: f.password,
+      gender: f.gender || null,
       campus: f.campus.trim() || null,
       title: f.title.trim() || null,
       teacher_level_id: f.level || null,
@@ -168,6 +169,7 @@ function openEdit(t: UserOut) {
   editForm.value = {
     name: t.name,
     phone: t.phone || '',
+    gender: t.gender || '',
     campus: t.campus || '',
     title: t.title || '',
     level: t.teacher_level_id || '',
@@ -197,6 +199,7 @@ async function submitEdit() {
     await updateTeacherApi(editing.value.id, {
       name: f.name.trim(),
       phone: f.phone.trim() || null,
+      gender: f.gender || null,
       campus: f.campus.trim() || null,
       title: f.title.trim() || null,
       teacher_level_id: f.level || null,
@@ -362,6 +365,14 @@ onMounted(async () => {
           <input v-model="createForm.phone" type="text" placeholder="选填" />
         </label>
         <label>
+          性别
+          <select v-model="createForm.gender">
+            <option value="">未填写</option>
+            <option value="male">男</option>
+            <option value="female">女</option>
+          </select>
+        </label>
+        <label>
           所属校区
           <input v-model="createForm.campus" type="text" list="campus-options" placeholder="如：一校 / 二校 / 三校（可自定义）" />
           <datalist id="campus-options">
@@ -420,6 +431,14 @@ onMounted(async () => {
         <label>
           联系电话
           <input v-model="editForm.phone" type="text" />
+        </label>
+        <label>
+          性别
+          <select v-model="editForm.gender">
+            <option value="">未填写</option>
+            <option value="male">男</option>
+            <option value="female">女</option>
+          </select>
         </label>
         <label>
           所属校区
@@ -490,6 +509,10 @@ onMounted(async () => {
         <div class="detail-row">
           <span class="detail-label">联系电话</span>
           <span class="detail-value">{{ detail.phone || '—' }}</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">性别</span>
+          <span class="detail-value">{{ detail.gender === 'male' ? '男' : detail.gender === 'female' ? '女' : '—' }}</span>
         </div>
         <div class="detail-row">
           <span class="detail-label">所属校区</span>

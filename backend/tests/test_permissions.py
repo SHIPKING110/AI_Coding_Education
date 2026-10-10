@@ -45,7 +45,7 @@ def client():
         cb = Class(id=uuid.uuid4(), name="李班", subject="Scratch", teacher_id=t2.id)
         s.add_all([c1, cb])
         s.flush()
-        stu = Student(id=uuid.uuid4(), name="小明", lesson_balance=5, status="active")
+        stu = Student(id=uuid.uuid4(), name="小明", lesson_balance=0, status="active")
         s.add(stu)
         s.commit()
         ids = {"admin": admin.id, "t1": t1.id, "t2": t2.id, "c1": c1.id, "cb": cb.id, "stu": stu.id}

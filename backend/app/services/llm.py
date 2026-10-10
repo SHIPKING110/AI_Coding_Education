@@ -8,7 +8,6 @@
 
 import json
 import re
-from functools import lru_cache
 from typing import Any
 
 from app.core.config import get_settings
@@ -36,38 +35,74 @@ def is_llm_configured() -> bool:
     return bool((get_settings().LLM_API_KEY or "").strip())
 
 
-@lru_cache
+def _require_any_llm(fallback_message: str) -> None:
+    """上下文感知门禁：当前请求有教师个人配置则放行，否则看全局 key。
+    两者都没有时抛中文引导（前端弹 toast 指引去 设置→模型配置）。"""
+    if _active_resolved() is not None:
+        return
+    if not is_llm_configured():
+        raise LLMConfigError(fallback_message)
+
+
+_client_cache: dict = {}
+
+
+def _active_resolved():
+    from app.services import llm_context as _ctx
+
+    return _ctx.get_current()
+
+
+def _build_chat(base_url: str, api_key: str, model: str, temperature: float, timeout: int, max_retries: int):
+    from langchain_openai import ChatOpenAI
+
+    key = (base_url or "", api_key or "", model or "", temperature, timeout, max_retries)
+    client = _client_cache.get(key)
+    if client is None:
+        client = ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=base_url or None,
+            temperature=temperature,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        _client_cache[key] = client
+    return client
+
+
 def _chat_model():
-    """构造 OpenAI 兼容聊天客户端（DeepSeek / 其他），按需延迟导入 LangChain。"""
-    from langchain_openai import ChatOpenAI
-
+    resolved = _active_resolved()
+    if resolved is not None:
+        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.6, 60, 2)
     settings = get_settings()
     base_url = _normalized_base_url(settings.LLM_BASE_URL)
-    return ChatOpenAI(
-        model=settings.LLM_MODEL,
-        api_key=settings.LLM_API_KEY,
-        base_url=base_url or None,
-        temperature=0.6,
-        timeout=60,
-        max_retries=2,
-    )
+    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.6, 60, 2)
 
 
-@lru_cache
 def _plan_model():
-    """规划用客户端：温度 0、超时更短、不重试，保证规划步骤确定且不拖慢首字。"""
-    from langchain_openai import ChatOpenAI
-
+    resolved = _active_resolved()
+    if resolved is not None:
+        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.0, 30, 0)
     settings = get_settings()
     base_url = _normalized_base_url(settings.LLM_BASE_URL)
-    return ChatOpenAI(
-        model=settings.LLM_MODEL,
-        api_key=settings.LLM_API_KEY,
-        base_url=base_url or None,
-        temperature=0.0,
-        timeout=30,
-        max_retries=0,
+    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.0, 30, 0)
+
+
+def ping(resolved=None) -> str:
+    model = _build_chat(
+        (resolved.base_url if resolved else ""),
+        (resolved.api_key if resolved else get_settings().LLM_API_KEY),
+        (resolved.model if resolved else get_settings().LLM_MODEL),
+        0.0,
+        15,
+        0,
     )
+    from langchain_core.messages import HumanMessage
+
+    resp = model.invoke([HumanMessage(content="ping")])
+    text = resp.content if isinstance(resp.content, str) else str(resp.content)
+    return (text or "").strip()[:200] or "pong"
 
 
 def _normalized_base_url(url: str | None) -> str:
@@ -143,8 +178,7 @@ def stream_text(system: str, prompt: str):
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI")
     model = _chat_model()
     for chunk in model.stream([SystemMessage(content=system), HumanMessage(content=prompt)]):
         piece = getattr(chunk, "content", "") or ""
@@ -236,8 +270,7 @@ def generate_feedback_evaluation(
     已有 evaluation 时在其基础上润色完善；没有则按模板直接生成。
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 草稿")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 草稿")
 
     values = {
         "student_name": student_name,
@@ -251,8 +284,19 @@ def generate_feedback_evaluation(
         "homework": homework,
     }
     prompt = fill_template(template_content, values)
+    material = (
+        "\n\n【本堂课素材（必须引用，禁止编造素材之外的事实）】"
+        f"\n学员：{student_name or '（未填写）'}"
+        f"\n班级：{class_name or '（未填写）'}｜科目：{subject or '（未填写）'}"
+        f"\n课题：{topic or '（未填写）'}"
+        f"\n课题内容：{content or '（未填写）'}"
+        f"\n课堂表现：{performance or '（未填写）'}"
+        f"\n今日作业：{homework or '（未填写）'}"
+    )
     prompt += (
-        "\n\n请直接输出课堂评价正文（100-300 字，1-3 段）："
+        material
+        + "\n\n请直接输出课堂评价正文（100-300 字，1-3 段）："
+        "开头必须点出本堂课的科目与课题，并引用 1-2 个上面素材中的课堂细节；"
         "如果已提供现有课堂评价，请在其基础上润色完善（保留事实、优化措辞、适当补充细节）；"
         "否则按模板要求直接生成。只输出评价正文，不要输出标题、JSON 或多余说明。"
     )
@@ -264,14 +308,14 @@ def generate_report_summary(
     report_type: str,
     material: str,
     extra_note: str | None = None,
+    style_note: str | None = None,
 ) -> dict[str, Any]:
     """按报告类型生成日报/周报草稿（结构化 JSON）。
 
     基于当日/本周素材（排课/考勤/反馈摘要）生成，人工编辑后保存。
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 草稿")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 草稿")
 
     if report_type == "daily":
         schema_hint = (
@@ -300,6 +344,7 @@ def generate_report_summary(
         f"{schema_hint}\n\n"
         f"素材信息：\n{material}\n"
         + (f"\n教师补充说明：{extra_note}\n" if extra_note else "")
+        + (f"\n写作风格要求（来自所选提示词模板）：\n{style_note}\n" if style_note else "")
     )
     raw = _invoke(prompt)
     return _parse_report_json(raw, report_type)
@@ -311,14 +356,14 @@ def generate_period_summary(
     material: str,
     extra_note: str | None = None,
     from_quarters: bool = False,
+    style_note: str | None = None,
 ) -> dict[str, Any]:
     """按季度/年度素材生成总结草稿（结构化 JSON）。
 
     素材：季度=周期统计指标 + 已发布周报摘要；年度=已选季度总结聚合（from_quarters）
     或回退的周报口径。人工编辑后保存、生成 PPT。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 总结")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 总结")
 
     label = "季度" if report_type == "quarterly" else "年度"
     schema_hint = (
@@ -351,6 +396,7 @@ def generate_period_summary(
         f"{schema_hint}\n\n"
         f"素材信息：\n{material}\n"
         + (f"\n教师补充说明：{extra_note}\n" if extra_note else "")
+        + (f"\n写作风格要求（来自所选提示词模板）：\n{style_note}\n" if style_note else "")
     )
     raw = _invoke(prompt)
     return _parse_report_json(raw, report_type)
@@ -415,14 +461,14 @@ def generate_evaluation(
     student_name: str,
     material: str,
     extra_note: str | None = None,
+    style_guide: str | None = None,
 ) -> dict[str, Any]:
     """生成学员综合评估表草稿（FR-EV-01/02，结构化 JSON）。
 
     素材 = 周期统计 + 已发布课后反馈明细；subjects.level 为 1-5 整数。
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 评估")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 评估")
 
     instruction = (
         f"你是少儿编程培训机构的资深教师，正在为学员 {student_name} 撰写家长会评估表"
@@ -442,6 +488,7 @@ def generate_evaluation(
         "3. 所有内容必须引用周期内课程/作业中的真实细节，不要编造。\n\n"
         f"素材信息（学员：{student_name}）：\n{material}\n"
         + (f"\n教师补充说明/想强调的重点：{extra_note}\n" if extra_note else "")
+        + (f"\n写作风格要求（教师所选提示词模板，请遵守）：\n{style_guide}\n" if style_guide else "")
     )
     raw = _invoke(prompt)
     return _parse_evaluation_json(raw)
@@ -454,8 +501,7 @@ def refine_evaluation(
     instruction: str,
 ) -> dict[str, Any]:
     """对话式优化评估（FR-EV-03）：基于现有评估 + 教师修改要求重写整份评估。"""
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 优化")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 优化")
 
     prompt = (
         f"你是少儿编程培训机构的资深教师。下面是学员 {student_name} 的家长会评估表，"
@@ -524,8 +570,7 @@ def generate_class_meeting(
     能力培养、班级亮点（可点名）、共性问题、下阶段教学安排与家庭配合建议。
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 生成家长会文案")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 生成家长会文案")
 
     instruction = (
         f"你是少儿编程培训机构的资深教师兼班主任，正在准备「{class_name}」的家长会 PPT"
@@ -555,8 +600,7 @@ def generate_ppt_titles(
     material: str,
 ) -> list[str]:
     """为班级家长会拟 4 个标题（Agent Step 2，异步任务内使用）。"""
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 生成标题")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 生成标题")
     return generate_ppt_titles_sync(class_name=class_name, material=material, style="")
 
 
@@ -647,8 +691,7 @@ def refine_ppt_content(
     instruction: str,
 ) -> dict[str, Any]:
     """对话式微调班级家长会文案（Agent 生成后二次编辑）。"""
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 微调")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 微调")
     prompt = (
         "你是家长会PPT文案编辑。请基于当前文案按用户指令修改，未提及字段保持原意。\n"
         f"当前文案JSON：{json.dumps(current, ensure_ascii=False)}\n"
@@ -838,8 +881,7 @@ def generate_questions(
     返回题目列表（含答案/解析），由调用方回填模板窗口供人工编辑；
     未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
     """
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 出题")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 出题")
 
     if mode == "similar":
         if not source_question:
@@ -901,8 +943,7 @@ def refine_question(
     instruction: str,
 ) -> dict[str, Any]:
     """对话优化单题（FR-AI-05）：基于原题 + 教师修改要求重新生成一题。"""
-    if not is_llm_configured():
-        raise LLMConfigError("未配置 LLM_API_KEY，暂时无法使用 AI 优化")
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 优化")
 
     prompt = (
         f"你是少儿编程培训机构的资深出题老师。下面是作业中的一道题，请根据教师的修改要求"

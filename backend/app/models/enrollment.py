@@ -17,7 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
+from app.core.database import Base, enum_values
 from app.models.user import User
 
 if TYPE_CHECKING:
@@ -54,13 +54,14 @@ class Student(Base):
     )
     lesson_balance: Mapped[Decimal] = mapped_column(Numeric(10, 1), default=Decimal("0"), index=True)
     # 体验状态：none 普通学员 / trial 体验中 / signed 体验后已报名 / lost 体验未报名结束服务
+    gender: Mapped[str] = mapped_column(String(8), default="", index=True)
     trial_status: Mapped[str] = mapped_column(String(16), default="none", index=True)
     # 生源：normal 自然到访 / referral 口碑转介绍（报名时标记）
     source: Mapped[str] = mapped_column(String(16), default="normal", index=True)
     referrer: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 催缴跟进状态（M2 催缴名单）：课时<=10 进入待跟进，教务处理后标 已续费/已停课
     follow_up_status: Mapped[str] = mapped_column(
-        Enum(FollowUpStatus, native_enum=False, length=16),
+        Enum(FollowUpStatus, native_enum=False, values_callable=enum_values, length=16),
         default=FollowUpStatus.PENDING,
         index=True,
     )
@@ -69,7 +70,7 @@ class Student(Base):
     # 停课备注（status=stopped 时必填；恢复在读后保留供沟通参考）
     stop_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
-        Enum(StudentStatus, native_enum=False, length=16), default=StudentStatus.ACTIVE
+        Enum(StudentStatus, native_enum=False, values_callable=enum_values, length=16), default=StudentStatus.ACTIVE
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -93,7 +94,7 @@ class Class(Base):
     teacher_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(
-        Enum(StudentStatus, native_enum=False, length=16), default=StudentStatus.ACTIVE
+        Enum(StudentStatus, native_enum=False, values_callable=enum_values, length=16), default=StudentStatus.ACTIVE
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -142,7 +143,7 @@ class LessonPackage(Base):
     cover_image: Mapped[str | None] = mapped_column(String(255), nullable=True)
     subject: Mapped["Subject | None"] = relationship()
     status: Mapped[str] = mapped_column(
-        Enum(PackageStatus, native_enum=False, length=16), default=PackageStatus.ACTIVE
+        Enum(PackageStatus, native_enum=False, values_callable=enum_values, length=16), default=PackageStatus.ACTIVE
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -165,7 +166,7 @@ class LessonRecord(Base):
         ForeignKey("students.id"), index=True
     )
     record_type: Mapped[str] = mapped_column(
-        Enum(LessonRecordType, native_enum=False, length=16), index=True
+        Enum(LessonRecordType, native_enum=False, values_callable=enum_values, length=16), index=True
     )
     delta: Mapped[Decimal] = mapped_column(Numeric(10, 1))  # 正=入账，负=扣减（支持半课时）
     balance_after: Mapped[Decimal] = mapped_column(Numeric(10, 1))
@@ -199,7 +200,7 @@ class Order(Base):
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     status: Mapped[str] = mapped_column(
-        Enum(OrderStatus, native_enum=False, length=16), default=OrderStatus.PENDING, index=True
+        Enum(OrderStatus, native_enum=False, values_callable=enum_values, length=16), default=OrderStatus.PENDING, index=True
     )
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

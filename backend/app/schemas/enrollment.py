@@ -20,6 +20,7 @@ class PageOut[T](BaseModel):
 class StudentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     phone: str | None = Field(default=None, max_length=20)
+    gender: str = Field(default="", max_length=8, description="male/female/空")
     campus: str | None = Field(default=None, max_length=64, description="所属校区")
     parent_user_id: uuid.UUID | None = None
     # 学员本人登录账号（M5 客户端：学员角色自己登录做题）
@@ -37,6 +38,7 @@ class StudentCreate(BaseModel):
 class StudentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     phone: str | None = Field(default=None, max_length=20)
+    gender: str | None = Field(default=None, max_length=8)
     campus: str | None = Field(default=None, max_length=64)
     parent_user_id: uuid.UUID | None = None
     student_user_id: uuid.UUID | None = None
@@ -63,6 +65,7 @@ class StudentOut(BaseModel):
     name: str
     phone: str | None
     campus: str | None = None
+    gender: str = ""
     parent_user_id: uuid.UUID | None
     student_user_id: uuid.UUID | None = None
     lesson_balance: float

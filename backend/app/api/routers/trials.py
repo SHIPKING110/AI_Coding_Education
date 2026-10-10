@@ -121,6 +121,19 @@ def _inv_out(inv: Invitation, db: Session) -> dict:
     staff = db.get(User, inv.staff_id) if inv.staff_id else None
     teacher = db.get(User, inv.trial_teacher_id) if inv.trial_teacher_id else None
     subject = db.get(_Subject, inv.subject_id) if inv.subject_id else None
+    # 排课后显示排课班级：优先取排课关联的班级名，回退到邀约直连的班级
+    trial_class_name: str | None = None
+    if inv.trial_schedule_id:
+        from app.models.schedule import Schedule as _Sched
+
+        sched = db.get(_Sched, inv.trial_schedule_id)
+        if sched is not None and getattr(sched, "schedule_class", None) is not None:
+            trial_class_name = sched.schedule_class.name
+    if trial_class_name is None and inv.trial_class_id:
+        from app.models.enrollment import Class as _Class
+
+        cls = db.get(_Class, inv.trial_class_id)
+        trial_class_name = cls.name if cls else None
     return {
         "id": str(inv.id),
         "staff_id": str(inv.staff_id) if inv.staff_id else None,
@@ -139,6 +152,7 @@ def _inv_out(inv: Invitation, db: Session) -> dict:
         "trial_class_id": str(inv.trial_class_id) if inv.trial_class_id else None,
         "trial_teacher_id": str(inv.trial_teacher_id) if inv.trial_teacher_id else None,
         "trial_teacher_name": teacher.name if teacher else None,
+        "trial_class_name": trial_class_name,
         "created_at": inv.created_at.isoformat() if inv.created_at else None,
     }
 
@@ -147,7 +161,7 @@ def _inv_out(inv: Invitation, db: Session) -> dict:
 def create_invitation(
     payload: InvitationIn,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*TEACH_ROLES)),
+    user: User = Depends(require_teacher_permission("invitation_create")),
 ) -> dict:
     """新建邀约记录：教务约到有意向家长，保存信息与聊天截图。"""
     inv = Invitation(

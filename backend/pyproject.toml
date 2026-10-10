@@ -15,6 +15,7 @@ dependencies = [
     "python-multipart>=0.0.32",
     "reportlab>=5.0.1",
     "pypinyin>=0.55.0",
+    "cryptography>=44",
     # 文档导出（PPT/PDF/DOCX，启动链直接引用，属于核心运行时）
     "python-pptx>=1.0",
     "pypdf>=4.0",
@@ -29,6 +30,9 @@ ai = [
     "langgraph>=0.2",
     "langchain-openai>=0.2",
     "chromadb>=0.5",
+]
+# 本地 embedding（Qwen3 + torch，体积大）：仅开发机回退用，生产镜像不装
+ai-local = [
     "sentence-transformers>=3.0",
 ]
 

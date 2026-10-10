@@ -3,6 +3,7 @@
 另提供桌面背景图 / 登录 Logo 图上传（本地磁盘存储，复用 /uploads 静态服务）。
 """
 
+import json
 import uuid
 from pathlib import Path
 
@@ -47,6 +48,7 @@ class SystemSettingUpdate(BaseModel):
     login_hero: str | None = None
     sidebar_sub: str | None = None
     sidebar_theme: str | None = None
+    nav_order: list[str] | None = None
 
 
 def _ensure_columns(db: Session) -> None:
@@ -70,6 +72,7 @@ def _ensure_columns(db: Session) -> None:
         "login_hero": "ALTER TABLE system_settings ADD COLUMN login_hero VARCHAR(128)",
         "sidebar_sub": "ALTER TABLE system_settings ADD COLUMN sidebar_sub VARCHAR(64)",
         "sidebar_theme": "ALTER TABLE system_settings ADD COLUMN sidebar_theme VARCHAR(16)",
+        "nav_order": "ALTER TABLE system_settings ADD COLUMN nav_order TEXT DEFAULT '[]'",
     }
     for col, sql in ddl.items():
         if col not in cols:
@@ -89,6 +92,12 @@ def _get_or_create(db: Session) -> SystemSetting:
 
 
 def _out(row: SystemSetting) -> dict:
+    try:
+        nav_order = json.loads(row.nav_order or "[]")
+        if not isinstance(nav_order, list):
+            nav_order = []
+    except (ValueError, TypeError):
+        nav_order = []
     return {
         "login_theme": row.login_theme,
         "desktop_bg": row.desktop_bg,
@@ -100,6 +109,7 @@ def _out(row: SystemSetting) -> dict:
         "login_hero": row.login_hero or DEFAULTS["login_hero"],
         "sidebar_sub": row.sidebar_sub if row.sidebar_sub is not None else DEFAULTS["sidebar_sub"],
         "sidebar_theme": row.sidebar_theme or DEFAULTS["sidebar_theme"],
+        "nav_order": nav_order,
     }
 
 
@@ -113,9 +123,15 @@ def read_settings(db: Session = Depends(get_db)) -> dict:
 def update_settings(
     payload: SystemSettingUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_teacher_permission("settings_manage")),
+    user: User = Depends(get_current_user),
 ) -> dict:
-    """更新全局个性化设置（需设置权限，默认管理员；教务默认可写，教师默认不可）。"""
+    """更新全局个性化设置（需个性化 tab 权限或设置总管权限）。"""
+    from app.models.permission import check as _check
+
+    if user.role not in (Role.ADMIN.value, Role.STAFF.value) and not (
+        _check(db, user, "settings_manage") or _check(db, user, "settings_tab_personalize")
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="暂无个性化设置操作权限，请联系管理员开通")
     row = _get_or_create(db)
     data = payload.model_dump(exclude_unset=True)
     if "login_theme" in data and data["login_theme"] not in ALLOWED_LOGIN_THEMES:
@@ -128,7 +144,7 @@ def update_settings(
         )
     for k, v in data.items():
         if v is not None:
-            setattr(row, k, v)
+            setattr(row, k, json.dumps(v) if k == "nav_order" else v)
     db.commit()
     db.refresh(row)
     return _out(row)

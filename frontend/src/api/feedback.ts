@@ -93,6 +93,11 @@ export interface CompletedScheduleOut {
   feedback_done: number
   saved_draft: number
   all_done: boolean
+  /** 同组节数：同一班级同一天多节合并为一条时 >1 */
+  group_count: number
+  schedule_ids: string[]
+  /** 组日期 YYYY-MM-DD */
+  day: string
 }
 
 export async function listFeedbacks(params: {
@@ -169,7 +174,10 @@ export async function aiEnhanceFeedback(
   id: string,
   payload: FeedbackAIEnhanceIn,
 ): Promise<FeedbackDraftOut> {
-  const { data } = await http.post<FeedbackDraftOut>(`/feedbacks/${id}/ai-enhance`, payload)
+  // AI 生成通常 20-60 秒：单给此接口放宽超时，避免被全局 15s 超时误杀
+  const { data } = await http.post<FeedbackDraftOut>(`/feedbacks/${id}/ai-enhance`, payload, {
+    timeout: 120000,
+  })
   return data
 }
 
