@@ -167,7 +167,7 @@ const historyLimit = 10
 
 /** AI 生成门禁（与后端 ai-draft 门禁同口径）：
  * - 日报：今日工作/问题与处理/明日计划至少填一项（授课情况由课后反馈自动整理）
- * - 周报：需本周有已发布日报（后端会二次校验）
+ * - 周报：正文本周总结 5 字段至少填一项，或本周有已发布日报（后端会二次校验）
  * - 月报：需本月有已发布日报或周报
  * 统计不再作为放行依据（统计由公栏自动展示，正文需基于文字素材综合）。 */
 function aiEmptyReason(): string {
@@ -178,7 +178,13 @@ function aiEmptyReason(): string {
       ? ''
       : '请先填写今日工作 / 问题与处理 / 明日计划中的至少一项，再生成 AI 草稿（授课情况由当日课后反馈自动整理）'
   }
-  if (t === 'weekly') return '' // 后端按本周是否有已发布日报做二次校验并给出明确提示
+  if (t === 'weekly') {
+    // 删空后二次生成：正文本周 5 字段全空时直接拦截，避免提交后才报“提交失败”
+    const hasText = ['summary', 'highlights', 'problems', 'next_plan', 'stats_notes'].some(
+      (k) => (form.value.fields[k] ?? '').trim(),
+    )
+    return hasText ? '' : '周报内容为空：请至少填写一项正文内容，或确认本周已有已发布日报后再生成 AI 草稿'
+  }
   if (t === 'monthly') return '' // 后端按本月是否有日报/周报做二次校验
   return ''
 }

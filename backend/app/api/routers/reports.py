@@ -787,19 +787,9 @@ def report_ai_draft(
     rep = report_crud.get(db, report_id)
     if rep is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="报告不存在")
-    # 空数据门禁：按“表单快照优先”的有效内容判断，避免浪费 token 产出无意义内容
+    # 空数据门禁：与异步任务入口共用同一套前置校验，保证口径一致
     _sync_effective = _draft_effective_content(rep, payload.content)
-    if rep.type == ReportType.DAILY.value:
-        if not _daily_user_text(_sync_effective):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="请先填写今日工作 / 问题与处理 / 明日计划中的至少一项，再生成 AI 草稿",
-            )
-    elif not _summary_has_text(_sync_effective) and _summary_stats_empty(rep.stats):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="暂无实质内容：正文为空且期间统计全零，请先填写报告内容后再生成",
-        )
+    _require_ai_prereqs(db, rep, _sync_effective)
     draft = _generate_ai_draft_blocking(
         db,
         report_id=report_id,
