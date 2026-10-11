@@ -1,4 +1,4 @@
-import json
+﻿import json
 import threading
 import time
 import uuid
@@ -73,6 +73,64 @@ def _ensure_editable(rep: Report, user: User) -> None:
 
 
 SUMMARY_TEXT_KEYS = ("summary", "highlights", "problems", "next_plan", "stats_notes")
+
+# 日报四项：全部为空时不允许保存草稿 / 生成 AI 草稿
+DAILY_FIELDS = ("work", "courses", "problems", "plan")
+# 日报 AI 要求用户至少填写的项（授课情况由课后反馈自动整理，不强制）
+DAILY_USER_REQUIRED = ("work", "problems", "plan")
+
+
+def _daily_has_any(content: dict | None) -> bool:
+    c = content or {}
+    return any(isinstance(c.get(k), str) and c.get(k).strip() for k in DAILY_FIELDS)
+
+
+def _daily_user_text(content: dict | None) -> str:
+    """日报中教师手填的三项（今日工作/问题与处理/明日计划），AI 改写基准。"""
+    c = content or {}
+    parts = []
+    for k, label in (("work", "今日工作"), ("problems", "问题与处理"), ("plan", "明日计划")):
+        v = c.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(f"【{label}】\n{v.strip()}")
+    return "\n\n".join(parts)
+
+
+def _has_published_dailies(db_or_session: Session, rep: Report) -> bool:
+    items = report_crud.list_published_reports(
+        db_or_session,
+        type=ReportType.DAILY.value,
+        teacher_id=rep.teacher_id,
+        start=rep.period_start,
+        end=rep.period_end,
+    )
+    return len(items) > 0
+
+
+def _report_content_empty(report_type: str, content: dict | None) -> bool:
+    """发布门禁：日报按四项判空；周报/月报/季年按正文五字段判空。"""
+    c = content or {}
+    if report_type == ReportType.DAILY.value:
+        return not _daily_has_any(c)
+    return not _summary_has_text(c)
+
+
+def _require_publish_content(rep: Report) -> None:
+    """空内容禁止提交到公栏：正文全空时拒绝发布（统计由公栏自动展示，不算实质内容）。"""
+    if _report_content_empty(rep.type, rep.content):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="报告内容为空，无法提交：请先填写报告正文并保存后再提交",
+        )
+
+
+def _require_daily_content(content: dict | None) -> None:
+    """日报保存门禁：今日工作/授课情况/问题与处理/明日计划全空时拒绝保存。"""
+    if not _daily_has_any(content):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="日报内容为空：请至少填写今日工作、授课情况、问题与处理、明日计划中的一项后再保存",
+        )
 SUMMARY_STAT_KEYS = ("schedules", "attended", "consumed_lessons", "current_students")
 
 SUMMARY_TEXT_LABELS = {
@@ -81,14 +139,21 @@ SUMMARY_TEXT_LABELS = {
     "problems": "存在问题",
     "next_plan": "下步计划",
     "stats_notes": "数据备注",
+    # 日报四项（AI 改写基准用，与 SUMMARY_TEXT_KEYS 并集取值）
+    "work": "今日工作",
+    "courses": "授课情况",
+    "plan": "明日计划",
 }
+# AI 改写基准正文键：周报/月报/季年 5 字段 + 日报 4 字段
+DRAFT_TEXT_KEYS = ("summary", "highlights", "problems", "next_plan", "stats_notes",
+                   "work", "courses", "plan")
 
 
 def _summary_user_text(content: dict | None) -> str:
     """用户已在报告内容板块填写的正文（AI 润色素材用）。"""
     c = content or {}
     parts = []
-    for k in SUMMARY_TEXT_KEYS:
+    for k in DRAFT_TEXT_KEYS:
         v = (c.get(k) or "")
         if isinstance(v, str) and v.strip():
             parts.append(f"【{SUMMARY_TEXT_LABELS.get(k, k)}】\n{v.strip()}")
@@ -141,7 +206,7 @@ def _raise_if_summary_empty(db: Session, rep: Report) -> None:
 
 @router.get("", response_model=PageOut[ReportOut])
 def list_reports(
-    type: str | None = Query(default=None, pattern="^(daily|weekly|quarterly|yearly)$"),
+    type: str | None = Query(default=None, pattern="^(daily|weekly|monthly|quarterly|yearly)$"),
     teacher_id: uuid.UUID | None = Query(default=None),
     mine: bool = Query(default=False, description="仅看本人报告（历史记录用，管理员也只看本人）"),
     start: datetime | None = Query(default=None, description="周期起（含）"),
@@ -195,7 +260,7 @@ def board_stats(
 
 @router.get("/board", response_model=PageOut[ReportBoardItemOut])
 def board_list(
-    type: str | None = Query(default=None, pattern="^(daily|weekly|quarterly|yearly)$"),
+    type: str | None = Query(default=None, pattern="^(daily|weekly|monthly|quarterly|yearly)$"),
     teacher_id: uuid.UUID | None = Query(default=None),
     campus: str | None = Query(default=None),
     start: datetime | None = Query(default=None, description="周期起（含）"),
@@ -247,6 +312,13 @@ def create_report(
     """新建/幂等创建报告：同一教师同类型同周期仅一份（重复创建 = 更新）。"""
     if payload.period_end < payload.period_start:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="周期结束不能早于开始")
+    if payload.type == ReportType.DAILY.value:
+        _require_daily_content(payload.content)
+    elif _report_content_empty(payload.type, payload.content):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="报告内容为空，无法保存：请至少填写一项正文内容后再保存",
+        )
     return _to_out(
         report_crud.upsert(
             db,
@@ -285,6 +357,14 @@ def update_report(
     if rep is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="报告不存在")
     _ensure_editable(rep, user)
+    if payload.content is not None:
+        if rep.type == ReportType.DAILY.value:
+            _require_daily_content(payload.content)
+        elif _report_content_empty(rep.type, payload.content):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="报告内容为空，无法保存：请至少填写一项正文内容后再保存",
+            )
     return _to_out(
         report_crud.update(
             db, rep, title=payload.title, content=payload.content, stats=payload.stats
@@ -303,6 +383,7 @@ def publish_report(
     if rep is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="报告不存在")
     _ensure_editable(rep, user)
+    _require_publish_content(rep)
     return _to_out(report_crud.publish(db, rep))
 
 
@@ -414,6 +495,28 @@ def period_stats_preview(
                 stats = report_crud.rollup_weekly_to_period(
                     weeklies, current_students=stats["current_students"]
                 )
+    return PeriodStatsOut(**stats)
+
+
+@router.get("/monthly-stats/preview", response_model=PeriodStatsOut)
+def monthly_stats_preview(
+    teacher_id: uuid.UUID | None = Query(default=None),
+    start: datetime = Query(description="月起（含）"),
+    end: datetime = Query(description="月止（含）"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> PeriodStatsOut:
+    """月报统计预览：整月明细重算（排课/考勤/课时/新增学员），随月报提交落库。"""
+    target = teacher_id if teacher_id is not None else user.id
+    if target != user.id and user.role not in (Role.ADMIN.value, Role.STAFF.value):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权查看他人统计")
+    stats = report_crud.compute_period_stats(db, teacher_id=target, start=start, end=end)
+    if stats["schedules"] == 0 and stats["attended"] == 0:
+        weeklies = report_crud.list_published_weeklies(db, teacher_id=target, start=start, end=end)
+        if weeklies:
+            stats = report_crud.rollup_weekly_to_period(
+                weeklies, current_students=stats["current_students"]
+            )
     return PeriodStatsOut(**stats)
 
 
@@ -684,8 +787,19 @@ def report_ai_draft(
     rep = report_crud.get(db, report_id)
     if rep is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="报告不存在")
-    # 空数据门禁：正文全空且统计全零时拒绝生成，避免浪费 token 产出无意义内容
-    _raise_if_summary_empty(db, rep)
+    # 空数据门禁：按“表单快照优先”的有效内容判断，避免浪费 token 产出无意义内容
+    _sync_effective = _draft_effective_content(rep, payload.content)
+    if rep.type == ReportType.DAILY.value:
+        if not _daily_user_text(_sync_effective):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="请先填写今日工作 / 问题与处理 / 明日计划中的至少一项，再生成 AI 草稿",
+            )
+    elif not _summary_has_text(_sync_effective) and _summary_stats_empty(rep.stats):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="暂无实质内容：正文为空且期间统计全零，请先填写报告内容后再生成",
+        )
     draft = _generate_ai_draft_blocking(
         db,
         report_id=report_id,
@@ -694,6 +808,7 @@ def report_ai_draft(
         extra_note=payload.extra_note,
         source_quarter_ids=list(payload.source_quarter_ids or []),
         template_id=payload.template_id,
+        form_content=payload.content,
     )
     return ReportAiDraftOut(
         title=draft["title"],
@@ -734,9 +849,13 @@ def _ai_job_public(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_template_style(
-    db_or_session: Session, template_id: uuid.UUID | None
+    db_or_session: Session, template_id: uuid.UUID | None, values: dict | None = None
 ) -> str | None:
-    """解析报告 AI 所选提示词模板正文，作为写作风格要求（无选择则返回 None）。"""
+    """解析报告 AI 所选提示词模板正文，作为写作风格要求（无选择则返回 None）。
+
+    正文里的 {teacher_name} {campus} {period} {report_type} 会按 values 替换；
+    未提供的键原样保留，不影响生成。
+    """
     if template_id is None:
         return None
     from app.crud import prompt as prompt_crud
@@ -745,7 +864,98 @@ def _resolve_template_style(
     if t is None:
         return None
     text = (t.content or "").strip()
+    if not text:
+        return None
+    if values:
+        text = llm.fill_template(text, values)
     return text or None
+
+
+REPORT_TYPE_LABELS = {
+    ReportType.DAILY.value: "日报",
+    ReportType.WEEKLY.value: "周报",
+    ReportType.QUARTERLY.value: "季度总结",
+    ReportType.YEARLY.value: "年度总结",
+}
+
+
+def _template_style_values(rep: Report) -> dict:
+    """报告模板占位符实值：教师 / 校区 / 周期 / 类型。"""
+    teacher = rep.teacher
+    return {
+        "teacher_name": teacher.name if teacher else "",
+        "campus": (teacher.campus if teacher else "") or "",
+        "period": (
+            f"{rep.period_start.strftime('%Y年%m月%d日')} ~ {rep.period_end.strftime('%Y年%m月%d日')}"
+        ),
+        "report_type": REPORT_TYPE_LABELS.get(rep.type, rep.type),
+    }
+
+
+def _draft_effective_content(rep: Report, form_content: dict | None) -> dict:
+    """AI 改写基准内容：编辑器表单快照优先（解决“写了但没保存就点 AI”取不到的问题），
+    快照缺省时回退已保存内容。
+
+    快照是权威的：快照里出现的键（含空字符串=用户已清空）直接覆盖已保存值，
+    避免“删空内容后 AI 仍按老内容生成 / 门禁误判”的混乱。
+    """
+    saved = dict(rep.content or {})
+    if not form_content:
+        return saved
+    for k, v in form_content.items():
+        if isinstance(v, str):
+            saved[k] = v
+        elif v is not None:
+            saved[k] = v
+    return saved
+
+
+def _require_ai_prereqs(db_or_session: Session, rep: Report, effective: dict) -> None:
+    """AI 生成前置门禁（提交任务与后台执行共用，保证两处口径一致）。
+
+    - 日报：今日工作 / 问题与处理 / 明日计划至少填一项
+    - 周报：本周需有已发布日报（综合素材来源）
+    - 月报：本月需有已发布日报或周报
+    - 季度：本季度需有已发布月报或周报
+    """
+    if rep.type == ReportType.DAILY.value:
+        if not _daily_user_text(effective):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="请先填写今日工作 / 问题与处理 / 明日计划中的至少一项，再生成 AI 草稿（授课情况由当日课后反馈自动整理）",
+            )
+        return
+    if rep.type == ReportType.WEEKLY.value:
+        if not _has_published_dailies(db_or_session, rep):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="本周暂无已发布的日报，周报需要综合日报内容生成，请先填写并发布每日日报",
+            )
+        return
+    if rep.type == ReportType.MONTHLY.value:
+        mat = report_crud.collect_monthly_material(
+            db_or_session, teacher_id=rep.teacher_id, start=rep.period_start, end=rep.period_end
+        )
+        if not mat["dailies"] and not mat["weeklies"]:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="本月暂无已发布的日报或周报，月报需要综合下级报告生成，请先填写并发布日报/周报",
+            )
+        return
+    if rep.type == ReportType.QUARTERLY.value:
+        has_month = report_crud.list_published_reports(
+            db_or_session, type=ReportType.MONTHLY.value, teacher_id=rep.teacher_id,
+            start=rep.period_start, end=rep.period_end,
+        )
+        has_week = report_crud.collect_period_material(
+            db_or_session, teacher_id=rep.teacher_id, start=rep.period_start, end=rep.period_end
+        )
+        if not has_month and not has_week:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="本季度暂无已发布的月报或周报，季度总结需要综合下级报告生成，请先填写并发布月报/周报",
+            )
+        return
 
 
 def _generate_ai_draft_blocking(
@@ -757,6 +967,7 @@ def _generate_ai_draft_blocking(
     extra_note: str | None,
     source_quarter_ids: list[uuid.UUID],
     template_id: uuid.UUID | None = None,
+    form_content: dict | None = None,
 ) -> dict[str, Any]:
     """实际执行一次 AI 草稿生成（供同步接口与后台任务线程共用）。"""
     rep = report_crud.get(db_or_session, report_id)
@@ -786,15 +997,12 @@ def _generate_ai_draft_blocking(
             template_id=template_id,
         ),
     )
-    # 所选提示词模板作为写作风格要求
-    template_style = _resolve_template_style(db_or_session, template_id)
-    # 用户已写内容一并作为润色素材：统计数据 + 内容板块一起生成，避免只按数字编造
-    user_text = _summary_user_text(rep.content)
-    if user_text:
-        material += (
-            "\n\n用户已填写的报告内容（请在保留原意的基础上润色、扩写、结构化，"
-            "不要丢弃用户提到的事实与细节）：\n" + user_text
-        )
+    # 所选提示词模板作为写作风格要求（{teacher_name} 等占位符按本报告实值替换）
+    template_style = _resolve_template_style(db_or_session, template_id, _template_style_values(rep))
+    # 用户已写内容作为改写基准：优先用编辑器表单快照（写了没保存也能被 AI 读到）
+    effective = _draft_effective_content(rep, form_content)
+    user_text = _summary_user_text(effective)
+    _require_ai_prereqs(db_or_session, rep, effective)
     with _llm_ctx.use_llm(_draft_resolved):
         try:
             if rep.type in (ReportType.QUARTERLY.value, ReportType.YEARLY.value):
@@ -805,12 +1013,31 @@ def _generate_ai_draft_blocking(
                     from_quarters=rep.type == ReportType.YEARLY.value and "季度总结" in material,
                     style_note=template_style,
                 )
+            elif rep.type == ReportType.DAILY.value:
+                draft = llm.generate_report_summary(
+                    report_type=rep.type,
+                    material=material,
+                    extra_note=extra_note,
+                    style_note=template_style,
+                    draft_mode="daily_user",
+                    user_text=user_text or None,
+                )
+            elif rep.type == ReportType.WEEKLY.value:
+                draft = llm.generate_report_summary(
+                    report_type=rep.type,
+                    material=material,
+                    extra_note=extra_note,
+                    style_note=template_style,
+                    draft_mode="weekly_dailies",
+                    user_text=user_text or None,
+                )
             else:
                 draft = llm.generate_report_summary(
                     report_type=rep.type,
                     material=material,
                     extra_note=extra_note,
                     style_note=template_style,
+                    draft_mode="monthly_rollup",
                 )
         except llm.LLMConfigError as e:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
@@ -848,6 +1075,7 @@ def _run_ai_draft_job(job_id: str) -> None:
                 extra_note=job.get("extra_note"),
                 source_quarter_ids=[uuid.UUID(i) for i in (job.get("source_quarter_ids") or [])],
                 template_id=uuid.UUID(job["template_id"]) if job.get("template_id") else None,
+                form_content=job.get("form_content") or None,
             )
         with _AI_JOBS_LOCK:
             job = _AI_JOBS.get(job_id)
@@ -899,8 +1127,9 @@ def create_ai_draft_job(
     if rep is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="报告不存在")
     _ensure_editable(rep, user)
-    # 空数据门禁（与同步入口一致）：正文全空且统计全零时直接 422，前端拦截在先
-    _raise_if_summary_empty(db, rep)
+    # 空数据门禁：按“表单快照优先”的有效内容判断，避免浪费 token 产出无意义内容
+    _effective = _draft_effective_content(rep, payload.content)
+    _require_ai_prereqs(db, rep, _effective)
 
     job_id = uuid.uuid4().hex
     with _AI_JOBS_LOCK:
@@ -913,6 +1142,7 @@ def create_ai_draft_job(
             "extra_note": payload.extra_note,
             "source_quarter_ids": [str(i) for i in (payload.source_quarter_ids or [])],
             "template_id": str(payload.template_id) if payload.template_id else None,
+            "form_content": dict(payload.content or {}),
             "status": "pending",
             "title": None,
             "content": None,
@@ -1003,31 +1233,68 @@ def _resolve_yearly_quarters(db: Session, rep: Report, payload: ReportAiDraftIn)
 
 
 def _collect_report_material(db: Session, rep: Report, payload: ReportAiDraftIn) -> str:
-    """组装 AI 素材：日报=当日排课/考勤；周报=统计指标 + 本周已发布日报摘要。"""
+    """组装 AI 素材（统计由公栏自动展示，素材侧重可被综合的文字与明细）。
+
+    - 日报=当日排课/考勤 + 当日授课明细（班级｜科目｜课题｜到课/反馈）；
+    - 周报=本周已发布日报全文摘要；
+    - 月报=本月已发布日报/周报摘要 + 月统计；
+    - 季度=本季度 3 个月已发布月报（无月报时回退周报口径并注明）；
+    - 年度=4 个季度总结（显式勾选优先）或回退口径。
+    """
     if rep.type == ReportType.DAILY.value:
         material = report_crud.collect_daily_material(
             db, teacher_id=rep.teacher_id, day=rep.period_start
         )
         lines = [f"- 日期：{rep.period_start.strftime('%Y-%m-%d')}"]
-        daily_stats = report_crud.compute_daily_stats(
+        lessons = report_crud.collect_daily_lesson_material(
             db, teacher_id=rep.teacher_id, day=rep.period_start
         )
-        lines.append(
-            f"- 当日统计：排课 {daily_stats['schedules']} 节，"
-            f"应到 {daily_stats['expected_attendance']} 人，"
-            f"到课 {daily_stats['attended']} 人，缺课 {daily_stats['leave']} 人，"
-            f"出勤率 {daily_stats['attendance_rate'] * 100:.1f}%，"
-            f"应消耗 {daily_stats['expected_lessons']} 课时，"
-            f"消耗 {daily_stats['consumed_lessons']} 课时，"
-            f"达标率 {daily_stats['achievement_rate'] * 100:.1f}%"
+        if not lessons:
+            lines.append("- 当日授课明细：今日无已完成授课")
+        else:
+            lines.append("【当日授课明细】（授课情况只准按以下逐条整理，不编造）：")
+            for les in lessons:
+                topics = "、".join(les["topics"]) or "（课题未填）"
+                lines.append(
+                    f"- {les['time']}｜{les['class_name']}｜{les['subject']}｜"
+                    f"课题：{topics}｜到课 {les['attended']} 人、缺课 {les['leave']} 人｜"
+                    f"已发送反馈 {les['feedback_done']} 份"
+                )
+        return "\n".join(lines)
+
+    # 月报：聚合统计 + 本月已发布日报/周报摘要
+    if rep.type == ReportType.MONTHLY.value:
+        mat = report_crud.collect_monthly_material(
+            db, teacher_id=rep.teacher_id, start=rep.period_start, end=rep.period_end
         )
-        if not material["courses"]:
-            lines.append("- 当日暂无排课记录（课程列表为空）")
-        for c in material["courses"]:
-            lines.append(
-                f"- {c['time']} {c['class_name']}（{c['subject']}）："
-                f"已到 {c['attended']} 人，请假 {c['leave']} 人"
-            )
+        st = mat["stats"]
+        lines = [
+            f"- 周期：{rep.period_start.strftime('%Y-%m-%d')} ~ {rep.period_end.strftime('%Y-%m-%d')}",
+            f"- 本月统计：排课 {st['schedules']} 节，上课 {st['attended']} 人次，"
+            f"缺课 {st['leave']} 人次，出勤率 {st['attendance_rate'] * 100:.1f}%，"
+            f"消耗课时 {st['consumed_lessons']} 节，达标率 {st['achievement_rate'] * 100:.1f}%，"
+            f"新增学员 {st['new_students']} 人",
+        ]
+        if mat["dailies"]:
+            lines.append("\n【本月日报摘要】：")
+            for d in mat["dailies"]:
+                lines.append(
+                    f"- 日报[{d['day']}]工作：{d['work'] or '（未填）'}"
+                    + (f"｜问题：{d['problems']}" if d["problems"] else "")
+                    + (f"｜计划：{d['plan']}" if d["plan"] else "")
+                )
+        else:
+            lines.append("- 本月暂无已发布日报")
+        if mat["weeklies"]:
+            lines.append("\n【本月周报摘要】：")
+            for w in mat["weeklies"]:
+                lines.append(
+                    f"- 周报[{w['week']}]总结：{w['summary'] or '（未填）'}"
+                    + (f"｜亮点：{w['highlights']}" if w["highlights"] else "")
+                    + (f"｜问题：{w['problems']}" if w["problems"] else "")
+                )
+        else:
+            lines.append("- 本月暂无已发布周报")
         return "\n".join(lines)
 
     # 季度：聚合统计 + 周期内已发布周报摘要
@@ -1047,18 +1314,35 @@ def _collect_report_material(db: Session, rep: Report, payload: ReportAiDraftIn)
             f"- 新增学员：{stats['new_students']} 人",
             f"- 已发布周报：{stats['weekly_count']} 篇",
         ]
-        weekly_summaries = report_crud.collect_period_material(
-            db, teacher_id=rep.teacher_id, start=rep.period_start, end=rep.period_end
+        monthlies = report_crud.list_published_reports(
+            db, teacher_id=rep.teacher_id, type=ReportType.MONTHLY.value,
+            start=rep.period_start, end=rep.period_end,
         )
-        if weekly_summaries:
-            lines.append("\n各周周报摘要（季度内）：")
-            for w in weekly_summaries:
+        if monthlies:
+            lines.append("\n【本季度 3 个月月报】（综合分析基准）：")
+            for m in monthlies:
+                c = m.content or {}
+                mlabel = (m.title or "").strip() or m.period_start.strftime("%m月")
                 lines.append(
-                    f"- 周[{w['week']}]：{w['summary'] or '（无总结）'}"
-                    + (f" | 亮点：{w['highlights']}" if w["highlights"] else "")
+                    f"- 月报[{mlabel}]总结：{c.get('summary') or '（无总结）'}"
+                    + (f"｜亮点：{c.get('highlights')}" if c.get("highlights") else "")
+                    + (f"｜问题：{c.get('problems')}" if c.get("problems") else "")
+                    + (f"｜下阶段：{c.get('next_plan')}" if c.get("next_plan") else "")
                 )
         else:
-            lines.append("\n提示：季度内暂无已发布周报，建议先完善周报再生成总结。")
+            lines.append("\n提示：本季度暂无已发布月报，已回退为周报口径，建议先完善各月月报。")
+            weekly_summaries = report_crud.collect_period_material(
+                db, teacher_id=rep.teacher_id, start=rep.period_start, end=rep.period_end
+            )
+            if weekly_summaries:
+                lines.append("\n各周周报摘要（季度内）：")
+                for w in weekly_summaries:
+                    lines.append(
+                        f"- 周[{w['week']}]：{w['summary'] or '（无总结）'}"
+                        + (f" | 亮点：{w['highlights']}" if w["highlights"] else "")
+                    )
+            else:
+                lines.append("\n提示：季度内暂无已发布周报，建议先完善周报再生成总结。")
         return "\n".join(lines)
 
     # 年度：优先聚合已选/自动带出的已发布季度总结，无季度时回退周报口径
@@ -1124,19 +1408,9 @@ def _collect_report_material(db: Session, rep: Report, payload: ReportAiDraftIn)
             lines.append("\n提示：年度内暂无已发布周报，建议先完善周报再生成总结。")
         return "\n".join(lines)
 
-    # 周报：统计指标 + 本周日报标题/工作摘要
-    stats = report_crud.compute_weekly_stats(
-        db, teacher_id=rep.teacher_id, start=rep.period_start, end=rep.period_end
-    )
+    # 周报：本周已发布日报全文摘要（综合分析基准；统计由公栏自动展示）
     lines = [
         f"- 周期：{rep.period_start.strftime('%Y-%m-%d')} ~ {rep.period_end.strftime('%Y-%m-%d')}",
-        f"- 本周排课：{stats['schedules']} 节，应到 {stats['expected_attendance']} 人次",
-        f"- 到课学员：{stats['attended']} 人，缺课：{stats['leave']} 人",
-        f"- 出勤率：{stats['attendance_rate'] * 100:.1f}%，"
-        f"达标率：{stats['achievement_rate'] * 100:.1f}%",
-        f"- 应消耗课时：{stats['expected_lessons']} 节，消耗课时：{stats['consumed_lessons']} 节",
-        f"- 缺课学员：{'、'.join(stats['absent_students']) or '无'}",
-        f"- 新增学员：{stats['new_students']} 人",
     ]
     daily_items, _ = report_crud.list_reports(
         db,
@@ -1147,9 +1421,17 @@ def _collect_report_material(db: Session, rep: Report, payload: ReportAiDraftIn)
         limit=50,
         offset=0,
     )
-    for d in daily_items:
-        if d.status == ReportStatus.PUBLISHED.value:
-            work = (d.content or {}).get("work")
-            if work:
-                lines.append(f"- 日报[{d.period_start.strftime('%m-%d')}]：{work[:80]}")
+    published_dailies = [d for d in daily_items if d.status == ReportStatus.PUBLISHED.value]
+    if not published_dailies:
+        lines.append("- 本周暂无已发布日报：请先填写并发布每日日报，再生成周报")
+    else:
+        lines.append("\n【本周日报】（总结/亮点/问题必须综合以下内容提炼）：")
+        for d in published_dailies:
+            c = d.content or {}
+            lines.append(
+                f"- 日报[{d.period_start.strftime('%m-%d')}]工作：{c.get('work') or '（未填）'}"
+                + (f"｜授课：{c.get('courses')}" if c.get("courses") else "")
+                + (f"｜问题：{c.get('problems')}" if c.get("problems") else "")
+                + (f"｜计划：{c.get('plan')}" if c.get("plan") else "")
+            )
     return "\n".join(lines)

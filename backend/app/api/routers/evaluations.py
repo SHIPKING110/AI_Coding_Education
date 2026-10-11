@@ -471,13 +471,21 @@ def ai_draft_evaluation(
         db, student=student, start=ev.period_start, end=ev.period_end
     )
     text = _material_text(student.name, material.get("classes") or [], material)
+    # 评估模板里的 {student_name} {period} {teacher_name} 按本次评估实值替换
+    style_guide = payload.style_guide
+    if style_guide:
+        style_guide = llm.fill_template(style_guide, {
+            "student_name": student.name,
+            "period": _period_label(ev.period_start, ev.period_end),
+            "teacher_name": user.name,
+        })
     task = ai_tasks.create_task(
         owner_id=str(user.id),
         kind="evaluation_draft",
         summary=f"生成 {student.name} 的学习评估",
         runner=lambda: _llm_ctx.run_with(llm_resolved, llm.generate_evaluation,
             student_name=student.name, material=text, extra_note=payload.extra_note,
-            style_guide=payload.style_guide
+            style_guide=style_guide
         ),
     )
     return _task_to_out(task)

@@ -185,7 +185,8 @@ function persistAiJob() {
 
 /** 回填 AI 草稿到表单（任务成功后调用，与原来同步逻辑一致） */
 function applyAiDraft(draft: { title?: string | null; content?: Record<string, string | null> }) {
-  if (draft.title) form.value.title = draft.title
+  // 标题统一格式（日期/周期 + 类型 + 教师名），不直接采用 AI 自拟标题
+  form.value.title = defaultSummaryTitle()
   const c = draft.content ?? {}
   for (const f of fields.value) {
     const v = c[f.key]
@@ -243,8 +244,9 @@ async function submitAiJob() {
     return
   }
   aiError.value = ''
-  // AI 生成门禁（与 PPT 同口径，避免空内容浪费 token）：年度已选季度总结时放行
-  if (!(activeTab.value === 'yearly' && aiQuarterIds.value.length > 0)) {
+  // AI 生成门禁：季度由后端按“有无已发布月报/周报”校验；年度已选季度总结时放行，
+  // 否则沿用正文+统计口径（避免空内容浪费 token）
+  if (activeTab.value !== 'quarterly' && !(activeTab.value === 'yearly' && aiQuarterIds.value.length > 0)) {
     const reason = summaryEmptyReason()
     if (reason) {
       aiError.value = 'AI 生成需要实质内容：正文为空且期间统计全零，请先填写总结内容或确认周期内有数据后再生成（避免浪费 token 生成无意义内容）'
@@ -252,10 +254,15 @@ async function submitAiJob() {
     }
   }
   try {
+    // 附带编辑器当前表单快照：写了没保存也能被 AI 读到并润色
+    const snapshot = Object.fromEntries(
+      fields.value.map((f) => [f.key, (form.value.fields[f.key] ?? '').trim()]),
+    )
     const job = await createAiDraftJob(report.value.id, {
       extra_note: aiNote.value || null,
       ...(activeTab.value === 'yearly' ? { source_quarter_ids: aiQuarterIds.value } : {}),
       template_id: aiTemplateId.value || null,
+      content: snapshot,
     })
     aiJobId.value = job.job_id
     aiJobReportId.value = report.value.id
@@ -264,7 +271,6 @@ async function submitAiJob() {
     aiJobStatus.value = 'pending'
     persistAiJob()
     showAiModal.value = false
-    document.querySelector('.summary-view .ai-job-bar')?.classList.remove('hidden')
     showNotice('AI 正在后台生成（约 20-60 秒），可继续编辑，完成后自动回填')
     startAiPoll()
   } catch (e: any) {
@@ -587,9 +593,14 @@ async function loadHistory() {
 
 /** 删除报告（本人或管理员/教务）：确认后调用后端并刷新历史/公栏 */
 const deletingId = ref('')
-async function removeReport(r: { id: string; title?: string | null }) {
-  const name = r.title?.trim() || '该报告'
-  if (!window.confirm(`确认删除「${name}」？删除后不可恢复（含已生成 PPT）。`)) return
+const pendingDelete = ref<{ id: string; title?: string | null } | null>(null)
+function removeReport(r: { id: string; title?: string | null }) {
+  pendingDelete.value = r
+}
+async function doDeleteReport() {
+  const r = pendingDelete.value
+  pendingDelete.value = null
+  if (!r) return
   deletingId.value = r.id
   try {
     await deleteReport(r.id)
@@ -676,9 +687,14 @@ async function publish() {
   }
 }
 
+const showUnpublish = ref(false)
 async function unpublish() {
   if (!report.value) return
-  if (!window.confirm('确认撤回该总结为草稿？撤回后可重新编辑并生成 PPT。')) return
+  showUnpublish.value = true
+}
+async function doUnpublish() {
+  if (!report.value) return
+  showUnpublish.value = false
   try {
     report.value = await unpublishReport(report.value.id)
     showNotice('已撤回为草稿')
@@ -703,7 +719,7 @@ function summaryEmptyReason(): string {
   if (activeTab.value === 'yearly') {
     return '年度总结暂无实质内容：正文为空、统计全零且未选用已发布季度总结，请先勾选季度总结生成 AI 年总结并保存后再生成 PPT'
   }
-  return '总结暂无实质内容：正文为空且期间统计全零，请先完善总结内容或确认周期内有排课/周报数据后再生成 PPT'
+  return '总结暂无实质内容：正文为空且期间统计全零，请先完善总结内容或确认周期内有排课/月报/周报数据后再生成 PPT'
 }
 
 const pptBlockedReason = computed(() => summaryEmptyReason())
@@ -898,15 +914,6 @@ function clearAiQuarters() {
   aiQuarterIds.value = []
 }
 
-/** 关闭任务条显示（失败态则清除任务；运行态仅隐藏，轮询继续结果照常回填） */
-function dismissAiJob() {
-  if (aiJobStatus.value === 'failed') {
-    clearAiJobState()
-    return
-  }
-  document.querySelector('.summary-view .ai-job-bar')?.classList.add('hidden')
-}
-
 function toggleAiQuarter(id: string) {
   const i = aiQuarterIds.value.indexOf(id)
   if (i >= 0) aiQuarterIds.value.splice(i, 1)
@@ -1018,21 +1025,6 @@ onBeforeUnmount(() => {
           <button class="toast-close" @click="dismissToast(t.id)" title="关闭">×</button>
         </div>
       </TransitionGroup>
-    </div>
-
-    <!-- AI 后台任务条：提交后可关弹窗/切页面，完成后自动回填 -->
-    <div v-if="aiJobActive || aiJobStatus === 'failed'" class="ai-job-bar" :class="aiJobStatus">
-      <div class="ai-job-main">
-        <span class="ai-job-dot" />
-        <span v-if="aiJobActive">
-          AI 正在后台生成总结草稿，已用时 {{ aiJobElapsed }} 秒（通常 20-60 秒），可继续编辑其他内容…
-        </span>
-        <span v-else>AI 生成失败：{{ aiJobError || '未知错误' }}</span>
-      </div>
-      <div class="ai-job-actions">
-        <button v-if="aiJobStatus === 'failed'" class="btn ghost small" @click="dismissAiJob">关闭</button>
-        <button v-else class="btn ghost small" @click="dismissAiJob">后台运行中，可忽略</button>
-      </div>
     </div>
 
     <section class="card control-row">
@@ -1378,6 +1370,27 @@ onBeforeUnmount(() => {
       danger
       @confirm="showNewDraftConfirm = false; newBlankDraft()"
       @cancel="showNewDraftConfirm = false"
+    />
+
+    <!-- 撤回重新编辑确认 -->
+    <ConfirmDialog
+      :visible="showUnpublish"
+      title="撤回重新编辑？"
+      message="确认撤回该总结为草稿？撤回后可重新编辑并生成 PPT。"
+      confirm-text="撤回"
+      @confirm="doUnpublish"
+      @cancel="showUnpublish = false"
+    />
+
+    <!-- 删除报告确认 -->
+    <ConfirmDialog
+      :visible="pendingDelete !== null"
+      title="删除报告？"
+      :message="`确认删除「${(pendingDelete?.title ?? '').trim() || '该报告'}」？删除后不可恢复（含已生成 PPT）。`"
+      confirm-text="删除"
+      danger
+      @confirm="doDeleteReport"
+      @cancel="pendingDelete = null"
     />
 
     <!-- 对话式 PPT 定制抽屉：大纲 → 文案 → 排版 → 导出 -->

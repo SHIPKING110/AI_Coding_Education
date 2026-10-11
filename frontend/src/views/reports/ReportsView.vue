@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -12,18 +12,21 @@ import {
   getReport,
   listBoardReports,
   listReports,
+  monthlyStatsPreview,
   publishReport,
   unpublishReport,
   updateReport,
   weeklyStatsPreview,
   type DailyStatsOut,
+  type PeriodStatsOut,
   type ReportBoardItemOut,
   type ReportBoardStatsOut,
   type ReportOut,
   type ReportType,
   type WeeklyStatsOut,
 } from '@/api/report'
-import { toastApiError } from '@/stores/toast'
+import { toastApiError, useToastStore } from '@/stores/toast'
+import { renderMarkdown } from '@/utils/markdown'
 import { listPromptTemplates, type PromptTemplateOut } from '@/api/prompt'
 import { useAuthStore } from '@/stores/auth'
 import PageHead from '@/components/PageHead.vue'
@@ -43,15 +46,16 @@ import {
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
+const toast = useToastStore()
 
-// —— Tab 切换：日报 / 周报 / 季度总结 / 年度总结 / 公栏 ——
+// —— Tab 切换：日报 / 周报 / 月报 / 季度总结 / 年度总结 / 公栏 ——
 type Tab = ReportType | 'board'
 type SummaryTab = 'quarterly' | 'yearly'
 function parseInitialTab(): Tab | SummaryTab {
   const t = route.query.tab
   // 兼容老链接 ?tab=summary（上一版聚合 Tab）→ 季度总结
   if (t === 'quarterly' || t === 'yearly' || t === 'summary') return t === 'summary' ? 'quarterly' : t
-  if (t === 'board' || t === 'weekly') return t
+  if (t === 'board' || t === 'weekly' || t === 'monthly') return t
   return 'daily'
 }
 const activeTab = ref<Tab | SummaryTab>(parseInitialTab())
@@ -62,7 +66,7 @@ const isSummaryTab = computed(
 // 当前登录教师姓名（用于默认标题 “日期 + 类型 + 姓名”）
 const teacherName = computed(() => auth.user?.name?.trim() ?? '')
 
-/** 默认标题：日报 “9月18日 日报 张三”；周报 “9月15日~21日 周报 张三”（同月省略后段月份） */
+/** 默认标题：日报 “9月18日 日报 张三”；周报 “9月15日~21日 周报 张三”（同月省略后段月份）；月报 “9月 月报 张三” */
 function defaultReportTitle(): string {
   const name = teacherName.value ? ` ${teacherName.value}` : ''
   if (activeTab.value === 'daily') {
@@ -78,19 +82,33 @@ function defaultReportTitle(): string {
         : `${s.getMonth() + 1}月${s.getDate()}日~${e.getMonth() + 1}月${e.getDate()}日`
     return `${range} 周报${name}`
   }
+  if (activeTab.value === 'monthly') {
+    const m = monthStart.value
+    return `${m.getMonth() + 1}月 月报${name}`
+  }
   return ''
 }
 
 // —— 周期选择 ——
 const day = ref(new Date())
 const weekStart = ref(mondayOf(new Date()))
+const monthStart = ref(new Date(new Date().getFullYear(), new Date().getMonth(), 1))
+function monthEnd(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0)
+}
 const periodStart = computed(() =>
-  activeTab.value === 'daily' ? toLocalNaiveIso(day.value) : toLocalNaiveIso(weekStart.value),
+  activeTab.value === 'daily'
+    ? toLocalNaiveIso(day.value)
+    : activeTab.value === 'monthly'
+      ? toLocalNaiveIso(monthStart.value)
+      : toLocalNaiveIso(weekStart.value),
 )
 const periodEnd = computed(() =>
   activeTab.value === 'daily'
     ? toLocalNaiveIso(day.value)
-    : toLocalNaiveIso(addDays(weekStart.value, 6)),
+    : activeTab.value === 'monthly'
+      ? toLocalNaiveIso(monthEnd(monthStart.value))
+      : toLocalNaiveIso(addDays(weekStart.value, 6)),
 )
 
 // —— 当前周期报告（幂等创建=更新） ——
@@ -102,8 +120,6 @@ const form = ref<{ title: string; fields: Record<string, string> }>({
 const loading = ref(false)
 const saving = ref(false)
 const publishing = ref(false)
-const error = ref('')
-const notice = ref('')
 
 // 不同报告类型的表单字段与标签
 const FIELD_MAP: Record<ReportType, { key: string; label: string; placeholder: string }[]> = {
@@ -119,6 +135,13 @@ const FIELD_MAP: Record<ReportType, { key: string; label: string; placeholder: s
     { key: 'problems', label: '问题与改进', placeholder: '客观指出问题并给改进建议…' },
     { key: 'next_plan', label: '下周计划', placeholder: '下周的安排 / 目标…' },
   ],
+  monthly: [
+    { key: 'summary', label: '本月总结', placeholder: '综合本月日报/周报，概括整体工作与趋势…' },
+    { key: 'highlights', label: '本月亮点', placeholder: '值得记录的亮点、进步（需有事例支撑）…' },
+    { key: 'problems', label: '问题与改进', placeholder: '客观指出问题并给改进方向…' },
+    { key: 'next_plan', label: '下月计划', placeholder: '下月的安排 / 目标…' },
+    { key: 'stats_notes', label: '数据说明', placeholder: '结合统计数据的教学情况说明…' },
+  ],
   quarterly: [],
   yearly: [],
 }
@@ -127,9 +150,13 @@ const fields = computed<{ key: string; label: string; placeholder: string }[]>((
   return FIELD_MAP[activeTab.value as ReportType]
 })
 
-// —— 周报/日报自动统计预览 ——
+// 授课情况表格原文折叠（默认只看表格）
+const showCoursesSrc = ref(false)
+
+// —— 周报/日报/月报自动统计预览 ——
 const weeklyStats = ref<WeeklyStatsOut | null>(null)
 const dailyStats = ref<DailyStatsOut | null>(null)
+const monthlyStats = ref<PeriodStatsOut | null>(null)
 const statsLoading = ref(false)
 
 // —— 历史列表 ——
@@ -138,16 +165,22 @@ const historyTotal = ref(0)
 const historyOffset = ref(0)
 const historyLimit = 10
 
-/** AI 生成门禁（与后端 ai-draft 门禁同口径）：正文全空且统计全零则拦截，避免浪费 token */
+/** AI 生成门禁（与后端 ai-draft 门禁同口径）：
+ * - 日报：今日工作/问题与处理/明日计划至少填一项（授课情况由课后反馈自动整理）
+ * - 周报：需本周有已发布日报（后端会二次校验）
+ * - 月报：需本月有已发布日报或周报
+ * 统计不再作为放行依据（统计由公栏自动展示，正文需基于文字素材综合）。 */
 function aiEmptyReason(): string {
-  const fields = FIELD_MAP[activeTab.value as keyof typeof FIELD_MAP] ?? []
-  const hasText = fields.some((f) => (form.value.fields[f.key] ?? '').trim())
-  if (hasText) return ''
-  const s = activeTab.value === 'daily' ? dailyStats.value : weeklyStats.value
-  const allZero =
-    !s || [(s as { schedules?: number }).schedules, (s as { attended?: number }).attended, (s as { consumed_lessons?: number }).consumed_lessons].every((v) => (v ?? 0) === 0)
-  if (!allZero) return ''
-  return '暂无实质内容：报告内容为空且期间统计全零，请先填写报告内容或确认期间内有排课数据后再生成（避免浪费 token 生成无意义内容）'
+  const t = activeTab.value
+  if (t === 'daily') {
+    const hasUser = ['work', 'problems', 'plan'].some((k) => (form.value.fields[k] ?? '').trim())
+    return hasUser
+      ? ''
+      : '请先填写今日工作 / 问题与处理 / 明日计划中的至少一项，再生成 AI 草稿（授课情况由当日课后反馈自动整理）'
+  }
+  if (t === 'weekly') return '' // 后端按本周是否有已发布日报做二次校验并给出明确提示
+  if (t === 'monthly') return '' // 后端按本月是否有日报/周报做二次校验
+  return ''
 }
 
 // 生成成功弹窗（替代顶部横幅，避免用户注意不到）
@@ -220,7 +253,8 @@ async function pollDailyWeeklyAiJob() {
     aiJobElapsed.value = Math.floor(st.elapsed_seconds ?? aiJobElapsed.value)
     if (st.status === 'succeeded') {
       if (report.value && report.value.id === reportId) {
-        if (st.title) form.value.title = st.title
+        // 标题统一格式（日期/周期 + 类型 + 教师名），不直接采用 AI 自拟标题
+        form.value.title = defaultReportTitle()
         const c = st.content ?? {}
         for (const f of fields.value) {
           const v = c[f.key]
@@ -235,13 +269,13 @@ async function pollDailyWeeklyAiJob() {
       clearAiJobState()
     } else if (st.status === 'failed') {
       aiJobError.value = st.error || 'AI 报告生成失败'
-      showError(st.error || 'AI 报告生成失败')
+      toast.error(st.error || 'AI 报告生成失败')
       stopAiJobTimers()
       aiJobStatus.value = 'failed'
     }
   } catch {
     stopAiJobTimers()
-    aiJobError.value = 'AI 任务已过期或查询失败，请重新生成'
+    toast.error('AI 任务已过期或查询失败，请重新生成')
   }
 }
 
@@ -271,22 +305,16 @@ function restoreDailyWeeklyAiJob() {
   } catch { clearAiJobState() }
 }
 
-/** 关闭任务条显示（失败态则清除任务；运行态仅隐藏，轮询继续结果照常回填） */
+/** AI 任务失败时前端只弹 toast，这里直接清除任务状态 */
 function dismissDailyWeeklyAiJob() {
-  if (aiJobStatus.value === 'failed') {
-    clearAiJobState()
-    return
-  }
-  document.querySelector('.reports-view .ai-job-bar')?.classList.add('hidden')
+  clearAiJobState()
 }
 
 function showError(msg: string) {
-  error.value = msg
-  notice.value = ''
+  toast.error(msg)
 }
 function showNotice(msg: string) {
-  notice.value = msg
-  error.value = ''
+  toast.success(msg)
 }
 
 const isCurrentWeek = computed(() => {
@@ -303,7 +331,6 @@ let periodSyncFromPick = false
 async function loadCurrent(reportId?: string) {
   const seq = ++loadSeq
   if (activeTab.value === 'board' || isSummaryTab.value) return
-  error.value = ''
   loading.value = true
   try {
     if (reportId) {
@@ -316,6 +343,10 @@ async function loadCurrent(reportId?: string) {
       } else if (r.type === 'weekly') {
         periodSyncFromPick = true
         weekStart.value = mondayOf(parseLocal(dayKeyFromIso(r.period_start)))
+      } else if (r.type === 'monthly') {
+        periodSyncFromPick = true
+        const d = parseLocal(dayKeyFromIso(r.period_start))
+        monthStart.value = new Date(d.getFullYear(), d.getMonth(), 1)
       }
     } else {
       const page = await listReports({
@@ -349,6 +380,7 @@ async function loadCurrent(reportId?: string) {
   loadHistory()
   if (activeTab.value === 'daily') loadDailyStats()
   if (activeTab.value === 'weekly') loadWeeklyStats()
+  if (activeTab.value === 'monthly') loadMonthlyStats()
 }
 
 function parseLocal(iso: string): Date {
@@ -383,6 +415,21 @@ async function loadWeeklyStats() {
     })
   } catch {
     weeklyStats.value = null
+  } finally {
+    statsLoading.value = false
+  }
+}
+
+// 月报统计预览
+async function loadMonthlyStats() {
+  statsLoading.value = true
+  try {
+    monthlyStats.value = await monthlyStatsPreview({
+      start: dayKey(parseLocal(periodStart.value)),
+      end: dayKey(parseLocal(periodEnd.value)),
+    })
+  } catch {
+    monthlyStats.value = null
   } finally {
     statsLoading.value = false
   }
@@ -423,14 +470,22 @@ function openHistory(r: ReportOut) {
 async function save() {
   if (activeTab.value === 'board' || isSummaryTab.value) return
   const type = activeTab.value as ReportType
+  // 日报保存门禁：今日工作/授课情况/问题与处理/明日计划全空时拒绝保存并弹窗提示
+  if (type === 'daily') {
+    const hasAny = ['work', 'courses', 'problems', 'plan'].some((k) => (form.value.fields[k] ?? '').trim())
+    if (!hasAny) {
+      showError('日报内容为空：请至少填写今日工作、授课情况、问题与处理、明日计划中的一项后再保存')
+      toastApiError({ response: { data: { detail: '日报内容为空，请至少填写一项后再保存' } } })
+      return
+    }
+  }
   const title = form.value.title.trim() || defaultReportTitle()
   const content = Object.fromEntries(
     fields.value.map((f) => [f.key, (form.value.fields[f.key] ?? '').trim()]),
   )
   saving.value = true
-  error.value = ''
   try {
-    // 保存前重新拉取当日/本周统计，确保提交到公栏的数据是最新的
+    // 保存前重新拉取当日/本周/当月统计，确保提交到公栏的数据是最新的
     let stats: Record<string, unknown> | null = null
     if (type === 'daily') {
       const s = await dailyStatsPreview({ day: dayKey(parseLocal(periodStart.value)) })
@@ -442,6 +497,13 @@ async function save() {
         end: dayKey(parseLocal(periodEnd.value)),
       })
       weeklyStats.value = s
+      stats = s as unknown as Record<string, unknown>
+    } else if (type === 'monthly') {
+      const s = await monthlyStatsPreview({
+        start: dayKey(parseLocal(periodStart.value)),
+        end: dayKey(parseLocal(periodEnd.value)),
+      })
+      monthlyStats.value = s
       stats = s as unknown as Record<string, unknown>
     }
 
@@ -469,8 +531,17 @@ async function publish() {
     showError('请先保存草稿，再提交报告')
     return
   }
+  // 空内容禁止提交：正文全空时前端直接拦截（后端 publish 同样 422 兜底）
+  const keys =
+    activeTab.value === 'daily'
+      ? ['work', 'courses', 'problems', 'plan']
+      : ['summary', 'highlights', 'problems', 'next_plan', 'stats_notes']
+  const hasAny = keys.some((k) => (form.value.fields[k] ?? '').trim())
+  if (!hasAny) {
+    showError('报告内容为空，无法提交：请先填写报告正文并保存后再提交')
+    return
+  }
   publishing.value = true
-  error.value = ''
   try {
     report.value = await publishReport(report.value.id)
     showNotice('报告已提交/发布')
@@ -482,9 +553,14 @@ async function publish() {
   }
 }
 
+const showUnpublish = ref(false)
 async function unpublish() {
   if (!report.value) return
-  if (!window.confirm('确认撤回该报告为草稿？撤回后可重新编辑并再次提交。')) return
+  showUnpublish.value = true
+}
+async function doUnpublish() {
+  if (!report.value) return
+  showUnpublish.value = false
   try {
     report.value = await unpublishReport(report.value.id)
     showNotice('已撤回为草稿')
@@ -500,8 +576,18 @@ async function loadAiTemplates() {
   try {
     const all = await listPromptTemplates('report')
     aiTemplates.value = all
-    const want = activeTab.value === 'daily' ? '【报告·日报】' : '【报告·周报】'
-    aiTemplateId.value = aiTemplates.value.find((t) => t.name.startsWith(want))?.id ?? aiTemplates.value[0]?.id ?? ''
+    const want =
+      activeTab.value === 'daily'
+        ? '【报告·日报】'
+        : activeTab.value === 'weekly'
+          ? '【报告·周报】'
+          : activeTab.value === 'monthly'
+            ? '【报告·月报】'
+            : ''
+    aiTemplateId.value =
+      (want ? aiTemplates.value.find((t) => t.name.startsWith(want))?.id : undefined) ??
+      aiTemplates.value[0]?.id ??
+      ''
   } catch {
     aiTemplates.value = []
     aiTemplateId.value = ''
@@ -533,17 +619,21 @@ async function generateAI() {
     return
   }
   try {
+    // 附带编辑器当前表单快照：写了没保存也能被 AI 读到并润色
+    const snapshot = Object.fromEntries(
+      fields.value.map((f) => [f.key, (form.value.fields[f.key] ?? '').trim()]),
+    )
     const job = await createAiDraftJob(report.value.id, {
       extra_note: aiNote.value || null,
       template_id: aiTemplateId.value || null,
+      content: snapshot,
     })
     aiJobStatus.value = 'pending'
     aiJobElapsed.value = 0
     aiJobError.value = ''
     persistAiJob(job.job_id, report.value.id)
     showAiModal.value = false
-    document.querySelector('.reports-view .ai-job-bar')?.classList.remove('hidden')
-    showNotice('AI 正在后台生成（约 20-60 秒），可继续编辑，完成后自动回填')
+    toast.info('AI 正在后台生成（约 20-60 秒），完成后自动回填，可继续编辑')
     startAiJobTimers()
   } catch (e: any) {
     aiError.value = e?.response?.data?.detail || 'AI 任务提交失败'
@@ -557,14 +647,13 @@ const boardTotal = ref(0)
 const boardPage = ref(1)
 const boardLimit = 10
 const boardLoading = ref(false)
-const boardError = ref('')
 
 // 公栏筛选：校区 / 教师（可搜索）/ 报告类型 / 日期范围（默认今天）
 const boardCampuses = ref<string[]>([])
 const boardCampus = ref('')
 const boardTeacherOptions = ref<{ id: string; label: string }[]>([])
 const boardTeacherId = ref('')
-const boardType = ref<'' | 'daily' | 'weekly'>('')
+const boardType = ref<'' | 'daily' | 'weekly' | 'monthly'>('')
 const boardDateStart = ref(dayKey(new Date()))
 const boardDateEnd = ref(dayKey(new Date()))
 
@@ -599,7 +688,6 @@ async function loadBoardTeachers() {
 
 async function loadBoard() {
   boardLoading.value = true
-  boardError.value = ''
   try {
     const q = {
       type: boardType.value || undefined,
@@ -614,7 +702,7 @@ async function loadBoard() {
     boardItems.value = page.items
     boardTotal.value = page.total
   } catch {
-    boardError.value = '加载公栏失败'
+    toast.error('加载公栏失败')
   } finally {
     boardLoading.value = false
   }
@@ -650,15 +738,15 @@ function openBoardDetail(item: ReportBoardItemOut) {
   showBoardDetail.value = true
 }
 
-/** 跳转到「我的日报/周报」编辑：自己的报告按 id 直接载入；他人仅查看详情 */
+/** 跳转到「我的日报/周报/月报」编辑：自己的报告按 id 直接载入；他人仅查看详情 */
 function editFromBoard(item: ReportBoardItemOut) {
   if (item.teacher_id !== auth.user?.id) return
-  activeTab.value = item.type as 'daily' | 'weekly'
+  activeTab.value = item.type as 'daily' | 'weekly' | 'monthly'
   showBoardDetail.value = false
   loadCurrent(item.id)
 }
 
-const boardTypeLabel = (t: string) => (t === 'daily' ? '日报' : t === 'weekly' ? '周报' : t === 'quarterly' ? '季度总结' : t === 'yearly' ? '年度总结' : '总结')
+const boardTypeLabel = (t: string) => (t === 'daily' ? '日报' : t === 'weekly' ? '周报' : t === 'monthly' ? '月报' : t === 'quarterly' ? '季度总结' : t === 'yearly' ? '年度总结' : '总结')
 
 function dayKeyFromIso(iso: string): string {
   const d = new Date(iso.replace('T', ' '))
@@ -676,6 +764,29 @@ function onDayChange(e: Event) {
   const v = (e.target as HTMLInputElement).value
   if (v) day.value = new Date(v)
 }
+
+// 月导航
+function shiftMonth(n: number) {
+  monthStart.value = new Date(monthStart.value.getFullYear(), monthStart.value.getMonth() + n, 1)
+}
+function toThisMonth() {
+  const now = new Date()
+  monthStart.value = new Date(now.getFullYear(), now.getMonth(), 1)
+}
+function onMonthChange(e: Event) {
+  const v = (e.target as HTMLInputElement).value
+  if (v) {
+    const [y, m] = v.split('-').map(Number)
+    if (y && m) monthStart.value = new Date(y, m - 1, 1)
+  }
+}
+function monthKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+const isCurrentMonth = computed(() => {
+  const now = new Date()
+  return monthStart.value.getFullYear() === now.getFullYear() && monthStart.value.getMonth() === now.getMonth()
+})
 
 const historyVisible = computed(() => history.value.length > 0 || historyTotal.value > 0)
 
@@ -712,7 +823,7 @@ watch(periodStart, () => {
     periodSyncFromPick = false
     return
   }
-  if (activeTab.value === 'daily' || activeTab.value === 'weekly') loadCurrent()
+  if (activeTab.value === 'daily' || activeTab.value === 'weekly' || activeTab.value === 'monthly') loadCurrent()
 })
 onMounted(() => {
   loadBoardCampuses()
@@ -728,7 +839,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="reports-view">
-    <PageHead title="报告·总结" eyebrow="REPORTS" sub="日报周报与季年总结·PPT —— AI 辅助生成，人工审核后提交">
+    <PageHead title="报告·总结" eyebrow="REPORTS" sub="日报 / 周报 / 月报与季年总结·PPT —— AI 辅助生成，人工审核后提交">
       <template #actions>
       <div class="tabs">
         <button
@@ -744,6 +855,13 @@ onBeforeUnmount(() => {
           @click="activeTab = 'weekly'"
         >
           周报
+        </button>
+        <button
+          class="tab-btn"
+          :class="{ active: activeTab === 'monthly' }"
+          @click="activeTab = 'monthly'"
+        >
+          月报
         </button>
         <button
           class="tab-btn"
@@ -770,24 +888,6 @@ onBeforeUnmount(() => {
       </template>
     </PageHead>
 
-    <p v-if="error" class="banner error">{{ error }}</p>
-    <p v-if="notice" class="banner ok">{{ notice }}</p>
-
-    <!-- AI 后台任务条（日报/周报）：提交后可关弹窗/切页面，完成后自动回填 -->
-    <div v-if="aiJobActive || aiJobStatus === 'failed'" class="ai-job-bar" :class="aiJobStatus">
-      <div class="ai-job-main">
-        <span class="ai-job-dot" />
-        <span v-if="aiJobActive">
-          AI 正在后台生成报告草稿，已用时 {{ aiJobElapsed }} 秒（通常 20-60 秒），可继续编辑其他内容…
-        </span>
-        <span v-else>AI 生成失败：{{ aiJobError || '未知错误' }}</span>
-      </div>
-      <div class="ai-job-actions">
-        <button v-if="aiJobStatus === 'failed'" class="btn ghost small" @click="dismissDailyWeeklyAiJob">关闭</button>
-        <button v-else class="btn ghost small" @click="dismissDailyWeeklyAiJob">后台运行中，可忽略</button>
-      </div>
-    </div>
-
     <!-- 公栏：全部教师已发布报告统一展示 -->
     <template v-if="activeTab === 'board'">
       <section class="card control-row">
@@ -811,9 +911,10 @@ onBeforeUnmount(() => {
           <div class="filter-group">
             <label>报告类型</label>
             <select v-model="boardType" class="ctl-input" @change="boardFilterChanged">
-              <option value="">日报+周报</option>
+              <option value="">日报+周报+月报</option>
               <option value="daily">日报</option>
               <option value="weekly">周报</option>
+              <option value="monthly">月报</option>
             </select>
           </div>
           <div class="filter-group">
@@ -858,8 +959,6 @@ onBeforeUnmount(() => {
         </div>
         <p v-if="!boardStatsData" class="hint">暂无统计数据</p>
       </section>
-
-      <p v-if="boardError" class="banner error">{{ boardError }}</p>
 
       <!-- 公栏列表 -->
       <section class="card history-card">
@@ -931,10 +1030,17 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div v-if="boardDetail.type === 'daily'" class="board-fields">
-            <label><span>今日工作</span><div class="readonly-field">{{ (boardDetail.content as any)?.work || '—' }}</div></label>
-            <label><span>授课情况</span><div class="readonly-field">{{ (boardDetail.content as any)?.courses || '—' }}</div></label>
-            <label><span>问题与处理</span><div class="readonly-field">{{ (boardDetail.content as any)?.problems || '—' }}</div></label>
-            <label><span>明日计划</span><div class="readonly-field">{{ (boardDetail.content as any)?.plan || '—' }}</div></label>
+            <label><span>今日工作</span><div class="readonly-field md" v-html="renderMarkdown((boardDetail.content as any)?.work || '—')"></div></label>
+            <label><span>授课情况</span><div class="readonly-field md" v-html="renderMarkdown((boardDetail.content as any)?.courses || '—')"></div></label>
+            <label><span>问题与处理</span><div class="readonly-field md" v-html="renderMarkdown((boardDetail.content as any)?.problems || '—')"></div></label>
+            <label><span>明日计划</span><div class="readonly-field md" v-html="renderMarkdown((boardDetail.content as any)?.plan || '—')"></div></label>
+          </div>
+          <div v-else-if="boardDetail.type === 'monthly'" class="board-fields">
+            <label><span>本月总结</span><div class="readonly-field">{{ (boardDetail.content as any)?.summary || '—' }}</div></label>
+            <label><span>本月亮点</span><div class="readonly-field">{{ (boardDetail.content as any)?.highlights || '—' }}</div></label>
+            <label><span>问题与改进</span><div class="readonly-field">{{ (boardDetail.content as any)?.problems || '—' }}</div></label>
+            <label><span>下月计划</span><div class="readonly-field">{{ (boardDetail.content as any)?.next_plan || '—' }}</div></label>
+            <label><span>数据说明</span><div class="readonly-field">{{ (boardDetail.content as any)?.stats_notes || '—' }}</div></label>
           </div>
           <div v-else class="board-fields">
             <label><span>本周总结</span><div class="readonly-field">{{ (boardDetail.content as any)?.summary || '—' }}</div></label>
@@ -963,13 +1069,27 @@ onBeforeUnmount(() => {
       :initial-tab="activeTab"
     />
 
-    <template v-else-if="activeTab === 'daily' || activeTab === 'weekly'">
+    <template v-else-if="activeTab === 'daily' || activeTab === 'weekly' || activeTab === 'monthly'">
     <section class="card control-row">
       <!-- 日报：日期选择 -->
       <div v-if="activeTab === 'daily'" class="ctl-group">
         <label class="ctl-label">报告日期</label>
         <input type="date" :value="dayKey(day)" class="ctl-input" @input="onDayChange" />
         <button class="btn ghost" @click="day = new Date()">今天</button>
+      </div>
+      <!-- 月报：月份选择 -->
+      <div v-else-if="activeTab === 'monthly'" class="ctl-group">
+        <label class="ctl-label">报告月份</label>
+        <div class="week-nav">
+          <button class="btn ghost" @click="shiftMonth(-1)">‹ 上一月</button>
+          <input type="month" :value="monthKey(monthStart)" class="ctl-input" @input="onMonthChange" />
+          <span class="week-label">
+            {{ monthStart.getFullYear() }}年{{ monthStart.getMonth() + 1 }}月
+            <template v-if="isCurrentMonth">（本月）</template>
+          </span>
+          <button class="btn ghost" @click="shiftMonth(1)">下一月 ›</button>
+          <button class="btn ghost small" @click="toThisMonth">回到本月</button>
+        </div>
       </div>
       <!-- 周报：周导航 -->
       <div v-else class="ctl-group">
@@ -1026,10 +1146,28 @@ onBeforeUnmount(() => {
       <p v-if="!statsLoading && !weeklyStats" class="hint">暂无统计数据</p>
     </section>
 
+    <!-- 月报自动统计卡 -->
+    <section v-if="activeTab === 'monthly'" class="card stats-card">
+      <h3>本月数据自动统计</h3>
+      <div v-if="statsLoading" class="inline-loading">统计中…</div>
+      <div v-else-if="monthlyStats" class="stats-grid">
+        <div class="stat-box"><b>{{ monthlyStats.schedules ?? 0 }}</b><span>本月排课节数</span></div>
+        <div class="stat-box"><b>{{ monthlyStats.attended ?? 0 }}</b><span>上课人次</span></div>
+        <div class="stat-box"><b>{{ monthlyStats.leave ?? 0 }}</b><span>缺课人次</span></div>
+        <div class="stat-box"><b>{{ ((monthlyStats.attendance_rate ?? 0) * 100).toFixed(1) }}%</b><span>出勤率</span></div>
+        <div class="stat-box"><b>{{ monthlyStats.expected_lessons ?? 0 }}</b><span>应消耗课时</span></div>
+        <div class="stat-box"><b>{{ monthlyStats.consumed_lessons ?? 0 }}</b><span>实际消耗课时</span></div>
+        <div class="stat-box"><b>{{ ((monthlyStats.achievement_rate ?? 0) * 100).toFixed(1) }}%</b><span>达标率</span></div>
+        <div class="stat-box"><b>{{ monthlyStats.new_students ?? 0 }}</b><span>新增学员</span></div>
+        <div class="stat-box"><b>{{ monthlyStats.current_students ?? 0 }}</b><span>在读学员</span></div>
+      </div>
+      <p v-if="!statsLoading && !monthlyStats" class="hint">暂无统计数据</p>
+    </section>
+
     <!-- 编辑表单 -->
     <section class="card editor-card">
       <div class="editor-head">
-        <h3>{{ activeTab === 'daily' ? '日报' : '周报' }}内容</h3>
+        <h3>{{ activeTab === 'daily' ? '日报' : activeTab === 'weekly' ? '周报' : '月报' }}内容</h3>
         <div class="status" v-if="report">
           <span class="status-pill" :class="report.status === 'published' ? 'done' : 'draft'">
             {{ report.status === 'published' ? '已提交' : '草稿' }}
@@ -1040,12 +1178,34 @@ onBeforeUnmount(() => {
 
       <label class="field">
         标题
-        <input v-model="form.title" type="text" placeholder="如：8月31日 工作日报 / 第35周 工作周报" maxlength="160" />
+        <input v-model="form.title" type="text" placeholder="如：8月31日 工作日报 / 第35周 工作周报 / 9月 工作月报" maxlength="160" />
       </label>
-      <label v-for="f in fields" :key="f.key" class="field">
-        {{ f.label }}
-        <textarea v-autogrow v-model="form.fields[f.key]" rows="4" :placeholder="f.placeholder"></textarea>
-      </label>
+      <template v-for="f in fields" :key="f.key">
+        <!-- 日报授课情况：纯表格展示（AI 按当日课后反馈自动整理），无需手填文本框 -->
+        <div v-if="activeTab === 'daily' && f.key === 'courses'" class="field">
+          <span class="field-label">{{ f.label }}</span>
+          <div
+            v-if="(form.fields[f.key] ?? '').trim()"
+            class="md-preview"
+            v-html="renderMarkdown(form.fields[f.key])"
+          />
+          <p v-else class="hint">授课情况由 AI 草稿根据当日课后反馈自动整理为表格，无需手填</p>
+          <button class="btn ghost small courses-src-toggle" type="button" @click="showCoursesSrc = !showCoursesSrc">
+            {{ showCoursesSrc ? '收起表格原文' : '编辑表格原文' }}
+          </button>
+          <textarea
+            v-if="showCoursesSrc"
+            v-autogrow
+            v-model="form.fields[f.key]"
+            rows="4"
+            placeholder="表格 Markdown 原文（一般无需手改）"
+          ></textarea>
+        </div>
+        <label v-else class="field">
+          {{ f.label }}
+          <textarea v-autogrow v-model="form.fields[f.key]" rows="4" :placeholder="f.placeholder"></textarea>
+        </label>
+      </template>
 
       <div class="actions">
         <button class="btn ghost" @click="save" :disabled="saving || loading">
@@ -1128,7 +1288,7 @@ onBeforeUnmount(() => {
           补充说明（可选）
           <textarea v-autogrow v-model="aiNote" rows="3" placeholder="想强调的重点、遗漏事项等…"></textarea>
         </label>
-        <p v-if="aiError" class="banner error">{{ aiError }}</p>
+        <p v-if="aiError" class="ai-inline-error">{{ aiError }}</p>
         <div class="modal-actions">
           <button class="btn ghost" @click="showAiModal = false">取消</button>
           <button class="btn primary" @click="generateAI" :disabled="aiJobActive">
@@ -1147,6 +1307,15 @@ onBeforeUnmount(() => {
       confirm-text="知道了"
       @confirm="showAiDone = false"
       @cancel="showAiDone = false"
+    />
+    <!-- 撤回重新编辑确认 -->
+    <ConfirmDialog
+      :visible="showUnpublish"
+      title="撤回重新编辑？"
+      message="确认撤回该报告为草稿？撤回后可重新编辑并再次提交。"
+      confirm-text="撤回"
+      @confirm="doUnpublish"
+      @cancel="showUnpublish = false"
     />
     <PromptTemplateManager
       :visible="showTplManage"
@@ -1346,6 +1515,58 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
   line-height: 1.6;
 }
+/* Markdown 渲染（日报授课情况表格等）：v-html 内容用 :deep 穿透 */
+.readonly-field.md {
+  white-space: normal;
+}
+.md-preview {
+  margin-top: 8px;
+  background: #f8fafc;
+  border: 1px dashed var(--line);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.6;
+  overflow-x: auto;
+}
+.readonly-field.md :deep(p),
+.md-preview :deep(p) {
+  margin: 4px 0;
+}
+.readonly-field.md :deep(.md-table),
+.md-preview :deep(.md-table) {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12.5px;
+  width: 100%;
+}
+.readonly-field.md :deep(.md-table th),
+.readonly-field.md :deep(.md-table td),
+.md-preview :deep(.md-table th),
+.md-preview :deep(.md-table td) {
+  border: 1px solid var(--line);
+  padding: 6px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+.readonly-field.md :deep(.md-table th),
+.md-preview :deep(.md-table th) {
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+  font-weight: 700;
+}
+.readonly-field.md :deep(.md-table tr:nth-child(even) td),
+.md-preview :deep(.md-table tr:nth-child(even) td) {
+  background: #fff;
+}
+.readonly-field.md :deep(ul),
+.readonly-field.md :deep(ol),
+.md-preview :deep(ul),
+.md-preview :deep(ol) {
+  margin: 6px 0;
+  padding-left: 20px;
+}
 .board-modal {
   width: 640px;
   max-width: calc(100vw - 40px);
@@ -1382,21 +1603,15 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.banner {
+/* AI 弹窗内的行内错误（toast 兜底，弹窗内也可见） */
+.ai-inline-error {
   padding: 10px 14px;
   border-radius: 10px;
   font-size: 13px;
   margin: 0 0 14px;
-}
-.banner.error {
   background: var(--danger-soft);
   color: var(--danger);
   border: 1px solid #fecaca;
-}
-.banner.ok {
-  background: var(--success-soft);
-  color: var(--success);
-  border: 1px solid #a7f3d0;
 }
 
 .stats-card h3,
@@ -1491,6 +1706,12 @@ onBeforeUnmount(() => {
 }
 .field textarea {
   resize: vertical;
+}
+.field-label {
+  display: block;
+}
+.courses-src-toggle {
+  margin-top: 8px;
 }
 
 .actions {
@@ -1673,55 +1894,6 @@ onBeforeUnmount(() => {
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-/* —— AI 后台任务条（与 SummaryView 一致） —— */
-.ai-job-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  font-size: 13px;
-  margin: 0 0 14px;
-  background: #eef2ff;
-  border: 1px solid #c7d2fe;
-  color: #4338ca;
-}
-.ai-job-bar.failed {
-  background: var(--danger-soft);
-  border-color: #fecaca;
-  color: var(--danger);
-}
-.ai-job-bar.hidden {
-  display: none;
-}
-.ai-job-main {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.ai-job-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #6366f1;
-  animation: ai-pulse 1.2s ease-in-out infinite;
-  flex-shrink: 0;
-}
-.ai-job-bar.failed .ai-job-dot {
-  background: var(--danger);
-  animation: none;
-}
-@keyframes ai-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.8); }
-}
-.ai-job-actions {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
 }
 
 @media (max-width: 900px) {

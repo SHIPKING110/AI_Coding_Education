@@ -29,6 +29,8 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import PlaceholderBar from '@/components/PlaceholderBar.vue'
+import { FEEDBACK_PLACEHOLDERS } from '@/components/placeholders'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import { addDays, dayKey, fmtDateTimeFromIso, mondayOf, toLocalNaiveIso } from '@/utils/date'
 
@@ -142,6 +144,8 @@ const tplError = ref('')
 const tplNotice = ref('')
 const tplForm = ref({ name: '', content: '' })
 const tplEditing = ref<PromptTemplateOut | null>(null)
+const tplExpanded = ref('')
+const tplContentRef = ref<HTMLTextAreaElement | null>(null)
 
 const auth = useAuthStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
@@ -474,6 +478,7 @@ function openTplModal() {
   tplEditing.value = null
   tplForm.value = { name: '', content: '' }
   tplNotice.value = ''
+  tplExpanded.value = ''
   loadTplTemplates()
   showTplModal.value = true
 }
@@ -494,14 +499,38 @@ async function saveTpl() {
     tplNotice.value = '请填写模板名称和内容'
     return
   }
+  if (!/\{\s*\w+\s*\}/.test(tplForm.value.content)) {
+    tplNotice.value = '模板正文需要至少包含一个 {占位符}（如 {student_name}），否则生成时无法带入课堂数据'
+    return
+  }
   tplLoading.value = true
   tplNotice.value = ''
   try {
     if (tplEditing.value) {
-      await updatePromptTemplate(tplEditing.value.id, {
-        name: tplForm.value.name.trim(),
-        content: tplForm.value.content.trim(),
-      })
+      try {
+        await updatePromptTemplate(tplEditing.value.id, {
+          name: tplForm.value.name.trim(),
+          content: tplForm.value.content.trim(),
+        })
+      } catch (e: any) {
+        // 非管理员编辑系统/全校模板被 403：自动降级为新建个人副本
+        if (e?.response?.status === 403 && tplEditing.value.scope !== 'personal') {
+          const copy = await createPromptTemplate({
+            name:
+              tplForm.value.name.trim() === tplEditing.value.name
+                ? `${tplForm.value.name.trim()}（我的副本）`
+                : tplForm.value.name.trim(),
+            content: tplForm.value.content.trim(),
+            scene: 'feedback',
+          })
+          tplNotice.value = `原模板仅管理员可改，已为你另存为「${copy.name}」个人副本并可直接选用`
+          await loadTplTemplates()
+          tplEditing.value = copy
+          tplForm.value = { name: copy.name, content: copy.content }
+          return
+        }
+        throw e
+      }
     } else {
       await createPromptTemplate({
         name: tplForm.value.name.trim(),
@@ -1254,11 +1283,14 @@ onBeforeUnmount(() => {
                     <div class="tpl-item-name">
                       {{ t.name }}
                       <span class="tpl-owner" v-if="t.owner_name && key !== 'system'">{{ t.owner_name }}</span>
+                      <button class="tpl-expand" type="button" @click="tplExpanded = tplExpanded === t.id ? '' : t.id">
+                        {{ tplExpanded === t.id ? '收起 ▲' : '查看全文 ▼' }}
+                      </button>
                     </div>
-                    <div class="tpl-item-content">{{ t.content }}</div>
+                    <div class="tpl-item-content" :class="{ clamp: tplExpanded !== t.id }">{{ t.content }}</div>
                   </div>
                   <div class="tpl-item-ops">
-                    <button v-if="tplCanEdit(t)" class="tpl-btn" @click="editTpl(t)">编辑</button>
+                    <button class="tpl-btn" title="系统/全校模板非管理员保存时自动存为个人副本" @click="editTpl(t)">编辑</button>
                     <button v-if="isAdmin && key === 'personal'" class="tpl-btn" @click="publishTpl(t)">发布</button>
                     <button v-if="isAdmin && key === 'published'" class="tpl-btn" @click="unpublishTpl(t)">撤回</button>
                     <button v-if="tplCanEdit(t) && key !== 'system'" class="tpl-btn danger" @click="removeTpl(t)" title="系统模板不可删除，仅可编辑">删除</button>
@@ -1278,7 +1310,19 @@ onBeforeUnmount(() => {
             </label>
             <label>
               模板内容
-              <textarea v-autogrow v-model="tplForm.content" rows="7" placeholder="撰写提示词，可用占位符：{student_name} {class_name} {subject} {topic} {content} {performance} {homework} {evaluation}"></textarea>
+              <PlaceholderBar
+                :placeholders="FEEDBACK_PLACEHOLDERS"
+                :content="tplForm.content"
+                :textarea-ref="tplContentRef"
+                @insert="tplForm.content = $event"
+              />
+              <textarea
+                ref="tplContentRef"
+                v-autogrow
+                v-model="tplForm.content"
+                rows="7"
+                placeholder="先写要求，再用占位符告诉 AI 把哪些课堂数据填进哪里"
+              ></textarea>
             </label>
             <p v-if="tplNotice" class="error-banner">{{ tplNotice }}</p>
             <div class="modal-actions">
@@ -2199,10 +2243,21 @@ h1 {
   margin-top: 3px;
   white-space: pre-wrap;
   word-break: break-all;
+}
+.tpl-item-content.clamp {
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.tpl-expand {
+  margin-left: 8px;
+  border: none;
+  background: none;
+  color: var(--brand-strong);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
 }
 .tpl-item-ops {
   display: flex;

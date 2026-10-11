@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-ReportTypeLit = Literal["daily", "weekly", "quarterly", "yearly"]
+ReportTypeLit = Literal["daily", "weekly", "monthly", "quarterly", "yearly"]
 
 
 class ReportCreate(BaseModel):
@@ -185,6 +185,10 @@ class ReportAiDraftIn(BaseModel):
     )
     template_id: uuid.UUID | None = Field(
         default=None, description="所选提示词模板 id（报告类系统预设/个人模板），其内容作为写作风格要求"
+    )
+    content: dict | None = Field(
+        default=None,
+        description="编辑器当前表单快照（未保存也可随任务提交）；AI 改写以此为准，缺省则用已保存内容",
     )
 
 

@@ -25,6 +25,21 @@ FEEDBACK_PLACEHOLDERS = (
     "homework",
 )
 
+# 报告模板可用占位符（风格要求文本内的 {key} 在生成前替换；未知键原样保留）
+REPORT_PLACEHOLDERS = (
+    "teacher_name",
+    "campus",
+    "period",
+    "report_type",
+)
+
+# 学员评估模板可用占位符（同上，随风格要求文本一起生效）
+EVALUATION_PLACEHOLDERS = (
+    "student_name",
+    "period",
+    "teacher_name",
+)
+
 
 class LLMConfigError(RuntimeError):
     """LLM 未配置或调用失败，携带对用户友好的中文消息。"""
@@ -309,15 +324,63 @@ def generate_report_summary(
     material: str,
     extra_note: str | None = None,
     style_note: str | None = None,
+    draft_mode: str = "stats",
+    user_text: str | None = None,
+    source_blocks: list[str] | None = None,
 ) -> dict[str, Any]:
-    """按报告类型生成日报/周报草稿（结构化 JSON）。
+    """按报告类型生成日报/周报/月报草稿（结构化 JSON）。
 
-    基于当日/本周素材（排课/考勤/反馈摘要）生成，人工编辑后保存。
-    未配置 LLM 时抛 LLMConfigError；调用失败时也抛 LLMConfigError。
+    draft_mode 决定 grounding 方式（统计由公栏自动展示，正文不再复述裸数字）：
+    - stats（默认，兼容旧调用）：按 material 统计生成；
+    - daily_user（日报）：work/problems/plan 基于教师已填内容改写扩写，
+      courses 严格按 source_blocks（当日授课明细）逐条整理；
+    - weekly_dailies（周报）：summary/highlights/problems 综合 source_blocks
+      （本周已发布日报），next_plan 润色教师输入；
+    - monthly_rollup（月报）：summary/highlights/problems 综合 source_blocks
+      （本月日报/周报摘要），stats_notes 分析统计。
+    未填的项写「（教师未填写）」，绝不编造。
     """
     _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI 草稿")
 
-    if report_type == "daily":
+    blocks = "\n".join(source_blocks or [])
+    no_number_rule = "统计数字由公栏自动展示，正文不要复述裸统计数字，只做定性综合与分析；"
+
+    if report_type == "daily" and draft_mode == "daily_user":
+        schema_hint = (
+            '{"title": "如：8月31日 工作日报", "work": "今日工作内容", '
+            '"courses": "今日授课情况", "problems": "遇到的问题与处理", "plan": "明日计划"}'
+        )
+        instruction = (
+            "你是少儿编程培训机构的教务助手，正在帮教师完善今日工作日报。"
+            "【今日工作/问题与处理/明日计划】三项必须基于教师已填内容改写扩写"
+            "（保留原意、理顺条理、补充可执行细节）；教师没填的项写「（教师未填写）」，绝不编造。"
+            "【授课情况】严格按下方的【当日授课明细】整理为 Markdown 表格输出："
+            "表头固定为 | 时间 | 班级 | 科目 | 课题 | 到课/缺课 | 反馈情况 |，"
+            "每节课一行；明细里没有的信息不要脑补，没有授课则 courses 只写「今日无授课」。"
+        )
+    elif report_type == "weekly" and draft_mode == "weekly_dailies":
+        schema_hint = (
+            '{"title": "如：第35周 工作周报", "summary": "本周工作总结", '
+            '"highlights": "本周亮点", "problems": "问题与改进", "next_plan": "下周计划"}'
+        )
+        instruction = (
+            "你是少儿编程培训机构的教务助手，正在帮教师撰写工作周报。"
+            "【本周总结/本周亮点/问题与改进】必须综合下方的【本周日报】提炼（串联事件、指出趋势与根因），"
+            "不要只复述统计；" + no_number_rule +
+            "【下周计划】基于教师已填内容润色（明确优先级与可检查事项）；教师没填则写「（请先填写下周计划要点）」。"
+        )
+    elif report_type == "monthly" or draft_mode == "monthly_rollup":
+        schema_hint = (
+            '{"title": "如：9月 工作月报", "summary": "本月工作总结", '
+            '"highlights": "本月亮点", "problems": "问题与改进", "next_plan": "下月计划", '
+            '"stats_notes": "结合统计数据的教学情况说明"}'
+        )
+        instruction = (
+            "你是少儿编程培训机构的教务助手，正在帮教师撰写工作月报。"
+            "【本月总结/亮点/问题与改进/下月计划】综合下方的【本月日报与周报摘要】提炼，"
+            "突出月度趋势与关键事件；【数据说明】结合统计做定性分析；" + no_number_rule
+        )
+    elif report_type == "daily":
         schema_hint = (
             '{"title": "如：8月31日 工作日报", "work": "今日工作内容", '
             '"courses": "今日授课情况", "problems": "遇到的问题与处理", "plan": "明日计划"}'
@@ -343,6 +406,8 @@ def generate_report_summary(
         f"只返回一个 JSON 对象，不要多余文字，结构如下：\n"
         f"{schema_hint}\n\n"
         f"素材信息：\n{material}\n"
+        + (f"\n教师已填内容（改写扩写基准）：\n{user_text}\n" if user_text else "")
+        + (f"\n{blocks}\n" if blocks else "")
         + (f"\n教师补充说明：{extra_note}\n" if extra_note else "")
         + (f"\n写作风格要求（来自所选提示词模板）：\n{style_note}\n" if style_note else "")
     )
@@ -382,6 +447,16 @@ def generate_period_summary(
             "problems 指出跨季度反复出现的问题并给改进方向，"
             "next_plan 给出下年度可执行计划，stats_notes 用年度聚合数据说话。"
             "禁止空话套话，每段都要有季度事实或数据支撑。"
+        )
+    elif report_type == "quarterly":
+        instruction = (
+            "你是少儿编程培训机构的教务助手，请综合以下本季度 3 个月的月报"
+            "（每月含总结/亮点/问题/下月计划），撰写一份季度工作总结草稿。"
+            "要求：综合提炼而非简单拼接，点名写出 3 个月之间的变化与差异；"
+            "summary 概括季度走势，highlights 只写有月报依据的成绩，"
+            "problems 指出反复出现的问题并给改进方向，next_plan 给出下季度可执行计划，"
+            "stats_notes 结合季度统计做定性分析（统计数字由公栏自动展示，正文不复述裸数字）。"
+            "若某月缺少月报（下方已注明回退为周报口径），以实际素材为准，绝不编造缺失月份的内容。"
         )
     else:
         instruction = (

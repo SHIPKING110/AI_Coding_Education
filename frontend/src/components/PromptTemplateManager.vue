@@ -5,6 +5,9 @@
  */
 import { computed, nextTick, ref, watch } from 'vue'
 
+import PlaceholderBar from '@/components/PlaceholderBar.vue'
+import { EVALUATION_PLACEHOLDERS, FEEDBACK_PLACEHOLDERS, REPORT_PLACEHOLDERS, type PlaceholderDef } from '@/components/placeholders'
+
 import {
   createPromptTemplate,
   deletePromptTemplate,
@@ -20,10 +23,46 @@ const props = defineProps<{ visible: boolean; scene: 'feedback' | 'report' | 'ev
 const emit = defineEmits<{ (e: 'close'): void; (e: 'changed'): void }>()
 
 const SCENE_HINT: Record<string, string> = {
-  feedback: '模板用于 AI 生成课堂评价，可用占位符：{student_name} {class_name} {subject} {topic} {content} {performance} {homework} {evaluation}。',
-  report: '日报 / 周报 / 季度总结 / 年度总结共用此模板库，下方可用“类型筛选”快速定位对应预设；所选模板内容会作为写作风格要求叠加到 AI 生成中。',
-  evaluation: '模板用于 AI 生成学员评估，所选模板内容会作为写作风格要求叠加到生成中。',
+  feedback: '模板用于 AI 生成课堂评价，正文里的 {占位符} 会在生成时替换为真实课堂数据。',
+  report: '日报 / 周报 / 季度总结 / 年度总结共用此模板库，下方可用“类型筛选”快速定位对应预设；模板内容作为写作风格要求使用，{teacher_name} 等占位符会在生成时替换。',
+  evaluation: '模板用于 AI 生成学员评估，内容作为写作风格要求使用，{student_name} 等占位符会在生成时替换；学员信息由后端自动拼接素材带入。',
 }
+
+/** 各场景可用占位符（键 → 中文解释）。
+ * 只有 feedback 场景走后端 fill_template 真实替换；report / evaluation 模板作为写作风格
+ * 要求原文使用，无替换逻辑——不提供插入，避免误导。两类“输出结构字段”见 OUTPUT_FIELDS。 */
+const SCENE_PLACEHOLDERS: Record<string, PlaceholderDef[]> = {
+  feedback: FEEDBACK_PLACEHOLDERS,
+  report: REPORT_PLACEHOLDERS,
+  evaluation: EVALUATION_PLACEHOLDERS,
+}
+/** 输出结构字段说明（非占位符、不可插入）：系统模板里 work / summary / subjects 这类词是
+ * 要求 AI 输出 JSON 的固定字段名，改写模板时必须保留，否则后端解析不到内容。
+ * {teacher_name} 这类大括号占位符才是可引用的变量，生成时替换为真实数据。 */
+const OUTPUT_FIELDS: Record<string, { key: string; desc: string }[]> = {
+  report: [
+    { key: 'work', desc: '日报：今日整体工作（2-3 句，先结果后过程）' },
+    { key: 'courses', desc: '日报：分课程/班级授课情况' },
+    { key: 'problems', desc: '日报/周报：遇到的问题及处理，没有写「无」' },
+    { key: 'plan', desc: '日报：明日计划（具体到班级与事项）' },
+    { key: 'summary', desc: '周报：本周工作概括（关键数字须来自素材）' },
+    { key: 'highlights', desc: '周报：2-3 个亮点，需具体事例支撑' },
+    { key: 'next_plan', desc: '周报：下周计划（分条、明确优先级）' },
+    { key: 'title', desc: '报告标题' },
+  ],
+  evaluation: [
+    { key: 'summary', desc: '一段话总述本季度整体成长' },
+    { key: 'subjects', desc: '分科目评价（level 1-5 打分须与描述一致）' },
+    { key: 'progress', desc: '2-4 条进步点，用「；」分隔' },
+    { key: 'to_improve', desc: '待提升项，用「；」分隔' },
+    { key: 'suggestions', desc: '给家长的可操作建议，用「；」分隔' },
+    { key: 'title', desc: '评估标题' },
+  ],
+}
+const scenePlaceholders = computed(() => SCENE_PLACEHOLDERS[props.scene] ?? [])
+const outputFields = computed(() => OUTPUT_FIELDS[props.scene] ?? [])
+const showFieldLegend = ref(false)
+const contentRef = ref<HTMLTextAreaElement | null>(null)
 
 const auth = useAuthStore()
 const isAdmin = computed(() => auth.user?.role === 'admin')
@@ -142,6 +181,10 @@ async function save() {
     formError.value = '请填写模板内容'
     return
   }
+  if (props.scene === 'feedback' && !/\{\s*\w+\s*\}/.test(content)) {
+    formError.value = '反馈模板正文需要至少包含一个 {占位符}（如 {student_name}），否则生成时无法带入课堂数据；若只想定风格，可去报告/评估场景建模板'
+    return
+  }
   saving.value = true
   try {
     if (editing.value) {
@@ -231,6 +274,17 @@ function scopeTag(t: PromptTemplateOut) {
         <template v-if="isAdmin">管理员可将模板「发布」给全校教师使用。</template>
         <template v-else>发布需管理员操作。</template>
       </p>
+      <div v-if="outputFields.length" class="field-legend">
+        <button type="button" class="field-legend-toggle" @click="showFieldLegend = !showFieldLegend">
+          {{ showFieldLegend ? '收起 ▲' : '展开 ▼' }} 系统模板里的 work / summary / subjects 是什么？（非占位符，不可插入）
+        </button>
+        <div v-if="showFieldLegend" class="field-legend-body">
+          <p>它们是要求 AI 输出 JSON 的<strong>固定字段名</strong>，不是 {占位符}，不能插入引用；自己改写模板时必须保留这些字段名，否则后端解析不到对应内容。</p>
+          <div class="field-tags">
+            <span v-for="f in outputFields" :key="f.key" class="field-tag" :title="f.desc">{{ f.key }} · {{ f.desc }}</span>
+          </div>
+        </div>
+      </div>
       <div v-if="scene === 'report' && kindOptions.length > 2" class="tpl-kinds">
         <button
           v-for="k in kindOptions"
@@ -288,7 +342,19 @@ function scopeTag(t: PromptTemplateOut) {
         </label>
         <label class="tpl-field">
           <span>模板正文</span>
-          <textarea v-model="formContent" rows="6" placeholder="模板正文（反馈场景可用 {student_name} 等占位符）" />
+          <PlaceholderBar
+            v-if="scenePlaceholders.length"
+            :placeholders="scenePlaceholders"
+            :content="formContent"
+            :textarea-ref="contentRef"
+            @insert="formContent = $event"
+          />
+          <textarea
+            ref="contentRef"
+            v-model="formContent"
+            rows="6"
+            placeholder="模板正文（反馈场景可用 {student_name} 等占位符）"
+          />
         </label>
         <p v-if="formNotice" class="tpl-notice">{{ formNotice }}</p>
         <p v-if="formError" class="tpl-error">{{ formError }}</p>
@@ -587,6 +653,46 @@ function scopeTag(t: PromptTemplateOut) {
   padding: 8px 10px;
   font-size: 13px;
   font-family: inherit;
+}
+/* 占位符插入条样式见 PlaceholderBar 组件；输出字段说明 */
+.field-legend {
+  margin: 0 0 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  padding: 8px 12px;
+}
+.field-legend-toggle {
+  border: none;
+  background: none;
+  color: var(--brand-strong);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+}
+.field-legend-body {
+  font-size: 12.5px;
+  color: var(--ink-2);
+  line-height: 1.7;
+  margin-top: 8px;
+}
+.field-legend-body p {
+  margin: 0 0 8px;
+}
+.field-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.field-tag {
+  font-size: 11.5px;
+  font-weight: 600;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  border-radius: 999px;
+  padding: 2px 10px;
 }
 .tpl-form-ops {
   display: flex;

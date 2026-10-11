@@ -102,18 +102,23 @@ def delete(db: Session, t: PromptTemplate) -> None:
 # 命名用【报告/反馈/评估】前缀 + scene 字段双保险，便于前端按场景分组展示；
 # 幂等 ensure，已改名/改内容的不覆盖。
 # 占位说明：反馈类模板可用 {student_name} {class_name} {subject} {topic} {content}
-# {performance} {homework} {evaluation}；报告/评估类由后端按类型拼接素材。
+# {performance} {homework} {evaluation}；报告类可用 {teacher_name} {campus} {period}
+# {report_type}；评估类可用 {student_name} {period} {teacher_name}；报告/评估的
+# work/summary/subjects 等是 AI 输出 JSON 的固定字段名（须保留，不可插入）。
 SYSTEM_PRESETS: tuple[tuple[str, str, str], ...] = (
     (
         "【报告·日报】简洁条理型",
         "report",
         "你是少儿编程培训机构的教务助手，正在帮教师撰写今日工作日报。"
-        "写作要求：\n"
-        "1. work：用 2-3 句话概括今日整体工作，先说结果再说过程；\n"
-        "2. courses：分课程/班级简述授课情况，点名表现突出或需要关注的学员（引用课堂真实细节）；\n"
-        "3. problems：如实记录今日遇到的问题及处理方式，没有则写「无」——绝不编造；\n"
-        "4. plan：明日计划具体到班级与事项，可执行、可检查。\n"
-        "文风简洁干练、条理清晰。用户已写内容优先保留原意并润色，不要编造未发生的事实。",
+        "内容口径（与生成逻辑一致）：\n"
+        "1. work 今日工作：基于教师已填内容润色整理，保留原意、理顺条理；\n"
+        "2. courses 授课情况：按当日授课明细整理为 Markdown 表格输出，"
+        "表头为 时间｜班级｜科目｜课题｜到课/缺课｜反馈情况，"
+        "明细没有的信息不脑补，今日无授课则写「今日无授课」；\n"
+        "3. problems 问题与处理：基于教师已填内容润色，没有则写「无」——绝不编造；\n"
+        "4. plan 明日计划：基于教师已填内容润色为可执行、可检查的事项。\n"
+        "教师没填的项写「（教师未填写）」。文风简洁干练、条理清晰。"
+        "占位符：教师 {teacher_name}｜校区 {campus}｜日期 {period}｜类型 {report_type}。",
     ),
     (
         "【报告·周报】数据驱动型",
@@ -125,6 +130,18 @@ SYSTEM_PRESETS: tuple[tuple[str, str, str], ...] = (
         "3. problems：客观指出 1-2 个问题，分析到根因（如出勤波动、续费预警学员），并给出改进动作；\n"
         "4. next_plan：下周计划分条列出，明确优先级。\n"
         "文风务实、数据驱动。用户已写内容优先保留原意并润色，不要编造未发生的事实。",
+    ),
+    (
+        "【报告·月报】承上启下型",
+        "report",
+        "你是少儿编程培训机构的教务助手，正在帮教师撰写本月工作月报。"
+        "写作要求：\n"
+        "1. summary：综合本月日报与周报，概括月度整体工作与趋势变化；\n"
+        "2. highlights：2-3 个本月亮点，每个都要有日报/周报中的具体事例支撑；\n"
+        "3. problems：指出本月反复出现的问题并给改进方向；\n"
+        "4. next_plan：下月计划分条列出，明确优先级。\n"
+        "文风务实、承上启下。占位符：教师 {teacher_name}｜校区 {campus}｜"
+        "周期 {period}｜类型 {report_type}。不要编造日报周报之外的事实。",
     ),
     (
         "【报告·季度总结】复盘成长型",
@@ -240,5 +257,24 @@ def ensure_system_presets(db: Session) -> int:
     ).all()
     for t in renamed:
         t.name = "【报告·季度总结】复盘成长型"
+    # 内容升级：日报系统模板改为“润色口径 + 授课情况 Markdown 表格”。
+    # 仅当内容仍是旧版原文（用户未自定义改过）时才覆盖，避免丢弃教师的手改。
+    for name, _scene, content in SYSTEM_PRESETS:
+        if name != "【报告·日报】简洁条理型":
+            continue
+        olds = db.scalars(
+            select(PromptTemplate).where(
+                PromptTemplate.scope == PromptScope.SYSTEM.value,
+                PromptTemplate.name == name,
+            )
+        ).all()
+        for t in olds:
+            old = t.content or ""
+            if (
+                old.startswith("你是少儿编程培训机构的教务助手")
+                and "work" in old
+                and "Markdown 表格" not in old
+            ):
+                t.content = content
     db.commit()
     return added
