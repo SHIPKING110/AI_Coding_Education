@@ -282,8 +282,23 @@ const navItems = computed(() =>
     }
     if ((item as { adminOnly?: boolean }).adminOnly && auth.user?.role !== 'admin') return false
     return true
+  }).sort((a, b) => {
+    // 个性化设置的模块排序：nav_order 存 to 数组，未收录的沉底保持原相对顺序
+    const order = navOrderMap.value
+    const ia = order.get(a.to)
+    const ib = order.get(b.to)
+    if (ia === undefined && ib === undefined) return 0
+    if (ia === undefined) return 1
+    if (ib === undefined) return -1
+    return ia - ib
   }),
 )
+
+/** 侧边栏排序（个性化设置 → 模块上下排序，全局生效）：订阅 theme.navOrder，保存后即时重排 */
+const navOrderMap = computed(() => new Map(theme.navOrder.map((t, i) => [t, i])))
+onMounted(() => {
+  if (!theme.loaded) void theme.load()
+})
 </script>
 
 <template>

@@ -8,6 +8,7 @@ import { useRouter } from 'vue-router'
 
 import PaginationBar from '@/components/PaginationBar.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import PromptTemplateManager from '@/components/PromptTemplateManager.vue'
 import PptBuilderDrawer from './PptBuilderDrawer.vue'
 import {
   createAiDraftJob,
@@ -32,6 +33,7 @@ import {
   type ReportOut,
 } from '@/api/report'
 import { useAuthStore } from '@/stores/auth'
+import { listPromptTemplates, type PromptTemplateOut } from '@/api/prompt'
 import { dayKeyFromIso, parseServerTime } from '@/utils/date'
 
 echarts.use([LineChart, BarChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
@@ -127,8 +129,12 @@ const historyOffset = ref(0)
 const historyLimit = 10
 
 const showAiModal = ref(false)
+const showTplManage = ref(false)
 const aiNote = ref('')
 const aiError = ref('')
+// 提示词模板（报告类系统预设 + 个人模板）：所选模板内容作为写作风格要求
+const aiTemplates = ref<PromptTemplateOut[]>([])
+const aiTemplateId = ref('')
 const aiQuarters = ref<ReportOut[]>([])
 const aiQuartersLoading = ref(false)
 const aiQuarterIds = ref<string[]>([])
@@ -179,7 +185,8 @@ function persistAiJob() {
 
 /** 回填 AI 草稿到表单（任务成功后调用，与原来同步逻辑一致） */
 function applyAiDraft(draft: { title?: string | null; content?: Record<string, string | null> }) {
-  if (draft.title) form.value.title = draft.title
+  // 标题统一格式（日期/周期 + 类型 + 教师名），不直接采用 AI 自拟标题
+  form.value.title = defaultSummaryTitle()
   const c = draft.content ?? {}
   for (const f of fields.value) {
     const v = c[f.key]
@@ -200,9 +207,11 @@ async function pollAiJob() {
       // 仅当任务对应的报告仍是当前编辑器中的报告时才回填，避免切周期后串稿
       if (report.value && report.value.id === aiJobReportId.value) {
         applyAiDraft({ title: st.title, content: st.content ?? {} })
-        showNotice('AI 总结草稿已生成，请编辑后保存')
+        showAiDone.value = true
+        aiDoneMsg.value = 'AI 总结草稿已生成，已自动回填到编辑器，请检查编辑后保存。'
       } else {
-        showNotice('AI 总结草稿已生成，请在历史记录中打开对应报告查看（已回填到该报告的编辑器需重新打开）')
+        showAiDone.value = true
+        aiDoneMsg.value = 'AI 总结草稿已生成，请在历史记录中打开对应报告查看（已回填到该报告的编辑器需重新打开）。'
       }
       clearAiJobState()
     } else if (st.status === 'failed') {
@@ -235,10 +244,25 @@ async function submitAiJob() {
     return
   }
   aiError.value = ''
+  // AI 生成门禁：季度由后端按“有无已发布月报/周报”校验；年度已选季度总结时放行，
+  // 否则沿用正文+统计口径（避免空内容浪费 token）
+  if (activeTab.value !== 'quarterly' && !(activeTab.value === 'yearly' && aiQuarterIds.value.length > 0)) {
+    const reason = summaryEmptyReason()
+    if (reason) {
+      aiError.value = 'AI 生成需要实质内容：正文为空且期间统计全零，请先填写总结内容或确认周期内有数据后再生成（避免浪费 token 生成无意义内容）'
+      return
+    }
+  }
   try {
+    // 附带编辑器当前表单快照：写了没保存也能被 AI 读到并润色
+    const snapshot = Object.fromEntries(
+      fields.value.map((f) => [f.key, (form.value.fields[f.key] ?? '').trim()]),
+    )
     const job = await createAiDraftJob(report.value.id, {
       extra_note: aiNote.value || null,
       ...(activeTab.value === 'yearly' ? { source_quarter_ids: aiQuarterIds.value } : {}),
+      template_id: aiTemplateId.value || null,
+      content: snapshot,
     })
     aiJobId.value = job.job_id
     aiJobReportId.value = report.value.id
@@ -247,7 +271,6 @@ async function submitAiJob() {
     aiJobStatus.value = 'pending'
     persistAiJob()
     showAiModal.value = false
-    document.querySelector('.summary-view .ai-job-bar')?.classList.remove('hidden')
     showNotice('AI 正在后台生成（约 20-60 秒），可继续编辑，完成后自动回填')
     startAiPoll()
   } catch (e: any) {
@@ -570,9 +593,14 @@ async function loadHistory() {
 
 /** 删除报告（本人或管理员/教务）：确认后调用后端并刷新历史/公栏 */
 const deletingId = ref('')
-async function removeReport(r: { id: string; title?: string | null }) {
-  const name = r.title?.trim() || '该报告'
-  if (!window.confirm(`确认删除「${name}」？删除后不可恢复（含已生成 PPT）。`)) return
+const pendingDelete = ref<{ id: string; title?: string | null } | null>(null)
+function removeReport(r: { id: string; title?: string | null }) {
+  pendingDelete.value = r
+}
+async function doDeleteReport() {
+  const r = pendingDelete.value
+  pendingDelete.value = null
+  if (!r) return
   deletingId.value = r.id
   try {
     await deleteReport(r.id)
@@ -659,9 +687,14 @@ async function publish() {
   }
 }
 
+const showUnpublish = ref(false)
 async function unpublish() {
   if (!report.value) return
-  if (!window.confirm('确认撤回该总结为草稿？撤回后可重新编辑并生成 PPT。')) return
+  showUnpublish.value = true
+}
+async function doUnpublish() {
+  if (!report.value) return
+  showUnpublish.value = false
   try {
     report.value = await unpublishReport(report.value.id)
     showNotice('已撤回为草稿')
@@ -686,7 +719,7 @@ function summaryEmptyReason(): string {
   if (activeTab.value === 'yearly') {
     return '年度总结暂无实质内容：正文为空、统计全零且未选用已发布季度总结，请先勾选季度总结生成 AI 年总结并保存后再生成 PPT'
   }
-  return '总结暂无实质内容：正文为空且期间统计全零，请先完善总结内容或确认周期内有排课/周报数据后再生成 PPT'
+  return '总结暂无实质内容：正文为空且期间统计全零，请先完善总结内容或确认周期内有排课/月报/周报数据后再生成 PPT'
 }
 
 const pptBlockedReason = computed(() => summaryEmptyReason())
@@ -797,6 +830,10 @@ async function confirmGenPpt() {
 const showPptResult = ref(false)
 const pptResult = ref<{ ok: boolean; message: string } | null>(null)
 
+/** AI 草稿生成成功弹窗（替代顶部横幅/toast，避免用户注意不到） */
+const showAiDone = ref(false)
+const aiDoneMsg = ref('')
+
 /** 结果弹窗确认：成功时直接打开下载/预览，失败时关闭 */
 function confirmPptResult() {
   showPptResult.value = false
@@ -805,7 +842,7 @@ function confirmPptResult() {
   }
 }
 
-function openAI() {
+async function openAI() {
   if (!report.value) {
     showError('请先保存草稿，再生成 AI 总结')
     return
@@ -814,9 +851,23 @@ function openAI() {
   aiError.value = ''
   aiQuarterIds.value = []
   aiQuarters.value = []
+  await loadAiTemplates()
   showAiModal.value = true
   if (activeTab.value === 'yearly') {
     loadAiQuarters()
+  }
+}
+
+/** 加载报告类提示词模板，默认选中当前总结类型对应的系统预设（模板管理弹窗变更后复用刷新） */
+async function loadAiTemplates() {
+  try {
+    const all = await listPromptTemplates('report')
+    aiTemplates.value = all
+    const want = activeTab.value === 'quarterly' ? '【报告·季度总结】' : '【报告·年度总结】'
+    aiTemplateId.value = aiTemplates.value.find((t) => t.name.startsWith(want))?.id ?? aiTemplates.value[0]?.id ?? ''
+  } catch {
+    aiTemplates.value = []
+    aiTemplateId.value = ''
   }
 }
 
@@ -861,15 +912,6 @@ function selectAllAiQuarters() {
 
 function clearAiQuarters() {
   aiQuarterIds.value = []
-}
-
-/** 关闭任务条显示（失败态则清除任务；运行态仅隐藏，轮询继续结果照常回填） */
-function dismissAiJob() {
-  if (aiJobStatus.value === 'failed') {
-    clearAiJobState()
-    return
-  }
-  document.querySelector('.summary-view .ai-job-bar')?.classList.add('hidden')
 }
 
 function toggleAiQuarter(id: string) {
@@ -983,21 +1025,6 @@ onBeforeUnmount(() => {
           <button class="toast-close" @click="dismissToast(t.id)" title="关闭">×</button>
         </div>
       </TransitionGroup>
-    </div>
-
-    <!-- AI 后台任务条：提交后可关弹窗/切页面，完成后自动回填 -->
-    <div v-if="aiJobActive || aiJobStatus === 'failed'" class="ai-job-bar" :class="aiJobStatus">
-      <div class="ai-job-main">
-        <span class="ai-job-dot" />
-        <span v-if="aiJobActive">
-          AI 正在后台生成总结草稿，已用时 {{ aiJobElapsed }} 秒（通常 20-60 秒），可继续编辑其他内容…
-        </span>
-        <span v-else>AI 生成失败：{{ aiJobError || '未知错误' }}</span>
-      </div>
-      <div class="ai-job-actions">
-        <button v-if="aiJobStatus === 'failed'" class="btn ghost small" @click="dismissAiJob">关闭</button>
-        <button v-else class="btn ghost small" @click="dismissAiJob">后台运行中，可忽略</button>
-      </div>
     </div>
 
     <section class="card control-row">
@@ -1252,6 +1279,18 @@ onBeforeUnmount(() => {
             本年度暂无已发布季度总结，将回退为周报口径生成，建议先完善各季度总结。
           </p>
         </div>
+        <label v-if="aiTemplates.length" class="ai-tpl-label">
+          提示词模板（日报 / 周报 / 季度 / 年度共用库）
+          <span class="ai-tpl-row">
+            <select v-model="aiTemplateId">
+              <option v-for="t in aiTemplates" :key="t.id" :value="t.id">
+                {{ t.name }}{{ t.scope === 'system' ? '（系统）' : t.scope === 'published' ? '（全校）' : '（我的）' }}
+              </option>
+            </select>
+            <button class="tpl-manage-btn" type="button" @click="showTplManage = true" title="新建 / 编辑总结模板（含季度·年度预设）">⚙ 管理模板</button>
+          </span>
+        </label>
+        <button v-else class="tpl-manage-btn" type="button" @click="showTplManage = true">⚙ 管理总结模板（季度 / 年度预设在此）</button>
         <label>
           补充说明（可选）
           <textarea v-autogrow v-model="aiNote" rows="3" placeholder="想强调的重点、遗漏事项等…" />
@@ -1312,6 +1351,16 @@ onBeforeUnmount(() => {
       @cancel="showPptResult = false"
     />
 
+    <!-- AI 草稿生成成功弹窗 -->
+    <ConfirmDialog
+      :visible="showAiDone"
+      title="AI 草稿已生成"
+      :message="aiDoneMsg"
+      confirm-text="知道了"
+      @confirm="showAiDone = false"
+      @cancel="showAiDone = false"
+    />
+
     <!-- 新建草稿二次确认：编辑器有未保存改动时提示 -->
     <ConfirmDialog
       :visible="showNewDraftConfirm"
@@ -1323,6 +1372,27 @@ onBeforeUnmount(() => {
       @cancel="showNewDraftConfirm = false"
     />
 
+    <!-- 撤回重新编辑确认 -->
+    <ConfirmDialog
+      :visible="showUnpublish"
+      title="撤回重新编辑？"
+      message="确认撤回该总结为草稿？撤回后可重新编辑并生成 PPT。"
+      confirm-text="撤回"
+      @confirm="doUnpublish"
+      @cancel="showUnpublish = false"
+    />
+
+    <!-- 删除报告确认 -->
+    <ConfirmDialog
+      :visible="pendingDelete !== null"
+      title="删除报告？"
+      :message="`确认删除「${(pendingDelete?.title ?? '').trim() || '该报告'}」？删除后不可恢复（含已生成 PPT）。`"
+      confirm-text="删除"
+      danger
+      @confirm="doDeleteReport"
+      @cancel="pendingDelete = null"
+    />
+
     <!-- 对话式 PPT 定制抽屉：大纲 → 文案 → 排版 → 导出 -->
     <PptBuilderDrawer
       :visible="showPptBuilder"
@@ -1331,6 +1401,13 @@ onBeforeUnmount(() => {
       :period-label="fmtRange(periodStart, periodEnd)"
       @close="showPptBuilder = false"
       @built="onPptBuilt"
+    />
+    <PromptTemplateManager
+      :visible="showTplManage"
+      scene="report"
+      title="总结提示词模板管理"
+      @close="showTplManage = false"
+      @changed="loadAiTemplates"
     />
   </div>
 </template>
@@ -1796,6 +1873,38 @@ onBeforeUnmount(() => {
   font-weight: 600;
   cursor: pointer;
   padding: 0 2px;
+}
+.ai-tpl-label {
+  display: block;
+}
+.ai-tpl-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.ai-tpl-row select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.tpl-manage-btn {
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tpl-manage-btn:hover {
+  filter: brightness(1.06);
 }
 .link-btn:hover {
   text-decoration: underline;

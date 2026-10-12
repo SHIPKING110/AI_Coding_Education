@@ -6,7 +6,7 @@ import json
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -533,6 +533,7 @@ class ConversationChatIn(BaseModel):
     message: str = ""
     state: dict = {}
     use_rag: bool | None = Field(default=None, description="单条消息临时切换 RAG；缺省跟随会话开关")
+    config_id: str | None = Field(default=None, description="Agent工作台切换模型：指定配置ID")
 
 
 @router.post("/conversations/{conv_id}/chat")
@@ -551,8 +552,14 @@ def conversation_chat(
         raise HTTPException(status_code=404, detail="会话不存在")
     if agent_registry.get_agent(conv.agent_id) is None:
         raise HTTPException(status_code=404, detail="Agent 不存在")
-    if not llm.is_llm_configured():
-        raise HTTPException(status_code=503, detail="未配置 LLM_API_KEY")
+    from app.services import llm_context as _llm_ctx
+
+    try:
+        resolved = _llm_ctx.resolve_override(db, user.id, "agent", body.config_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except llm.LLMConfigError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
 
     state = body.state or {}
     message = body.message or ""
@@ -583,9 +590,11 @@ def conversation_chat(
             # 寒暄类消息跳过检索：省一次向量化，首字更快
             if rag_service.needs_retrieval(message.strip()):
                 collected = knowledge_crud.collected_doc_ids(db, user_id=user.id)
-                hits = rag_service.retrieve(
-                    message.strip(), db=db, owner_id=user.id, collected_ids=collected
-                )
+                # 压入教师个人配置：检索向量化走自配 embedding 模型
+                with _llm_ctx.use_llm(resolved):
+                    hits = rag_service.retrieve(
+                        message.strip(), db=db, owner_id=user.id, collected_ids=collected
+                    )
             if hits:
                 citations = {"hits": hits}
                 lines = [
@@ -628,7 +637,8 @@ def conversation_chat(
     def event_stream():
         # 最外层兜底：任何未预期异常都必须以 error 帧结束，绝不能让前端无限卡"接收中"
         try:
-            yield from _run_stream()
+            with _llm_ctx.use_llm(resolved):
+                yield from _run_stream()
         except Exception as e:  # noqa: BLE001
             try:
                 yield _frame({"error": llm.friendly_llm_error(e)})
@@ -654,12 +664,14 @@ def conversation_chat(
             box: queue.Queue = queue.Queue()
 
             def _produce():
-                try:
-                    for chunk in llm.stream_text(system, prompt):
-                        box.put(("delta", chunk))
-                    box.put(("end", None))
-                except Exception as e:  # noqa: BLE001
-                    box.put(("error", e))
+                # 线程不继承 contextvar，在此重新压入教师个人配置
+                with _llm_ctx.use_llm(resolved):
+                    try:
+                        for chunk in llm.stream_text(system, prompt):
+                            box.put(("delta", chunk))
+                        box.put(("end", None))
+                    except Exception as e:  # noqa: BLE001
+                        box.put(("error", e))
 
             t0 = _time.monotonic()
             threading.Thread(target=_produce, daemon=True).start()

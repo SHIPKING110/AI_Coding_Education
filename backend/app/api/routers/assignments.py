@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import get_current_user, require_roles
+from app.api.deps import get_current_user, require_roles, require_teacher_permission
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.crud import assignment as assignment_crud
@@ -163,7 +163,7 @@ def _normalize_ai_questions(items: object) -> list[dict]:
 def ai_generate(
     payload: AiGenerateIn,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*ASSIGN_ROLES)),
+    user: User = Depends(require_teacher_permission("assignment_ai")),
 ) -> AiTaskOut:
     """AI 出题（FR-AI-01 / FR-AI-04），异步任务：
 
@@ -174,11 +174,8 @@ def ai_generate(
     `GET /assignments/ai-tasks/{id}` 获取 进度阶段/结果，期间可切换其他页面。
     未配置 LLM 时 400 降级提示。
     """
-    if not llm.is_llm_configured():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="未配置 LLM_API_KEY，暂时无法使用 AI 出题",
-        )
+    from app.services import llm_context as _llm_ctx
+    llm_resolved = _llm_ctx.require_llm(db, user_id=user.id, module="assignment")
     if payload.mode == "similar":
         if not (payload.source_question or "").strip():
             raise HTTPException(
@@ -195,7 +192,7 @@ def ai_generate(
         owner_id=str(user.id),
         kind="generate",
         summary=summary,
-        runner=lambda: _normalize_ai_questions(llm.generate_questions(
+        runner=lambda: _normalize_ai_questions(_llm_ctx.run_with(llm_resolved, llm.generate_questions,
             mode=payload.mode,
             count=payload.count,
             difficulty=payload.difficulty,
@@ -212,14 +209,11 @@ def ai_generate(
 def ai_refine(
     payload: AiRefineIn,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*ASSIGN_ROLES)),
+    user: User = Depends(require_teacher_permission("assignment_ai")),
 ) -> AiTaskOut:
     """对话优化单题（FR-AI-05），异步任务：按教师修改要求重新生成题目。"""
-    if not llm.is_llm_configured():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="未配置 LLM_API_KEY，暂时无法使用 AI 优化",
-        )
+    from app.services import llm_context as _llm_ctx
+    llm_resolved = _llm_ctx.require_llm(db, user_id=user.id, module="assignment")
     task = ai_tasks.create_task(
         owner_id=str(user.id),
         kind="refine",
@@ -232,7 +226,7 @@ def ai_refine(
             )
             + "）"
         ),
-        runner=lambda: llm.refine_question(
+        runner=lambda: _llm_ctx.run_with(llm_resolved, llm.refine_question,
             question=payload.question.model_dump(),
             instruction=payload.instruction,
         ),
@@ -533,7 +527,7 @@ def list_assignments(
 def create_assignment(
     payload: AssignmentCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*ASSIGN_ROLES)),
+    user: User = Depends(require_teacher_permission("assignment_create")),
 ) -> AssignmentOut:
     """新建作业（草稿）：标题 + 说明 + 题目列表（可选班级/截止时间）。"""
     assignment = assignment_crud.create(

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, func
+from sqlalchemy import DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -37,6 +37,8 @@ class SystemSetting(Base):
     login_hero: Mapped[str] = mapped_column(String(128), default="排课 · 考勤 · 课时 · 反馈，一站式教务")
     sidebar_sub: Mapped[str] = mapped_column(String(64), default="Child Code Studio")
     sidebar_theme: Mapped[str] = mapped_column(String(16), default="navy")
+    # 侧边栏模块排序：navKey 数组 JSON，空表示默认顺序
+    nav_order: Mapped[str] = mapped_column(Text, default="[]")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

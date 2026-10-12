@@ -52,9 +52,9 @@ def list_orders(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("order_visible")),
+    _: User = Depends(require_teacher_permission("finance_revenue")),
 ) -> PageOut[OrderOut]:
-    """订单列表（分页，可按状态/姓名/校区/课包/时间区间筛选）。教师需 order_visible 权限（默认关闭）。"""
+    """订单列表（分页，可按状态/姓名/校区/课包/时间区间筛选）。教师需 finance_revenue 权限（订单管理并入创收统计，不再单独设键）。"""
     order_crud.expire_stale_orders(db)
     start = datetime.fromisoformat(date_from) if date_from else None
     end = datetime.fromisoformat(date_to) if date_to else None
@@ -89,7 +89,7 @@ def list_orders(
 def get_order(
     order_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("order_visible")),
+    _: User = Depends(require_teacher_permission("finance_revenue")),
 ) -> OrderOut:
     order = order_crud.get(db, order_id)
     if order is None:
@@ -101,7 +101,7 @@ def get_order(
 def confirm_order(
     order_id: uuid.UUID,
     db: Session = Depends(get_db),
-    operator: User = Depends(require_teacher_permission("order_visible")),
+    operator: User = Depends(require_teacher_permission("finance_revenue")),
 ) -> OrderOut:
     """确认到账：课时入账 + 流水 + 通知家长（模拟支付 OQ-06）。"""
     order = order_crud.get(db, order_id)
@@ -127,7 +127,7 @@ def confirm_order(
 def cancel_order(
     order_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("order_visible")),
+    _: User = Depends(require_teacher_permission("finance_revenue")),
 ) -> OrderOut:
     """取消订单（管理员：待支付/已支付可取消；已到账不可取消）。"""
     order = order_crud.get(db, order_id)

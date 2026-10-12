@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.enrollment import Class, Student, StudentClass, StudentStatus
+from app.models.feedback import Feedback, FeedbackStatus
 from app.models.report import Report, ReportStatus, ReportType
 from app.models.schedule import Attendance, AttendanceStatus, Schedule, ScheduleStatus
 from app.models.user import Role, User, UserStatus
@@ -479,6 +480,148 @@ def collect_daily_material(
             }
         )
     return {"courses": courses}
+
+
+def collect_daily_lesson_material(
+    db: Session, *, teacher_id: uuid.UUID, day: datetime
+) -> list[dict]:
+    """日报「授课情况」素材：当日已完成排课逐条明细。
+
+    每条含时间段、班级、科目、到课/缺课人数、课题（取自课后反馈去重合并）、
+    已发送反馈数。未上课/无考勤的课程 attended 为 0，topics 为空。
+    """
+    from sqlalchemy.orm import selectinload
+
+    s_start, s_end = _day_start(day), _day_end(day)
+    scheds = list(
+        db.scalars(
+            select(Schedule)
+            .options(selectinload(Schedule.schedule_class))
+            .where(
+                Schedule.teacher_id == teacher_id,
+                Schedule.status == ScheduleStatus.COMPLETED.value,
+                Schedule.start_time >= s_start,
+                Schedule.start_time <= s_end,
+            )
+            .order_by(Schedule.start_time)
+        ).unique().all()
+    )
+    lessons: list[dict] = []
+    for s in scheds:
+        sids = [s.id]
+        attended = (
+            db.scalar(
+                select(func.count()).where(
+                    Attendance.schedule_id.in_(sids),
+                    Attendance.status == AttendanceStatus.ATTENDED.value,
+                )
+            )
+            or 0
+        )
+        leave = (
+            db.scalar(
+                select(func.count()).where(
+                    Attendance.schedule_id.in_(sids),
+                    Attendance.status == AttendanceStatus.LEAVE.value,
+                )
+            )
+            or 0
+        )
+        topics = [
+            r[0]
+            for r in db.execute(
+                select(Feedback.topic).where(Feedback.schedule_id.in_(sids)).distinct()
+            ).all()
+            if r[0] and str(r[0]).strip()
+        ]
+        feedback_done = (
+            db.scalar(
+                select(func.count()).where(
+                    Feedback.schedule_id.in_(sids),
+                    Feedback.status == FeedbackStatus.PUBLISHED.value,
+                )
+            )
+            or 0
+        )
+        cls = s.schedule_class
+        lessons.append(
+            {
+                "time": f"{s.start_time.strftime('%H:%M')}-{s.end_time.strftime('%H:%M')}"
+                if s.end_time
+                else s.start_time.strftime("%H:%M"),
+                "class_name": cls.name if cls else "",
+                "subject": cls.subject if cls else "",
+                "attended": attended,
+                "leave": leave,
+                "topics": topics,
+                "feedback_done": feedback_done,
+            }
+        )
+    return lessons
+
+
+def list_published_reports(
+    db: Session, *, type: str, teacher_id: uuid.UUID, start: datetime, end: datetime
+) -> list[Report]:
+    """周期内已发布报告（按 period_start 落入区间），供上层报告综合引用。"""
+    s_start, s_end = _day_start(start), _day_end(end)
+    return list(
+        db.scalars(
+            select(Report)
+            .where(
+                Report.type == type,
+                Report.teacher_id == teacher_id,
+                Report.status == ReportStatus.PUBLISHED.value,
+                Report.period_start >= s_start,
+                Report.period_start <= s_end,
+            )
+            .order_by(Report.period_start)
+        ).all()
+    )
+
+
+def collect_monthly_material(
+    db: Session, *, teacher_id: uuid.UUID, start: datetime, end: datetime
+) -> dict:
+    """月报 AI 素材：聚合统计 + 本月已发布日报摘要 + 本月已发布周报摘要。"""
+    stats = compute_period_stats(db, teacher_id=teacher_id, start=start, end=end)
+    dailies = list_published_reports(
+        db, type=ReportType.DAILY.value, teacher_id=teacher_id, start=start, end=end
+    )
+    weeklies = list_published_reports(
+        db, type=ReportType.WEEKLY.value, teacher_id=teacher_id, start=start, end=end
+    )
+    return {
+        "stats": stats,
+        "dailies": [
+            {
+                "day": d.period_start.strftime("%m-%d"),
+                "work": (d.content or {}).get("work"),
+                "problems": (d.content or {}).get("problems"),
+                "plan": (d.content or {}).get("plan"),
+            }
+            for d in dailies
+        ],
+        "weeklies": [
+            {
+                "week": f"{w.period_start.strftime('%m-%d')}~{w.period_end.strftime('%m-%d')}",
+                "summary": (w.content or {}).get("summary"),
+                "highlights": (w.content or {}).get("highlights"),
+                "problems": (w.content or {}).get("problems"),
+            }
+            for w in weeklies
+        ],
+    }
+
+
+def month_bounds(year: int, month: int) -> tuple[datetime, datetime]:
+    """自然月起止（naive，北京语义由调用方按既有约定处理）。"""
+    start = datetime(year, month, 1)
+    if month == 12:
+        end = datetime(year + 1, 1, 1) - timedelta(seconds=1)
+    else:
+        end = datetime(year, month + 1, 1) - timedelta(seconds=1)
+    return start, end
 
 
 def compute_period_stats(

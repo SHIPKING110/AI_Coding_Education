@@ -51,6 +51,7 @@ def create_user(
     phone: str | None = None,
     campus: str | None = None,
     title: str | None = None,
+    gender: str | None = None,
 ) -> User:
     user = User(
         role=role.value,
@@ -60,6 +61,7 @@ def create_user(
         phone=phone,
         campus=campus,
         title=(title or None),
+        gender=(gender or None),
         status=UserStatus.ACTIVE,
     )
     db.add(user)

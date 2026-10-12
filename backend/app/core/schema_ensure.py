@@ -26,21 +26,8 @@ def _col_type(engine: Engine, table: str, col: str) -> str:
 def ensure_business_schema(engine: Engine) -> None:
     from app.core.database import Base
 
-    # 新表（已存在的跳过）
-    Base.metadata.create_all(
-        engine,
-        tables=[
-            Base.metadata.tables["campuses"],
-            Base.metadata.tables["subjects"],
-            Base.metadata.tables["revenue_ledger"],
-            Base.metadata.tables["finance_settings"],
-            Base.metadata.tables["teacher_levels"],
-            Base.metadata.tables["commission_rules"],
-            Base.metadata.tables["payroll_entries"],
-            Base.metadata.tables["invitations"],
-        ],
-        checkfirst=True,
-    )
+    # 全量建表（已存在的跳过；按外键拓扑排序，空库也不会因建表顺序报错）
+    Base.metadata.create_all(engine, checkfirst=True)
 
     stmts: list[str] = []
 
@@ -67,6 +54,7 @@ def ensure_business_schema(engine: Engine) -> None:
     addcol("lesson_records", "unit_price NUMERIC(10,4)", "unit_price")
     addcol("lesson_records", "amount NUMERIC(10,2)", "amount")
     # 体验域：学员体验标记/生源 + 邀约记录 + 排课/考勤体验标记
+    addcol("students", "gender VARCHAR(8) DEFAULT ''", "gender")
     addcol("students", "trial_status VARCHAR(16) DEFAULT 'none'", "trial_status")
     addcol("students", "source VARCHAR(16) DEFAULT 'normal'", "source")
     addcol("students", "referrer VARCHAR(64)", "referrer")

@@ -110,7 +110,7 @@ def update_package(
     package_id: uuid.UUID,
     payload: LessonPackageUpdate,
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("package_create", staff_allowed=False)),
+    _: User = Depends(require_teacher_permission("package_edit", staff_allowed=False)),
 ) -> LessonPackageOut:
     package = lesson_crud.get_package(db, package_id)
     if package is None:

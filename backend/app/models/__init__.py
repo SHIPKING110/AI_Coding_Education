@@ -37,6 +37,7 @@ from app.models.enrollment import (
 from app.models.evaluation import ClassPpt, Evaluation, EvaluationStatus
 from app.models.feedback import Feedback, FeedbackStatus
 from app.models.knowledge import KnowledgeCollection, KnowledgeDocument
+from app.models.llm_config import TeacherLLMConfig, TeacherModuleModel
 from app.models.notification import Notification, NotificationType
 from app.models.prompt import PromptScope, PromptTemplate
 from app.models.report import Report, ReportStatus, ReportType
@@ -76,6 +77,8 @@ __all__ = [
     "PromptTemplate",
     "Question",
     "QuestionType",
+    "TeacherLLMConfig",
+    "TeacherModuleModel",
     "Report",
     "ReportStatus",
     "ReportType",

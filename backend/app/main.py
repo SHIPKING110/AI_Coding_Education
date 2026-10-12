@@ -5,10 +5,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import api_router
 from app.core.config import get_settings
+from app.services.llm import LLMConfigError
 
 settings = get_settings()
 
@@ -82,3 +84,8 @@ app.mount("/uploads", StaticFiles(directory=str(_upload_dir)), name="uploads")
 @app.get(f"{settings.API_PREFIX}/health", tags=["system"])
 def health() -> dict:
     return {"status": "ok", "app": settings.APP_NAME, "version": settings.APP_VERSION}
+
+
+@app.exception_handler(LLMConfigError)
+async def _friendly_llm_errors(request: Request, exc: LLMConfigError):
+    return JSONResponse(status_code=400, content={'detail': str(exc)})

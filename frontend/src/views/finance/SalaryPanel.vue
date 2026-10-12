@@ -53,6 +53,17 @@ async function load(auto = true) {
   loading.value = true
   error.value = ''
   try {
+    // 先自动核算（数据更新即重算，跳过手工锁定），再拉取总览，保证列表总额是最新的
+    if (auto) {
+      try {
+        const r = await autoComputePayroll(month.value)
+        if (r.computed > 0) {
+          flash(`已自动核算 ${r.computed} 人${r.skipped ? `，跳过手工锁定 ${r.skipped} 人` : ''}`)
+        }
+      } catch {
+        /* 自动核算失败不阻塞展示 */
+      }
+    }
     const [wb, pr, ps, cs] = await Promise.all([
       getWorkbench(month.value),
       listPayroll(month.value).catch(() => ({ items: [] })),
@@ -64,19 +75,6 @@ async function load(auto = true) {
     entries.value = (pr as { items: Record<string, unknown>[] }).items || []
     titles.value = (ps as { name: string }[]).map((p) => p.name).filter(Boolean)
     campuses.value = ((cs as { name: string }[]) || []).map((c) => c.name).filter(Boolean)
-    // 数据更新自动核算：手工锁定过的不覆盖
-    if (auto) {
-      try {
-        const r = await autoComputePayroll(month.value)
-        if (r.computed > 0 || r.skipped > 0) {
-          const pr2 = await listPayroll(month.value).catch(() => ({ items: [] }))
-          entries.value = (pr2 as { items: Record<string, unknown>[] }).items || []
-          flash(`已自动核算 ${r.computed} 人${r.skipped ? `，跳过手工锁定 ${r.skipped} 人` : ''}`)
-        }
-      } catch {
-        /* 自动核算失败不阻塞展示 */
-      }
-    }
   } catch {
     error.value = '加载教务工作台失败'
   } finally {
@@ -119,6 +117,26 @@ const maxTotal = computed(() =>
 )
 
 const entryOf = (uid: string) => entries.value.find((e) => e.user_id === uid) as Record<string, any> | undefined
+
+// 明细弹窗：结构化分解（金额 + 占比），供可视化展示
+const detailRows = computed(() => {
+  const e = target.value ? entryOf(target.value.user_id) : undefined
+  if (!e) return []
+  return DETAIL_ROWS.map((row) => {
+    const count = row.countKey ? Number(e[row.countKey] || 0) : 0
+    const amount = row.bonusKey ? Number(e[row.bonusKey] || 0) : 0
+    const unitPrice = row.ruleKey ? Number(rules.value[row.ruleKey] || 0) : 0
+    return { ...row, count, amount, unitPrice, hasBonus: !!row.bonusKey, active: amount !== 0 || count !== 0 }
+  }).filter((r) => r.active)
+})
+
+const detailGross = computed(() => {
+  const e = target.value ? entryOf(target.value.user_id) : undefined
+  if (!e) return 0
+  return Number(target.value?.base_salary || 0) + detailRows.value.reduce((s, r) => s + r.amount, 0)
+})
+
+const detailMax = computed(() => detailRows.value.reduce((m, r) => Math.max(m, r.amount), 0))
 
 // 明细溯源
 const evidenceKind = ref('')
@@ -362,39 +380,82 @@ onMounted(load)
       <PaginationBar :total="filtered.length" :page="page" :page-size="pageSize" @update:page="(p) => (page = p)" />
     </section>
 
-    <!-- 薪资明细弹窗（只读溯源 + 锁定/重算） -->
+    <!-- 薪资明细弹窗（可视化分解 + 锁定/重算） -->
     <div v-if="showCompute && target" class="overlay" @click.self="showCompute = false">
       <div class="modal wide">
-        <h2>薪资明细 · {{ target.name }} · {{ month }}
-          <span v-if="entryOf(target.user_id)" class="lock-tag" :class="{ auto: entryOf(target.user_id)?.auto !== false }">
-            {{ entryOf(target.user_id)?.auto !== false ? '自动核算' : '手工锁定' }}
-          </span>
-        </h2>
-        <p class="muted-sm">基本工资 ¥{{ money(target.base_salary) }}（个人设置优先，其次职务工资）＋以下提成按单价自动计算 · 每项可点「溯源」查看具体名单</p>
-        <div v-if="!entryOf(target.user_id)" class="empty-tip">本月暂无核算记录（数据更新时会自动核算）</div>
-        <div v-else class="detail-list">
-          <div v-for="row in DETAIL_ROWS" :key="row.key" class="detail-row">
-            <div class="detail-main">
-              <strong>{{ row.label }}</strong>
-              <span class="detail-nums">
-                <template v-if="row.countKey">{{ entryOf(target.user_id)?.[row.countKey] ?? 0 }}{{ row.unit }}</template>
-                <template v-if="row.countKey && row.bonusKey"> × ¥{{ money(rules[row.ruleKey]) }} = </template>
-                <template v-if="row.bonusKey">¥{{ money(entryOf(target.user_id)?.[row.bonusKey]) }}</template>
-              </span>
-              <button class="link-btn" @click="toggleEvidence(row.kind)">
-                {{ evidenceKind === row.kind ? '收起溯源' : '溯源' }}
-              </button>
+        <div class="detail-head">
+          <div class="detail-head-main">
+            <span class="staff-avatar lg">{{ (target.name || '?').slice(0, 1) }}</span>
+            <div>
+              <div class="detail-name">{{ target.name }}
+                <span class="pill" :class="target.role === 'staff' ? 'campus' : 'title-pill'">{{ roleLabel(target.role) }}</span>
+                <span v-if="target.level" class="lvl">{{ target.level }}</span>
+              </div>
+              <div class="muted-sm">{{ month }} · {{ target.campus || '—' }}{{ target.title ? ` · ${target.title}` : '' }}</div>
             </div>
-            <div v-if="evidenceKind === row.kind" class="evidence">
-              <div v-if="evidenceLoading" class="muted-sm">加载明细…</div>
-              <div v-else-if="evidenceItems.length === 0" class="muted-sm">暂无明细</div>
-              <div v-else v-for="it in evidenceItems" :key="it.id" class="evidence-line">
-                {{ evidenceLine(it, row.kind) }}
+          </div>
+          <span v-if="entryOf(target.user_id)" class="lock-tag" :class="{ auto: entryOf(target.user_id)?.auto !== false }">
+            {{ entryOf(target.user_id)?.auto !== false ? '自动核算' : '已锁定' }}
+          </span>
+        </div>
+
+        <div v-if="!entryOf(target.user_id)" class="empty-tip">本月暂无核算记录（数据变化时会自动核算）</div>
+
+        <template v-else>
+          <!-- 应发总额 -->
+          <div class="gross-card">
+            <div class="gross-item base">
+              <span>基本工资</span>
+              <strong>¥{{ money(target.base_salary) }}</strong>
+            </div>
+            <span class="gross-plus">＋</span>
+            <div class="gross-item perf">
+              <span>绩效提成</span>
+              <strong>¥{{ money(detailRows.reduce((s, r) => s + r.amount, 0)) }}</strong>
+            </div>
+            <span class="gross-plus">＝</span>
+            <div class="gross-item total">
+              <span>应发合计</span>
+              <strong>¥{{ money(detailGross) }}</strong>
+            </div>
+          </div>
+
+          <!-- 绩效构成可视化 -->
+          <div class="breakdown">
+            <div v-if="detailRows.length === 0" class="muted-sm" style="padding:8px 0">本月无绩效提成（仅基本工资）</div>
+            <div v-for="row in detailRows" :key="row.key" class="bk-row">
+              <div class="bk-line">
+                <div class="bk-label">
+                  <strong>{{ row.label }}</strong>
+                  <span class="bk-calc">
+                    <template v-if="row.countKey">{{ row.count }}{{ row.unit }}</template>
+                    <template v-if="row.countKey && row.hasBonus"> × ¥{{ money(row.unitPrice) }}</template>
+                    <template v-if="!row.hasBonus"> · 已计入课时绩效</template>
+                  </span>
+                </div>
+                <div class="bk-right">
+                  <span v-if="row.hasBonus" class="bk-amt">¥{{ money(row.amount) }}</span>
+                  <button class="link-btn" @click="toggleEvidence(row.kind)">
+                    {{ evidenceKind === row.kind ? '收起溯源' : '查看溯源' }}
+                  </button>
+                </div>
+              </div>
+              <div v-if="row.hasBonus" class="bk-bar"><div class="bk-fill" :style="{ width: `${detailMax > 0 ? (row.amount / detailMax) * 100 : 0}%` }" /></div>
+              <div v-if="evidenceKind === row.kind" class="evidence">
+                <div v-if="evidenceLoading" class="muted-sm">加载明细…</div>
+                <div v-else-if="evidenceItems.length === 0" class="muted-sm">暂无明细</div>
+                <div v-else v-for="it in evidenceItems" :key="it.id" class="evidence-line">
+                  {{ evidenceLine(it, row.kind) }}
+                </div>
               </div>
             </div>
           </div>
-          <div class="detail-total">应发合计 <strong>¥{{ money(entryOf(target.user_id)?.total) }}</strong></div>
-        </div>
+
+          <div v-if="Number(target.overdraft_commission || 0) > 0" class="od-note">
+            含欠费课时绩效 ¥{{ money(target.overdraft_commission) }}（学员未缴费部分，存在回收风险）
+          </div>
+        </template>
+
         <div v-if="result" class="result-card">
           <strong>已更新，应发合计 ¥{{ money(result.total) }}</strong>
         </div>
@@ -477,9 +538,33 @@ tr.done td:first-child { border-left: 3px solid #10b981; }
 .pill.campus { background: var(--brand-soft); color: var(--brand-strong); }
 .pill.title-pill { background: #fef3c7; color: #92400e; }
 .lock-mini { font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--surface-alt); color: var(--ink-3); }
-.modal.wide { width: 640px; }
+.modal.wide { width: 680px; }
 .lock-tag { font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 999px; background: var(--surface-alt); color: var(--ink-3); margin-left: 8px; vertical-align: middle; }
 .lock-tag.auto { background: #e2f5ea; color: #0e9f6e; }
+
+/* 明细弹窗（重设计） */
+.detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.detail-head-main { display: flex; align-items: center; gap: 12px; }
+.detail-name { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 800; }
+.detail-name .lvl { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: #eef2ff; color: #4338ca; }
+.staff-avatar.lg { width: 48px; height: 48px; font-size: 19px; }
+.gross-card { display: flex; align-items: stretch; gap: 10px; margin: 16px 0; padding: 14px 16px; border-radius: 14px; background: linear-gradient(135deg, var(--brand-soft), var(--surface) 70%); border: 1px solid var(--brand); }
+.gross-item { flex: 1; display: flex; flex-direction: column; gap: 5px; }
+.gross-item span { font-size: 12px; color: var(--ink-3); }
+.gross-item strong { font-size: 19px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.gross-item.total { text-align: right; }
+.gross-item.total strong { font-size: 24px; color: var(--brand-strong); }
+.gross-plus { display: flex; align-items: center; color: var(--brand); font-size: 18px; font-weight: 700; }
+.breakdown { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+.bk-row { display: flex; flex-direction: column; gap: 6px; }
+.bk-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13.5px; }
+.bk-label { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.bk-calc { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.bk-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.bk-amt { font-weight: 800; color: var(--ink); font-variant-numeric: tabular-nums; }
+.bk-bar { height: 6px; border-radius: 999px; background: var(--surface-alt); overflow: hidden; }
+.bk-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #6366f1, #06b6d4); transition: width 0.4s ease; }
+.od-note { margin-top: 14px; padding: 10px 12px; border-radius: 10px; background: #fde4e4; color: #b91c1c; font-size: 12.5px; }
 .detail-list { display: flex; flex-direction: column; margin-top: 10px; }
 .detail-row { padding: 10px 2px; border-bottom: 1px solid var(--line); }
 .detail-row:last-of-type { border-bottom: none; }

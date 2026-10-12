@@ -168,7 +168,7 @@ export interface ToolTraceStep {
 /** 统一流式对话：SSE，回调 delta；onPhase 回调阶段；onDone 回调完成帧（含 stage/options/工具轨迹） */
 export async function agentChatStream(
   convId: string,
-  payload: { stage: string; message: string; state: Record<string, unknown>; use_rag?: boolean },
+  payload: { stage: string; message: string; state: Record<string, unknown>; use_rag?: boolean; config_id?: string | null },
   onDelta: (text: string) => void,
   signal?: AbortSignal,
   onPhase?: (phase: AgentPhase) => void,

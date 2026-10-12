@@ -20,6 +20,7 @@ export interface StudentOut {
   id: string
   name: string
   phone: string | null
+  gender?: string
   campus: string | null
   parent_user_id: string | null
   student_user_id: string | null
@@ -42,6 +43,7 @@ export interface StudentOut {
 export interface StudentCreate {
   name: string
   phone?: string | null
+  gender?: string | null
   campus?: string | null
   parent_user_id?: string | null
   student_user_id?: string | null

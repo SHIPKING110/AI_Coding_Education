@@ -44,6 +44,8 @@ class PromptTemplate(Base):
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True
     )
+    # 使用场景：feedback 课后反馈评价 / report 报告总结 / evaluation 学员评估
+    scene: Mapped[str] = mapped_column(String(32), default="feedback", index=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

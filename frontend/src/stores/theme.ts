@@ -49,6 +49,8 @@ export const useThemeStore = defineStore('theme', () => {
   const loginHero = ref('排课 · 考勤 · 课时 · 反馈，一站式教务')
   const sidebarSub = ref('Child Code Studio')
   const sidebarTheme = ref('navy')
+  /** 侧边栏模块排序：to 数组，全局生效，AdminLayout 直接订阅 */
+  const navOrder = ref<string[]>([])
   const loaded = ref(false)
 
   function apply(s: Partial<SystemSettings>) {
@@ -69,6 +71,7 @@ export const useThemeStore = defineStore('theme', () => {
     if (s.login_hero !== undefined && s.login_hero) loginHero.value = s.login_hero
     if (s.sidebar_sub !== undefined && s.sidebar_sub) sidebarSub.value = s.sidebar_sub
     if (s.sidebar_theme !== undefined && s.sidebar_theme) sidebarTheme.value = s.sidebar_theme
+    if (s.nav_order !== undefined && Array.isArray(s.nav_order)) navOrder.value = s.nav_order
   }
 
   async function load() {
@@ -122,6 +125,7 @@ export const useThemeStore = defineStore('theme', () => {
     loginHero,
     sidebarSub,
     sidebarTheme,
+    navOrder,
     loaded,
     loginLogoIsImage,
     mainBgStyle,

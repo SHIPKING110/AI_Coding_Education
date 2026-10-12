@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, Enum, ForeignKey, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
+from app.core.database import Base, enum_values
 from app.models.enrollment import Class, Student
 from app.models.user import User
 
@@ -32,7 +32,7 @@ class Schedule(Base):
     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(
-        Enum(ScheduleStatus, native_enum=False, length=16), default=ScheduleStatus.SCHEDULED
+        Enum(ScheduleStatus, native_enum=False, values_callable=enum_values, length=16), default=ScheduleStatus.SCHEDULED
     )
     # 体验课标记：空时段专排的体验课显示体验课标签
     is_trial: Mapped[bool] = mapped_column(default=False, server_default="false")
@@ -51,7 +51,7 @@ class Attendance(Base):
     schedule_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("schedules.id"), index=True)
     student_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("students.id"), index=True)
     status: Mapped[str] = mapped_column(
-        Enum(AttendanceStatus, native_enum=False, length=16), default=AttendanceStatus.UNMARKED
+        Enum(AttendanceStatus, native_enum=False, values_callable=enum_values, length=16), default=AttendanceStatus.UNMARKED
     )
     operator_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     # 体验课考勤：体验学员免费上课，不扣课时不计创收，只记到场

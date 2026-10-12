@@ -3,7 +3,7 @@ import uuid
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.enrollment import Class, StudentClass, StudentStatus
+from app.models.enrollment import Class, Student, StudentClass, StudentStatus
 from app.models.user import User
 
 
@@ -162,10 +162,13 @@ def archive(db: Session, cls: Class) -> None:
     db.commit()
 
 
-def student_count(db: Session, class_id: uuid.UUID) -> int:
-    return (
-        db.scalar(
-            select(func.count()).select_from(StudentClass).where(StudentClass.class_id == class_id)
+def student_count(db: Session, class_id: uuid.UUID, *, active_only: bool = True) -> int:
+    stmt = select(func.count()).select_from(StudentClass).where(StudentClass.class_id == class_id)
+    if active_only:
+        # 未归档学员占在册名额（在读+停课都算；已归档的悬空关联不计，避免僵尸数据卡住删班）
+        stmt = stmt.where(
+            StudentClass.student_id.in_(
+                select(Student.id).where(Student.status != StudentStatus.ARCHIVED)
+            )
         )
-        or 0
-    )
+    return db.scalar(stmt) or 0

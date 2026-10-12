@@ -96,6 +96,7 @@ class TeacherCreateIn(BaseModel):
     phone: str | None = None
     campus: str | None = None
     title: str | None = None
+    gender: str | None = None
     teacher_level_id: str | None = None
     base_salary: str | None = None
 
@@ -121,6 +122,7 @@ def create_teacher(
         phone=payload.phone,
         campus=payload.campus,
         title=(payload.title or "").strip() or None,
+        gender=(payload.gender or "").strip() or None,
     )
     if payload.teacher_level_id or payload.base_salary is not None:
         try:
@@ -245,6 +247,8 @@ def update_teacher(
         user.name = payload.name
     if payload.phone is not None:
         user.phone = payload.phone
+    if payload.gender is not None:
+        user.gender = (payload.gender or "").strip() or None
     if payload.campus is not None:
         user.campus = payload.campus or None
     if payload.title is not None:

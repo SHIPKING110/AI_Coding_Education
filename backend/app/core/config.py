@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     # 数据库
     DATABASE_URL: str = "postgresql+psycopg://postgres:postgres@localhost:5432/child_code"
+    # 业务时区：前端提交无时区本地时间，DB 会话按此时区解释（容器默认 UTC 会导致 +8 偏移）
+    BUSINESS_TIMEZONE: str = "Asia/Shanghai"
     # 生产通过 CORS_ORIGINS 追加前端域名（逗号分隔）；同域部署可留空
     CORS_ORIGINS: str = ""
 
@@ -34,6 +36,8 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "deepseek-v4-pro"
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = ""
+    # RAG 知识库 embedding：留空则沿用各教师自配 embedding；两者都无时 RAG 不可用
+    LLM_EMBED_MODEL: str = ""
 
     # 智能助手业务工具规划层预算（多轮工具调用的稳定性护栏）
     AGENT_TOOL_MAX_ROUNDS: int = 4       # 最多规划-执行轮数

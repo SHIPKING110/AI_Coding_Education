@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
+from app.core.database import Base, enum_values
 from app.models.user import User
 
 
@@ -36,7 +36,7 @@ class Notification(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     type: Mapped[str] = mapped_column(
-        Enum(NotificationType, native_enum=False, length=32), index=True
+        Enum(NotificationType, native_enum=False, values_callable=enum_values, length=32), index=True
     )
     title: Mapped[str] = mapped_column(Text)
     content: Mapped[str] = mapped_column(Text)

@@ -12,6 +12,7 @@ backend/.env
 # Node
 node_modules/
 dist/
+*.tsbuildinfo
 *.local
 
 # 运行时产物

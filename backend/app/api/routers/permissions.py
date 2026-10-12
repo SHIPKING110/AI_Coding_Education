@@ -39,18 +39,44 @@ class PermissionUpdate(BaseModel):
     teacher_edit: bool | None = None
     teacher_delete: bool | None = None
     schedule_create: bool | None = None
+    schedule_cancel: bool | None = None
+    invitation_create: bool | None = None
     package_create: bool | None = None
+    package_edit: bool | None = None
     package_off: bool | None = None
+    assignment_ai: bool | None = None
+    assignment_create: bool | None = None
     order_visible: bool | None = None
     settings_manage: bool | None = None
+    settings_tab_personalize: bool | None = None
+    settings_tab_model: bool | None = None
+    settings_tab_business: bool | None = None
     finance_view: bool | None = None
+    finance_revenue: bool | None = None
+    finance_records: bool | None = None
+    finance_salary: bool | None = None
+    finance_salary_all: bool | None = None
+    nav_students: bool | None = None
+    nav_invitations: bool | None = None
+    nav_classes: bool | None = None
+    nav_teachers: bool | None = None
+    nav_schedules: bool | None = None
+    nav_packages: bool | None = None
+    nav_feedbacks: bool | None = None
+    nav_reports: bool | None = None
+    nav_evaluations: bool | None = None
+    nav_agents: bool | None = None
+    nav_assignments: bool | None = None
+    nav_finance: bool | None = None
+    nav_settings: bool | None = None
 
 
 def _row_out(teacher: User, row: TeacherPermission | None) -> dict:
+    # 无记录视为默认值（与 effective() 一致，避免“一览全开、实际关闭”的误导）
     perms = (
         {k: bool(getattr(row, k, KEY_DEFAULTS[k])) for k in PERMISSION_KEYS}
         if row is not None
-        else dict.fromkeys(PERMISSION_KEYS, True)
+        else dict(KEY_DEFAULTS)
     )
     return {
         "teacher_id": str(teacher.id),

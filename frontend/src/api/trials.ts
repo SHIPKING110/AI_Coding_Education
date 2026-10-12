@@ -20,6 +20,7 @@ export interface InvitationOut {
   trial_class_id: string | null
   trial_teacher_id: string | null
   trial_teacher_name: string | null
+  trial_class_name?: string | null
   created_at: string | null
 }
 

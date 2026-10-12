@@ -186,7 +186,15 @@ async function saveTitle() {
       await createJobTitle({ name: titleName.value.trim(), permissions: { ...titlePerms.value }, base_salary: titleSalary.value || '0' })
     }
     showTitleForm.value = false
+    // 双向互通：职务改完即刷新两边数据；若有在职教师正在用该职务，自动弹出同步确认，一键追溯
+    const savedName = titleName.value.trim()
     titles.value = await listJobTitles()
+    rows.value = await listTeacherPermissions()
+    const affected = rows.value.filter((r) => r.title === savedName).length
+    const saved = titles.value.find((t) => t.name === savedName) || null
+    syncMsg.value = ''
+    if (saved && affected > 0) syncTarget.value = saved
+    else if (saved) syncMsg.value = `职务「${savedName}」已保存，暂无在职教师使用`
   } catch (e: any) {
     titleError.value = e?.response?.data?.detail || '保存职务失败'
   } finally {
@@ -208,6 +216,9 @@ async function confirmDelTitle() {
 
 // 追溯同步：职务改权限后一键同步到所有同职务在职教师
 const syncTarget = ref<JobTitle | null>(null)
+const syncCount = computed(() =>
+  syncTarget.value ? rows.value.filter((r) => r.title === syncTarget.value!.name).length : 0,
+)
 const syncMsg = ref('')
 async function confirmSync() {
   if (!syncTarget.value) return
@@ -227,7 +238,23 @@ const applyTeacherId = ref('')
 const applyTitleName = ref('')
 const applyMsg = ref('')
 
-/** 职务卡片点缀色（纯色系轮换） */
+/** 职务预设 ↔ 教师个人互通：教师当前权限与所挂职务预设不一致即视为偏离 */
+function presetOf(titleName: string | null | undefined): JobTitle | null {
+  if (!titleName) return null
+  return titles.value.find((t) => t.name === titleName) || null
+}
+function isDiverged(row: TeacherPermissionRow): boolean {
+  const preset = presetOf(row.title)
+  if (!preset) return false
+  const perms = preset.permissions || {}
+  return Object.keys(perms).some((k) => (row.permissions[k] ?? true) !== !!perms[k])
+}
+function titleUserCount(t: JobTitle): number {
+  return rows.value.filter((r) => r.title === t.name).length
+}
+function titleDivergedCount(t: JobTitle): number {
+  return rows.value.filter((r) => r.title === t.name && isDiverged(r)).length
+}
 const CARD_ACCENTS = ['#2f6fed', '#0e9f6e', '#c2570b', '#7c3aed', '#0284c7', '#be123c']
 function titleOnCount(t: JobTitle): number {
   return keys.value.filter((k) => t.permissions[k.key] !== false).length
@@ -307,6 +334,7 @@ onMounted(load)
               <small>{{ r.username }}<template v-if="r.campus"> · {{ r.campus }}</template></small>
             </span>
             <span v-if="r.title" class="t-title">{{ r.title }}</span>
+            <span v-if="isDiverged(r)" class="t-diverged" title="该教师的个人权限与职务预设不一致（单独调整过）">偏离预设</span>
             <span class="t-count">{{ Object.values(r.permissions).filter((v) => v !== false).length }}/{{ keys.length }}</span>
           </button>
           <p v-if="filtered.length === 0" class="muted" style="padding: 8px 4px">暂无教师</p>
@@ -318,6 +346,7 @@ onMounted(load)
               <div class="eyebrow">当前设置对象</div>
               <strong class="panel-name">{{ selected.teacher_name }}</strong>
               <span v-if="selected.title" class="t-title big">{{ selected.title }}</span>
+              <span v-if="isDiverged(selected)" class="t-diverged big" title="个人权限与职务预设不一致；用职务卡片「同步」可一键对齐">偏离预设</span>
               <span class="muted">{{ selected.username }}<template v-if="selected.campus"> · {{ selected.campus }}</template></span>
             </div>
             <div class="quick-apply">
@@ -335,6 +364,12 @@ onMounted(load)
               {{ g.module }}
               <small>{{ g.items.filter((k) => isOn(selected, k.key)).length }}/{{ g.items.length }} 开启</small>
             </div>
+            <p v-if="g.module === '设置'" class="module-hint">
+              教师端看到「设置」入口需要同时开启「设置-全部设置管理」与「导航可见-设置」；子 tab（个性化/模型/业务）再按需单独开。权限管理入口仅管理员可见，不受开关影响。
+            </p>
+            <p v-if="g.module === '财务管理'" class="module-hint">
+              教师端看到「财务管理」入口需要同时开启「财务管理-可见」与「导航可见-财务管理」；板块内按钮再按创收/流水/薪资键控制。
+            </p>
             <div class="switch-grid">
               <div v-for="k in g.items" :key="k.key" class="switch-row" :class="{ off: !isOn(selected, k.key) }">
                 <span>{{ k.label }}</span>
@@ -385,6 +420,9 @@ onMounted(load)
               <div class="title-bar"><i :style="{ width: `${titleOnPct(t)}%` }" /></div>
               <span>{{ titleOnCount(t) }}/{{ keys.length }} 开启</span>
             </div>
+            <div class="title-usage">
+              在用 {{ titleUserCount(t) }} 人<template v-if="titleDivergedCount(t)"> · {{ titleDivergedCount(t) }} 人偏离预设</template>
+            </div>
             <div class="title-perms">
               <span v-for="k in keys" :key="k.key" class="perm-tag" :class="{ off: t.permissions[k.key] === false }">
                 {{ k.label }}
@@ -428,6 +466,9 @@ onMounted(load)
         </label>
         <div v-for="g in keyGroups" :key="g.module" class="form-group">
           <div class="form-group-title">{{ g.module }}</div>
+          <p v-if="g.module === '设置' || g.module === '财务管理'" class="module-hint">
+            教师端入口需“功能开关 + 导航可见”同时开启（设置：全部设置管理＋导航可见-设置；财务：财务管理-可见＋导航可见-财务管理）。
+          </p>
           <label v-for="k in g.items" :key="k.key" class="check-row">
             <input v-model="titlePerms[k.key]" type="checkbox" />
             <span>{{ k.label }}</span>
@@ -455,7 +496,7 @@ onMounted(load)
     <ConfirmDialog
       :visible="!!syncTarget"
       title="同步职务权限"
-      :message="`将「${syncTarget?.name}」的当前预设权限同步到所有在职同职务教师？会覆盖这些教师的个人单独调整，不可撤销。`"
+      :message="`将「${syncTarget?.name}」的当前预设权限同步到${syncCount} 名在职同职务教师？会覆盖这些教师的个人单独调整，不可撤销。`"
       confirm-text="确认同步"
       @confirm="confirmSync"
       @cancel="syncTarget = null"
@@ -660,6 +701,35 @@ h1 {
   padding: 3px 10px;
   margin-left: 8px;
   vertical-align: 2px;
+}
+.t-diverged {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.t-diverged.big {
+  font-size: 11.5px;
+  padding: 3px 10px;
+  margin-left: 6px;
+  vertical-align: 2px;
+}
+.title-usage {
+  font-size: 12px;
+  color: var(--ink-3);
+  font-weight: 600;
+  margin: 2px 0 8px;
+}
+.module-hint {
+  font-size: 12px;
+  color: var(--ink-3);
+  background: var(--bg-soft);
+  border-radius: 8px;
+  padding: 7px 10px;
+  margin: -2px 0 10px;
 }
 .t-info small {
   color: var(--ink-3);

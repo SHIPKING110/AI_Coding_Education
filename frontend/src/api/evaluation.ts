@@ -373,7 +373,7 @@ export async function getEvaluationMaterial(params: {
   return data
 }
 
-export async function aiDraftEvaluation(id: string, payload: { extra_note?: string | null }): Promise<EvaluationAiDraftOut> {
+export async function aiDraftEvaluation(id: string, payload: { extra_note?: string | null; style_guide?: string | null }): Promise<EvaluationAiDraftOut> {
   const { data } = await http.post<EvaluationAiDraftOut>(`/evaluations/${id}/ai-draft`, payload)
   return data
 }

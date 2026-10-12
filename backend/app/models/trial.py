@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import JSON, DateTime, Enum, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.database import Base
+from app.core.database import Base, enum_values
 
 
 class InvitationStatus(enum.StrEnum):
@@ -32,7 +32,7 @@ class Invitation(Base):
     subject_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("subjects.id"), nullable=True)
     subject_name: Mapped[str] = mapped_column(String(64), default="")
     status: Mapped[str] = mapped_column(
-        Enum(InvitationStatus, native_enum=False, length=16),
+        Enum(InvitationStatus, native_enum=False, values_callable=enum_values, length=16),
         default=InvitationStatus.INVITED,
         index=True,
     )

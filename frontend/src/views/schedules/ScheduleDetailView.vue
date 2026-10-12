@@ -24,12 +24,13 @@ const submitting = ref(false)
 const notice = ref<{ type: 'ok' | 'err' | 'info'; text: string } | null>(null)
 const markLocked = computed(() => schedule.value?.status !== 'scheduled')
 
-// 未到上课时间：排课还在未来，禁止签到/请假，防止误操作
+// 未到上课时间：禁止签到（防误操作），但允许提前请假
 const notStarted = computed(() => {
   if (!schedule.value || schedule.value.status !== 'scheduled') return false
   return parseServerTime(schedule.value.start_time).getTime() > today().getTime()
 })
-const markDisabled = computed(() => markLocked.value || notStarted.value)
+const attendDisabled = computed(() => markLocked.value || notStarted.value)
+const leaveDisabled = computed(() => markLocked.value)
 
 const pending = ref<Set<string>>(new Set())
 const loadError = ref('')
@@ -72,8 +73,12 @@ function timeOf(iso: string): string {
 }
 
 async function mark(status: 'attended' | 'leave', studentId: string) {
-  if (markDisabled.value) {
-    notice.value = { type: 'info', text: '未到上课时间，暂不能进行签到/请假' }
+  if (status === 'attended' && attendDisabled.value) {
+    notice.value = { type: 'info', text: '未到上课时间，暂不能签到；请假可提前标记' }
+    return
+  }
+  if (status === 'leave' && leaveDisabled.value) {
+    notice.value = { type: 'info', text: '该排课已结束或取消，不可再标记' }
     return
   }
   pending.value.add(studentId)
@@ -184,13 +189,13 @@ onMounted(load)
 
       <div v-else-if="notStarted" class="locked-tip not-started">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg>
-        未到上课时间（{{ timeOf(schedule.start_time) }} 开始），暂不能签到/请假，请到上课时间后再操作
+        未到上课时间（{{ timeOf(schedule.start_time) }} 开始），签到需到点后操作；请假可提前标记
       </div>
 
       <section class="panel">
         <div class="panel-head">
           <h2>学员考勤与划课时</h2>
-          <p class="hint">「已到」自动扣 2 课时；「请假」不扣课时；同一学员每节课只能标记一次</p>
+          <p class="hint">「已到」需到上课时间后标记，自动扣 2 课时；「请假」可提前标记，不扣课时；同一学员每节课只能标记一次</p>
         </div>
 
         <div v-if="loading" class="empty">加载中…</div>
@@ -212,14 +217,16 @@ onMounted(load)
               <template v-if="r.status === 'unmarked'">
                 <button
                   class="mark-btn attended"
-                  :disabled="markLocked || submitting || pending.has(r.student_id)"
+                  :disabled="attendDisabled || submitting || pending.has(r.student_id)"
+                  :title="notStarted ? '未到上课时间，到点后可签到' : '标记已到并扣课时'"
                   @click="mark('attended', r.student_id)"
                 >
                   {{ r.trial_status === 'trial' ? '已到 · 免费' : '已到 · 扣2' }}
                 </button>
                 <button
                   class="mark-btn leave"
-                  :disabled="markLocked || submitting || pending.has(r.student_id)"
+                  :disabled="leaveDisabled || submitting || pending.has(r.student_id)"
+                  title="请假可提前标记，不扣课时"
                   @click="mark('leave', r.student_id)"
                 >
                   请假

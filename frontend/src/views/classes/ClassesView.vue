@@ -335,12 +335,47 @@ function unenroll(studentId: string, studentName: string) {
       try {
         await updateStudentClasses(studentId, remaining)
         detail.value = await getClass(target.id)
+        await load()
       } catch (e: unknown) {
         const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
         actionError.value = typeof msg === 'string' && msg ? `退班失败：${msg}` : '退班失败，请稍后重试'
       }
     },
   })
+}
+
+/** 学员调班：从当前班级直接转入另一班级（保留其他班级归属） */
+const showTransfer = ref(false)
+const transferTarget = ref<{ id: string; name: string } | null>(null)
+const transferClassId = ref('')
+const transferSubmitting = ref(false)
+const transferOptions = computed(() => (classes.value || []).filter((c) => c.id !== detail.value?.id))
+
+function openTransfer(studentId: string, studentName: string) {
+  transferTarget.value = { id: studentId, name: studentName }
+  transferClassId.value = ''
+  showTransfer.value = true
+}
+
+async function confirmTransfer() {
+  const target = detail.value
+  if (!target || !transferTarget.value || !transferClassId.value) return
+  transferSubmitting.value = true
+  actionError.value = ''
+  try {
+    const row = target.students.find((s) => s.id === transferTarget.value!.id)
+    const remaining = (row?.classes ?? []).map((c) => c.id).filter((id) => id !== target.id)
+    if (!remaining.includes(transferClassId.value)) remaining.push(transferClassId.value)
+    await updateStudentClasses(transferTarget.value.id, remaining)
+    showTransfer.value = false
+    detail.value = await getClass(target.id)
+    await load()
+  } catch (e: unknown) {
+    const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    actionError.value = typeof msg === 'string' && msg ? `调班失败：${msg}` : '调班失败，请稍后重试'
+  } finally {
+    transferSubmitting.value = false
+  }
 }
 
 onMounted(async () => {
@@ -581,13 +616,39 @@ onMounted(async () => {
                 </span>
               </span>
               <span>
-                <button class="op-btn warn" @click="guard('class_unenroll', () => unenroll(s.id, s.name))">退班</button>
+                <template v-if="s.status !== 'archived'">
+                  <button class="op-btn" @click="guard('class_edit', () => openTransfer(s.id, s.name))">调班</button>
+                  <button class="op-btn warn" @click="guard('class_unenroll', () => unenroll(s.id, s.name))">退班</button>
+                </template>
+                <span v-else class="archived-note">已归档</span>
               </span>
             </div>
           </div>
           <div v-else class="empty-card">该班级暂无学员，可在「学员管理」编辑学员时加入班级</div>
           <p v-if="actionError" class="action-error">{{ actionError }}</p>
         </template>
+      </div>
+    </div>
+    <!-- 学员调班弹窗 -->
+    <div v-if="showTransfer" class="overlay" @click.self="showTransfer = false">
+      <div class="modal">
+        <h2>调班 · {{ transferTarget?.name }}</h2>
+        <p class="muted">从「{{ detail?.name }}」转入目标班级（保留其在其他班级的归属）。</p>
+        <label>
+          目标班级 *
+          <select v-model="transferClassId">
+            <option value="">请选择班级</option>
+            <option v-for="c in transferOptions" :key="c.id" :value="c.id">
+              {{ c.name }}（{{ c.subject }} · {{ c.student_count ?? 0 }}人）
+            </option>
+          </select>
+        </label>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showTransfer = false">取消</button>
+          <button class="btn primary" :disabled="!transferClassId || transferSubmitting" @click="confirmTransfer">
+            {{ transferSubmitting ? '提交中…' : '确认调班' }}
+          </button>
+        </div>
       </div>
     </div>
     <!-- 统一确认弹窗（删除班级 / 学员退班） -->
@@ -1070,6 +1131,10 @@ h1 {
   background: var(--danger-soft);
   border-radius: 8px;
   padding: 8px 12px;
+}
+.archived-note {
+  font-size: 12px;
+  color: var(--ink-3);
 }
 .modal label {
   display: block;

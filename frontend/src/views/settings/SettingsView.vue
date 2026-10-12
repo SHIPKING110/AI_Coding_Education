@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { myPermissions } from '@/api/permissions'
+import { useAuthStore } from '@/stores/auth'
 import PersonalizeView from '@/views/settings/PersonalizeView.vue'
+import LLMConfigTab from '@/views/settings/LLMConfigTab.vue'
 import {
   createCampus,
   createSubject,
@@ -31,7 +35,19 @@ import {
   type TeacherLevelOut,
 } from '@/api/payroll'
 
-const activeTab = ref<'personalize' | 'business'>('personalize')
+const activeTab = ref<'personalize' | 'business' | 'llm'>('personalize')
+
+// 设置 tab 可见与操作：教师按 settings_tab_* 键（settings_manage 为总开关）
+const myPerms = ref<Record<string, boolean>>({})
+const canSet = (key: string): boolean => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value[key] === true || myPerms.value.settings_manage === true
+}
+const visibleTabs = computed(() => ({
+  personalize: canSet('settings_tab_personalize'),
+  llm: canSet('settings_tab_model'),
+  business: canSet('settings_tab_business'),
+}))
 
 // ---- 校区 ----
 const campuses = ref<CampusOut[]>([])
@@ -68,11 +84,16 @@ const rules = ref<CommissionRuleOut[]>([])
 
 const msg = ref('')
 const error = ref('')
+const showSaveDialog = ref(false)
+const saveDialogOk = ref(true)
+const saveDialogMsg = ref('')
 
 function flash(text: string) {
   msg.value = text
   setTimeout(() => (msg.value = ''), 3000)
 }
+
+const auth = useAuthStore()
 
 async function loadAll() {
   error.value = ''
@@ -216,8 +237,14 @@ async function saveFinance() {
     financeNote.value = out.note || ''
     flash('财务设置已保存（新消耗按此比例记账，历史账本不变）')
   } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+    saveDialogOk.value = false
+    saveDialogMsg.value = e?.response?.data?.detail || '保存失败'
+    showSaveDialog.value = true
+    return
   }
+  saveDialogOk.value = true
+  saveDialogMsg.value = '财务设置已保存（新消耗按此比例记账，历史账本不变）'
+  showSaveDialog.value = true
 }
 
 function pctToRatio(pct: string): string {
@@ -308,11 +335,28 @@ async function saveRules() {
     )
     flash('提成规则已保存（薪资核算按新单价）')
   } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+    saveDialogOk.value = false
+    saveDialogMsg.value = e?.response?.data?.detail || '保存失败'
+    showSaveDialog.value = true
+    return
   }
+  saveDialogOk.value = true
+  saveDialogMsg.value = '提成规则已保存，薪资核算将按新单价执行。'
+  showSaveDialog.value = true
 }
 
-onMounted(loadAll)
+onMounted(async () => {
+  if (auth.user?.role === 'teacher') {
+    try {
+      myPerms.value = await myPermissions()
+    } catch {
+      myPerms.value = {}
+    }
+    const first = (['personalize', 'llm', 'business'] as const).find((t) => visibleTabs.value[t])
+    if (first) activeTab.value = first
+  }
+  await loadAll()
+})
 </script>
 
 <template>
@@ -324,10 +368,13 @@ onMounted(loadAll)
     >
       <template #actions>
       <div class="tabs">
-        <button class="tab" :class="{ active: activeTab === 'personalize' }" @click="activeTab = 'personalize'">
+        <button v-if="visibleTabs.personalize" class="tab" :class="{ active: activeTab === 'personalize' }" @click="activeTab = 'personalize'">
           个性化设置
         </button>
-        <button class="tab" :class="{ active: activeTab === 'business' }" @click="activeTab = 'business'">
+        <button v-if="visibleTabs.llm" class="tab" :class="{ active: activeTab === 'llm' }" @click="activeTab = 'llm'">
+          模型配置
+        </button>
+        <button v-if="visibleTabs.business" class="tab" :class="{ active: activeTab === 'business' }" @click="activeTab = 'business'">
           业务功能设置
         </button>
       </div>
@@ -337,9 +384,11 @@ onMounted(loadAll)
     <p v-if="error" class="error-banner">{{ error }}</p>
     <p v-if="msg" class="success-banner">{{ msg }}</p>
 
-    <PersonalizeView v-if="activeTab === 'personalize'" embedded />
+    <PersonalizeView v-if="activeTab === 'personalize' && visibleTabs.personalize" embedded />
 
-    <div v-else class="biz">
+    <LLMConfigTab v-else-if="activeTab === 'llm' && visibleTabs.llm" />
+
+    <div v-else-if="visibleTabs.business" class="biz">
       <!-- 校区 -->
       <section class="card">
         <h2>校区名称</h2>
@@ -523,6 +572,14 @@ onMounted(loadAll)
         <div class="add-row"><button class="btn primary sm" @click="saveRules">保存提成规则</button></div>
       </section>
     </div>
+    <ConfirmDialog
+      :visible="showSaveDialog"
+      :title="saveDialogOk ? '保存成功' : '保存失败'"
+      :message="saveDialogMsg"
+      confirm-text="知道了"
+      @confirm="showSaveDialog = false"
+      @cancel="showSaveDialog = false"
+    />
   </div>
 </template>
 

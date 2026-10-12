@@ -13,6 +13,37 @@ def list_for_schedule(db: Session, schedule_id: uuid.UUID) -> list[Attendance]:
     )
 
 
+def list_for_schedules(db: Session, schedule_ids: list[uuid.UUID]) -> list[Attendance]:
+    """多节排课（同一班级同一天组）的全部考勤行，用于编辑器跨节匹配。"""
+    if not schedule_ids:
+        return []
+    return list(
+        db.scalars(select(Attendance).where(Attendance.schedule_id.in_(schedule_ids)))
+        .unique()
+        .all()
+    )
+
+
+def acted_count(db: Session, schedule_id: uuid.UUID) -> int:
+    """已有考勤操作（请假/已到）的人数；>0 时不允许直接取消排课（对账需要）。
+
+    注意：仅统计真实操作过的记录（status != unmarked），初始化的占位行不算。
+    """
+    from sqlalchemy import func as _func
+
+    return (
+        db.scalar(
+            select(_func.count())
+            .select_from(Attendance)
+            .where(
+                Attendance.schedule_id == schedule_id,
+                Attendance.status != AttendanceStatus.UNMARKED,
+            )
+        )
+        or 0
+    )
+
+
 def ensure_for_students(
     db: Session, schedule_id: uuid.UUID, student_ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, Attendance]:

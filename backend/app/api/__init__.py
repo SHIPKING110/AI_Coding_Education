@@ -12,6 +12,7 @@ from app.api.routers import (
     finance,
     knowledge,
     lessons,
+    llm_configs,
     notifications,
     orders,
     packages,
@@ -46,5 +47,6 @@ api_router.include_router(permissions.router)
 api_router.include_router(system_settings.router)
 api_router.include_router(business.router)
 api_router.include_router(finance.router)
+api_router.include_router(llm_configs.router)
 api_router.include_router(client.router)
 api_router.include_router(trials.router)

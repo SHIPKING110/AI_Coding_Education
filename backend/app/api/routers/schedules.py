@@ -316,12 +316,18 @@ def update_schedule(
 def cancel_schedule(
     schedule_id: uuid.UUID,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(*MANAGE_ROLES)),
+    user: User = Depends(require_teacher_permission("schedule_cancel")),
 ) -> None:
     s = schedule_crud.get(db, schedule_id)
     if s is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
     _require_own_schedule(s, user)
+    # 对账门禁：已有学员操作（请假/已到）时不允许直接取消，否则账对不上
+    if attendance_crud.acted_count(db, schedule_id) > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="该排课已有学员请假或考勤记录，无法直接取消；如需调整请先联系教务处理考勤后再试",
+        )
     schedule_crud.cancel(db, s)
 
 
@@ -372,12 +378,13 @@ def submit_attendance(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
     _require_own_schedule(s, operator)
 
-    # 未到上课时间不允许考勤（防止误操作）
+    # 未到上课时间不允许签到（防止误操作）；请假允许提前标记，方便家长提前请假
     # 排课时间与当前时间均按本地语义比较（DB 返回 aware，datetime.now 用同一 tz）
-    if s.start_time > datetime.now(s.start_time.tzinfo):
+    not_started = s.start_time > datetime.now(s.start_time.tzinfo)
+    if not_started and any(item.status == "attended" for item in payload.items):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="未到上课时间，暂不能签到/请假",
+            detail="未到上课时间，暂不能签到；请假可提前标记",
         )
 
     result = AttendanceBatchResult()

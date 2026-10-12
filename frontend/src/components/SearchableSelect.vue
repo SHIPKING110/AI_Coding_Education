@@ -12,6 +12,8 @@ const props = defineProps<{
   placeholder?: string
   /** 同一 group 的多个下拉一次只展开一个（互斥展开） */
   group?: string
+  /** 禁用：点击不展开（用于“我的班级”等锁定场景） */
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
@@ -41,6 +43,7 @@ const filtered = computed(() => {
 const current = computed(() => props.options.find((o) => o.id === props.modelValue))
 
 function toggle() {
+  if (props.disabled) return
   if (open.value) {
     open.value = false
     if (props.group && groupOpened[props.group] === uid) groupOpened[props.group] = ''
@@ -72,7 +75,7 @@ watch(
 
 <template>
   <div class="ssel">
-    <button type="button" class="ssel-trigger" :class="{ active: modelValue }" @click="toggle">
+    <button type="button" class="ssel-trigger" :class="{ active: modelValue, disabled }" :disabled="disabled" @click="toggle">
       <span class="ssel-label">{{ current ? current.label : placeholder || '请选择' }}</span>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6" /></svg>
     </button>

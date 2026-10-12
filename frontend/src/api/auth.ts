@@ -17,6 +17,7 @@ export interface UserOut {
   phone: string | null
   campus: string | null
   title: string | null
+  gender?: string | null
   teacher_level_id: string | null
   teacher_level_name: string | null
   base_salary: string | null
@@ -35,6 +36,7 @@ export interface RegisterIn {
   password: string
   name: string
   phone?: string | null
+  gender?: string | null
   campus?: string | null
   title?: string | null
 }
@@ -44,6 +46,7 @@ export interface TeacherCreateIn {
   password: string
   name: string
   phone?: string | null
+  gender?: string | null
   campus?: string | null
   title?: string | null
   teacher_level_id?: string | null
@@ -58,6 +61,7 @@ export async function createTeacherApi(payload: TeacherCreateIn): Promise<UserOu
 export interface TeacherUpdateIn {
   name?: string
   phone?: string | null
+  gender?: string | null
   campus?: string | null
   title?: string | null
   teacher_level_id?: string | null

@@ -23,6 +23,8 @@ import {
   type ConversationOut,
   type MaterialItem,
 } from '@/api/agent'
+import { listLLMConfigs, type LLMConfigOut } from '@/api/llm'
+import { toastApiError } from '@/stores/toast'
 import { listClasses } from '@/api/enrollment'
 import { listReports } from '@/api/report'
 import {
@@ -124,6 +126,7 @@ onMounted(async () => {
   try {
     agents.value = await listAgents()
     conversations.value = await listConversations()
+    await loadLLMConfigs()
   } catch {
     /* 列表失败不阻塞页面 */
   }
@@ -713,6 +716,16 @@ function snapToBottom() {
   }
 }
 
+const llmConfigs = ref<LLMConfigOut[]>([])
+const activeConfigId = ref<string | null>(null)
+async function loadLLMConfigs() {
+  try {
+    const r = await listLLMConfigs()
+    llmConfigs.value = r.items
+  } catch {
+    llmConfigs.value = []
+  }
+}
 const abortCtrl = ref<AbortController | null>(null)
 const lastSend = ref<{ text: string; stage: string } | null>(null)
 
@@ -747,6 +760,7 @@ async function send(preset?: { text: string; stage?: string }) {
   let doneToolTrace: { seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[] | undefined
   let doneToolRounds = 0
   let doneToolDegraded = false
+    if (llmConfigs.value.length === 0) await loadLLMConfigs()
   const once = useRagOnce.value
   useRagOnce.value = false
   abortCtrl.value?.abort()
@@ -755,7 +769,7 @@ async function send(preset?: { text: string; stage?: string }) {
   try {
     await agentChatStream(
       activeConv.value.id,
-      { stage: targetStage, message: text, state: {}, ...(once ? { use_rag: true } : {}) },
+      { stage: targetStage, message: text, state: {}, ...(once ? { use_rag: true } : {}), ...(activeConfigId.value ? { config_id: activeConfigId.value } : {}) },
       (d) => {
         full += d
         streamBuf.value = full
@@ -828,6 +842,8 @@ async function send(preset?: { text: string; stage?: string }) {
       }
     } else {
       error.value = e instanceof Error ? e.message : 'AI 对话失败'
+      try { toastApiError(e) } catch { /* ignore */ }
+
     }
   } finally {
     if (abortCtrl.value === ctrl) abortCtrl.value = null
@@ -1310,6 +1326,10 @@ function back() {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
                 引用知识库：{{ activeConv.rag_enabled ? '开' : '关' }}
               </button>
+              <select v-model="activeConfigId" class="model-switch" title="本次对话使用的模型（默认按模块映射）">
+                <option :value="null">模型：按模块映射</option>
+                <option v-for="c in llmConfigs" :key="c.id" :value="c.id">模型：{{ c.name }}</option>
+              </select>
               <label v-if="!activeConv.rag_enabled" class="rag-once">
                 <input v-model="useRagOnce" type="checkbox" /> 仅本条
               </label>
@@ -1912,6 +1932,7 @@ function back() {
 }
 .rag-toggle svg { width: 14px; height: 14px; }
 .rag-toggle.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); font-weight: 700; }
+.model-switch { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-size: 12.5px; color: var(--ink-2); max-width: 220px; }
 .rag-once { font-size: 12.5px; color: var(--ink-3); display: flex; align-items: center; gap: 4px; }
 
 .chat { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 14px; padding: 10px 4px; }

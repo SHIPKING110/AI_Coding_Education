@@ -13,6 +13,7 @@ const route = useRoute()
 
 const username = ref('')
 const password = ref('')
+const showPassword = ref(false)
 const error = ref('')
 const loading = ref(false)
 
@@ -55,6 +56,7 @@ async function onSubmit() {
       </div>
       <h1>{{ theme.loginTitle }}</h1>
       <p class="sub">{{ theme.loginSubtitle }}</p>
+      <p v-if="theme.loginHero && theme.loginTheme !== 'poster'" class="hero">{{ theme.loginHero }}</p>
 
       <form @submit.prevent="onSubmit">
         <label>
@@ -63,7 +65,30 @@ async function onSubmit() {
         </label>
         <label>
           <span>密码</span>
-          <input v-model="password" type="password" autocomplete="current-password" placeholder="请输入密码" :style="{ '--field-accent': accent }" />
+          <div class="pwd-field">
+            <input
+              v-model="password"
+              :type="showPassword ? 'text' : 'password'"
+              autocomplete="current-password"
+              placeholder="请输入密码"
+              :style="{ '--field-accent': accent }"
+            />
+            <button
+              type="button"
+              class="eye-btn"
+              :title="showPassword ? '隐藏密码' : '显示密码'"
+              :aria-label="showPassword ? '隐藏密码' : '显示密码'"
+              @click="showPassword = !showPassword"
+            >
+              <svg v-if="!showPassword" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+              <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9.9 4.2A10.9 10.9 0 0 1 12 4c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.4 4.3M6.6 6.6A17.6 17.6 0 0 0 2 11s3.5 7 10 7a10.9 10.9 0 0 0 4.1-.8M1 1l22 22" />
+              </svg>
+            </button>
+          </div>
         </label>
         <p v-if="error" class="error">{{ error }}</p>
         <button type="submit" :disabled="loading" :style="{ background: accent }">
@@ -202,6 +227,17 @@ h1 {
   font-size: 12.5px;
   margin: 8px 0 22px;
 }
+.sub:has(+ .hero) {
+  margin-bottom: 8px;
+}
+.hero {
+  text-align: center;
+  color: var(--login-sub);
+  opacity: 0.85;
+  font-size: 12px;
+  margin: 0 0 22px;
+  line-height: 1.6;
+}
 label {
   display: block;
   margin-bottom: 14px;
@@ -230,6 +266,41 @@ input:focus {
   border-color: var(--field-accent, var(--login-accent));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--field-accent, var(--login-accent)) 18%, transparent);
   background: var(--login-card);
+}
+.pwd-field {
+  position: relative;
+}
+.pwd-field input {
+  padding-right: 42px;
+}
+.eye-btn {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--login-sub);
+  cursor: pointer;
+  letter-spacing: 0;
+  text-indent: 0;
+}
+.eye-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--login-sub) 14%, transparent);
+  color: var(--login-ink);
+  transform: translateY(-50%);
+  filter: none;
+}
+.eye-btn svg {
+  width: 17px;
+  height: 17px;
 }
 .error {
   color: var(--danger);
