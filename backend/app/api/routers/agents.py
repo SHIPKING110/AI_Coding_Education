@@ -603,7 +603,9 @@ def conversation_chat(
         if message.strip():
             from app.services import mcp_runner as _mcp
 
-            mcp_block, mcp_tool_names, mcp_trace = _mcp.run(db, user.id, conv.agent_id, message.strip())
+            # 压入教师个人模型配置：规划调用走自配模型，否则全局无 key 时报 Missing credentials
+            with _llm_ctx.use_llm(resolved):
+                mcp_block, mcp_tool_names, mcp_trace = _mcp.run(db, user.id, conv.agent_id, message.strip())
             if mcp_block:
                 mem_block = (mem_block + "\n\n" + mcp_block).strip() if mem_block else mcp_block
     except Exception:
@@ -775,6 +777,7 @@ def conversation_chat(
             "tool_trace": tool_trace,
             "tool_rounds": plan_outcome.rounds,
             "tool_degraded": plan_outcome.degraded,
+            "mcp_trace": mcp_trace,
         })
 
     return StreamingResponse(

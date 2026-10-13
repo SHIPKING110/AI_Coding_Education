@@ -765,6 +765,7 @@ async function send(preset?: { text: string; stage?: string }) {
   let doneToolTrace: { seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[] | undefined
   let doneToolRounds = 0
   let doneToolDegraded = false
+  let doneMcpTrace: { step: string; ok: boolean; ms: number; detail: string }[] | undefined
     if (llmConfigs.value.length === 0) await loadLLMConfigs()
   const once = useRagOnce.value
   useRagOnce.value = false
@@ -792,6 +793,7 @@ async function send(preset?: { text: string; stage?: string }) {
         doneToolTrace = info.tool_trace
         doneToolRounds = info.tool_rounds ?? 0
         doneToolDegraded = !!info.tool_degraded
+        doneMcpTrace = info.mcp_trace
       },
       {
         idleTimeoutMs: 90000,
@@ -816,8 +818,8 @@ async function send(preset?: { text: string; stage?: string }) {
       content: stripJsonBlocks(full),
       options: doneOptions ?? null,
       spec: null,
-      citations: doneToolTrace?.length
-        ? { tools: doneToolTrace, rounds: doneToolRounds, degraded: doneToolDegraded }
+      citations: (doneToolTrace?.length || doneMcpTrace?.length)
+        ? { tools: doneToolTrace, rounds: doneToolRounds, degraded: doneToolDegraded, mcp_trace: doneMcpTrace }
         : undefined,
     })
     if (timedOut) {
@@ -842,7 +844,7 @@ async function send(preset?: { text: string; stage?: string }) {
       if (full.trim()) {
         messages.value.push({
           role: 'assistant', content: stripJsonBlocks(full), options: doneOptions ?? null,
-          citations: doneToolTrace?.length ? { tools: doneToolTrace, rounds: doneToolRounds } : undefined,
+          citations: (doneToolTrace?.length || doneMcpTrace?.length) ? { tools: doneToolTrace, rounds: doneToolRounds, mcp_trace: doneMcpTrace } : undefined,
         })
       }
     } else {

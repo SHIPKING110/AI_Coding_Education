@@ -175,6 +175,7 @@ export async function agentChatStream(
   onDone?: (info: {
     stage?: string; options?: ChatOption[]; has_spec?: boolean; title?: string;
     tool_trace?: ToolTraceStep[]; tool_rounds?: number; tool_degraded?: boolean;
+    mcp_trace?: { step: string; ok: boolean; ms: number; detail: string }[];
   }) => void,
   opts?: { idleTimeoutMs?: number; onTimeout?: () => void },
 ): Promise<void> {
@@ -242,6 +243,7 @@ export async function agentChatStream(
           tool_trace?: ToolTraceStep[]
           tool_rounds?: number
           tool_degraded?: boolean
+          mcp_trace?: { step: string; ok: boolean; ms: number; detail: string }[]
         }
         try {
           data = JSON.parse(line.slice(5).trim())
@@ -256,6 +258,7 @@ export async function agentChatStream(
             onDone({
               stage: data.stage, options: data.options, has_spec: data.has_spec, title: data.title,
               tool_trace: data.tool_trace, tool_rounds: data.tool_rounds, tool_degraded: data.tool_degraded,
+              mcp_trace: data.mcp_trace,
             })
           }
           return
