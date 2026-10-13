@@ -28,6 +28,7 @@ export interface AgentSkill {
   name: string
   description: string
   content: string
+  files: string[]
   enabled: boolean
 }
 
@@ -85,4 +86,23 @@ export async function getAgentGlobal(): Promise<{ default_mcp_ids: string[]; def
 }
 export async function putAgentGlobal(payload: { default_mcp_ids: string[]; default_skill_ids: string[] }): Promise<void> {
   await http.put('/agents/ext/global', payload)
+}
+
+export async function testMcp(id: string): Promise<{ ok: boolean; tools: { name: string; description: string }[]; trace: { step: string; ok: boolean; ms: number; detail: string }[] }> {
+  const { data } = await http.post(`/agents/ext/mcps/${id}/test`)
+  return data
+}
+
+export async function uploadSkillBundle(id: string, file: File): Promise<AgentSkill> {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await http.post(`/agents/ext/skills/${id}/upload`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+export async function previewSkillFile(id: string, path: string): Promise<{ path: string; text: string }> {
+  const { data } = await http.get(`/agents/ext/skills/${id}/files/preview`, { params: { path } })
+  return data
 }

@@ -598,15 +598,17 @@ def conversation_chat(
     # MCP 运行时执行：LLM 决策是否调用生效的 MCP，POST endpoint 取结果回灌。
     # 全部容错：无工具/无需调用/失败/超时静默跳过，不影响主回答。
     mcp_tool_names: list[str] = []
+    mcp_trace: list[dict] = []
     try:
         if message.strip():
             from app.services import mcp_runner as _mcp
 
-            mcp_block, mcp_tool_names = _mcp.run(db, user.id, conv.agent_id, message.strip())
+            mcp_block, mcp_tool_names, mcp_trace = _mcp.run(db, user.id, conv.agent_id, message.strip())
             if mcp_block:
                 mem_block = (mem_block + "\n\n" + mcp_block).strip() if mem_block else mcp_block
     except Exception:
         mcp_tool_names = []
+        mcp_trace = []
     # RAG：会话开关默认关；单条消息可临时切换；关闭时不检索不注入
     agent_info = agent_def or {}
     want_rag = body.use_rag if body.use_rag is not None else bool(conv.rag_enabled)
@@ -733,6 +735,9 @@ def conversation_chat(
         tool_trace = _tool_trace(plan_outcome)
         if mcp_tool_names:
             tool_trace = (tool_trace + [f"MCP:{n}" for n in mcp_tool_names]) if tool_trace else [f"MCP:{n}" for n in mcp_tool_names]
+        if mcp_trace:
+            msg_citations = dict(msg_citations or {})
+            msg_citations["mcp_trace"] = mcp_trace
         msg_citations: dict | None = citations
         if tool_trace:
             msg_citations = dict(msg_citations or {})

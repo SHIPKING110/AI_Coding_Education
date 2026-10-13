@@ -45,7 +45,7 @@ class AgentMCP(Base):
     id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(64), default="MCP 服务")
-    kind: Mapped[str] = mapped_column(String(32), default="http")
+    kind: Mapped[str] = mapped_column(String(32), default="streamable_http")
     endpoint: Mapped[str] = mapped_column(String(512), default="")
     description: Mapped[str] = mapped_column(String(256), default="")
     config: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -61,6 +61,7 @@ class AgentSkill(Base):
     name: Mapped[str] = mapped_column(String(64), default="Skill")
     description: Mapped[str] = mapped_column(String(256), default="")
     content: Mapped[str] = mapped_column(Text, default="")
+    files: Mapped[list] = mapped_column(JSON, default=list)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

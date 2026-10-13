@@ -44,7 +44,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import {
   createCustomAgent, createMcp, createSkill, deleteCustomAgent, deleteMcp, deleteSkill,
   getAgentGlobal, listCustomAgents, listMcps, listSkills, patchCustomAgent, patchMcp, patchSkill,
-  putAgentGlobal, type AgentMcp, type AgentSkill, type CustomAgent,
+  previewSkillFile, putAgentGlobal, testMcp, uploadSkillBundle, type AgentMcp, type AgentSkill, type CustomAgent,
 } from '@/api/agentExt'
 
 const route = useRoute()
@@ -1052,6 +1052,11 @@ function toolsOf(m: { citations?: Record<string, unknown> | null }): {
     seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null;
   }[]) : []
 }
+/* —— MCP 调用链路（citations.mcp_trace）：规划→握手→调用→结果，每步 ok/ms/detail —— */
+function mcpTraceOf(m: { citations?: Record<string, unknown> | null }): { step: string; ok: boolean; ms: number; detail: string }[] {
+  const arr = (m.citations as { mcp_trace?: unknown } | null)?.mcp_trace
+  return Array.isArray(arr) ? (arr as { step: string; ok: boolean; ms: number; detail: string }[]) : []
+}
 
 function toolArgsText(args: Record<string, unknown>): string {
   const parts = Object.entries(args ?? {}).map(([k, v]) => {
@@ -1101,7 +1106,7 @@ const editingAgent = ref<CustomAgent | null>(null)
 const agentForm = ref({ name: '', description: '', system_prompt: '', supports_rag: true, icon: 'assistant', mcp_ids: [] as string[], skill_ids: [] as string[] })
 const showMcpForm = ref(false)
 const editingMcp = ref<AgentMcp | null>(null)
-const mcpForm = ref({ name: '', endpoint: '', description: '', enabled: true })
+const mcpForm = ref({ name: '', kind: 'streamable_http', endpoint: '', description: '', enabled: true })
 const showSkillForm = ref(false)
 const editingSkill = ref<AgentSkill | null>(null)
 const skillForm = ref({ name: '', description: '', content: '', enabled: true })
@@ -1165,17 +1170,17 @@ async function removeAgent(c: CustomAgent) {
 
 function openMcpCreate() {
   editingMcp.value = null
-  mcpForm.value = { name: '', endpoint: '', description: '', enabled: true }
+  mcpForm.value = { name: '', kind: 'streamable_http', endpoint: '', description: '', enabled: true }
   showMcpForm.value = true
 }
 function openMcpEdit(m: AgentMcp) {
   editingMcp.value = m
-  mcpForm.value = { name: m.name, endpoint: m.endpoint, description: m.description, enabled: m.enabled }
+  mcpForm.value = { name: m.name, kind: m.kind || 'streamable_http', endpoint: m.endpoint, description: m.description, enabled: m.enabled }
   showMcpForm.value = true
 }
 async function saveMcp() {
   if (!mcpForm.value.name.trim()) { extError.value = '请填写 MCP 名称'; return }
-  const payload = { ...mcpForm.value, name: mcpForm.value.name.trim(), kind: 'http', config: {} }
+  const payload = { ...mcpForm.value, name: mcpForm.value.name.trim(), config: editingMcp.value ? editingMcp.value.config ?? {} : {} }
   if (editingMcp.value) {
     const updated = await patchMcp(editingMcp.value.id, payload)
     Object.assign(editingMcp.value, updated)
@@ -1194,6 +1199,25 @@ async function toggleMcp(m: AgentMcp) {
   m.enabled = updated.enabled
 }
 
+/* —— MCP 测试连接：握手 + tools/list，结果弹窗展示工具清单与 trace —— */
+const showMcpTest = ref(false)
+const mcpTestTarget = ref<AgentMcp | null>(null)
+const mcpTestLoading = ref(false)
+const mcpTestResult = ref<{ ok: boolean; tools: { name: string; description: string }[]; trace: { step: string; ok: boolean; ms: number; detail: string }[] } | null>(null)
+async function openMcpTest(m: AgentMcp) {
+  mcpTestTarget.value = m
+  mcpTestResult.value = null
+  mcpTestLoading.value = true
+  showMcpTest.value = true
+  try {
+    mcpTestResult.value = await testMcp(m.id)
+  } catch (e: unknown) {
+    mcpTestResult.value = { ok: false, tools: [], trace: [{ step: 'test', ok: false, ms: 0, detail: e instanceof Error ? e.message : '测试失败' }] }
+  } finally {
+    mcpTestLoading.value = false
+  }
+}
+
 function openSkillCreate() {
   editingSkill.value = null
   skillForm.value = { name: '', description: '', content: '', enabled: true }
@@ -1206,7 +1230,7 @@ function openSkillEdit(s: AgentSkill) {
 }
 async function saveSkill() {
   if (!skillForm.value.name.trim()) { extError.value = '请填写 Skill 名称'; return }
-  if (!skillForm.value.content.trim()) { extError.value = '请填写 Skill 指令内容（将追加进 Agent 系统提示）'; return }
+  if (!skillForm.value.content.trim() && !(editingSkill.value?.files?.length)) { extError.value = '请填写 Skill 指令内容，或上传含 SKILL.md 的文件包（自动回填）'; return }
   const payload = { ...skillForm.value, name: skillForm.value.name.trim() }
   if (editingSkill.value) {
     const updated = await patchSkill(editingSkill.value.id, payload)
@@ -1215,6 +1239,31 @@ async function saveSkill() {
     skills.value.unshift(await createSkill(payload))
   }
   showSkillForm.value = false
+}
+/* —— Skill 文件包上传（zip）+ 文件预览 —— */
+const skillUploading = ref(false)
+const skillPreview = ref<{ path: string; text: string } | null>(null)
+async function onSkillZip(e: Event, s: AgentSkill) {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f) return
+  skillUploading.value = true
+  try {
+    const updated = await uploadSkillBundle(s.id, f)
+    Object.assign(s, updated)
+  } catch (err: unknown) {
+    extError.value = err instanceof Error ? err.message : '上传失败'
+  } finally {
+    skillUploading.value = false
+  }
+}
+async function openSkillPreview(s: AgentSkill, path: string) {
+  try {
+    skillPreview.value = await previewSkillFile(s.id, path)
+  } catch (err: unknown) {
+    extError.value = err instanceof Error ? err.message : '预览失败'
+  }
 }
 async function removeSkill(s: AgentSkill) {
   if (!confirm(`删除 Skill「${s.name}」？`)) return
@@ -1565,6 +1614,17 @@ function back() {
                       <p v-else class="tool-error">查询失败：{{ t.error }}（已跳过该项，其余数据不受影响）</p>
                     </div>
                   </details>
+                  <details v-if="mcpTraceOf(m).length" class="cite-drop tool-drop">
+                    <summary>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                      MCP 调用链路（{{ mcpTraceOf(m).length }} 步）
+                    </summary>
+                    <div v-for="(s, k) in mcpTraceOf(m)" :key="k" class="trace-row" :class="s.ok ? 'ok' : 'fail'">
+                      <span class="trace-step">{{ s.step }}</span>
+                      <span class="trace-detail">{{ s.detail }}</span>
+                      <span class="trace-ms">{{ s.ms }}ms</span>
+                    </div>
+                  </details>
                 </div>
               </div>
               <div v-if="streaming" class="msg assistant">
@@ -1707,10 +1767,12 @@ function back() {
                 <b class="kb-title">{{ m.name }}</b>
                 <p class="kb-desc">{{ m.description || '暂无描述' }}</p>
                 <div class="kb-file">{{ m.endpoint || '未填 endpoint' }}</div>
+                <div class="kb-kind">{{ m.kind === 'http' ? '普通 HTTP' : 'MCP StreamableHTTP' }}</div>
                 <div class="kb-ops">
                   <button class="mini-btn switch" :class="{ off: !m.enabled }" @click="toggleMcp(m)">
                     <span class="switch-dot" />{{ m.enabled ? '启用' : '停用' }}
                   </button>
+                  <button class="mini-btn accent" @click="openMcpTest(m)">测试</button>
                   <button class="mini-btn" @click="openMcpEdit(m)">配置</button>
                   <button class="mini-btn danger" @click="removeMcp(m)">删除</button>
                 </div>
@@ -1743,10 +1805,17 @@ function back() {
                 <b class="kb-title">{{ s.name }}</b>
                 <p class="kb-desc">{{ s.description || '暂无描述' }}</p>
                 <div class="kb-file">{{ (s.content || '').slice(0, 80) }}</div>
+                <div v-if="s.files?.length" class="skill-files">
+                  <button v-for="f in s.files" :key="f" class="file-chip" @click="openSkillPreview(s, f)">{{ f }}</button>
+                </div>
                 <div class="kb-ops">
                   <button class="mini-btn switch" :class="{ off: !s.enabled }" @click="toggleSkill(s)">
                     <span class="switch-dot" />{{ s.enabled ? '启用' : '停用' }}
                   </button>
+                  <label class="mini-btn upload-btn">
+                    {{ skillUploading ? '上传中…' : '上传zip包' }}
+                    <input type="file" accept=".zip" hidden @change="onSkillZip($event, s)" />
+                  </label>
                   <button class="mini-btn" @click="openSkillEdit(s)">配置</button>
                   <button class="mini-btn danger" @click="removeSkill(s)">删除</button>
                 </div>
@@ -1953,12 +2022,48 @@ function back() {
       <div class="modal">
         <h2>{{ editingMcp ? '配置 MCP' : '新建 MCP' }}</h2>
         <label>名称<input v-model="mcpForm.name" class="kb-input" maxlength="64" /></label>
-        <label>Endpoint<input v-model="mcpForm.endpoint" class="kb-input" placeholder="https://…（HTTP 工具地址）" /></label>
+        <label>类型
+          <select v-model="mcpForm.kind" class="kb-input">
+            <option value="streamable_http">MCP StreamableHTTP（高德/标准 MCP 服务）</option>
+            <option value="http">普通 HTTP（POST webhook）</option>
+          </select>
+        </label>
+        <label>Endpoint<input v-model="mcpForm.endpoint" class="kb-input" placeholder="https://…（对话中按需 POST 调用）" /></label>
         <label>描述<input v-model="mcpForm.description" class="kb-input" maxlength="256" placeholder="这个工具能做什么" /></label>
         <label class="check-line"><input v-model="mcpForm.enabled" type="checkbox" /> 启用</label>
         <div class="modal-actions">
           <button class="btn ghost" @click="showMcpForm = false">取消</button>
           <button class="btn primary" @click="saveMcp()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MCP 测试结果 -->
+    <div v-if="showMcpTest" class="overlay" @click.self="showMcpTest = false">
+      <div class="modal wide">
+        <h2>测试连接：{{ mcpTestTarget?.name }}</h2>
+        <p v-if="mcpTestLoading" class="empty">握手 + 获取工具清单中…</p>
+        <template v-else-if="mcpTestResult">
+          <div class="test-status" :class="mcpTestResult.ok ? 'ok' : 'fail'">
+            {{ mcpTestResult.ok ? '✓ 连接成功' : '✕ 连接失败' }}
+          </div>
+          <div v-if="mcpTestResult.tools.length" class="pick-group">
+            <b>可用工具（{{ mcpTestResult.tools.length }}）</b>
+            <div v-for="t in mcpTestResult.tools" :key="t.name" class="tool-row">
+              <b>{{ t.name }}</b><span>{{ t.description }}</span>
+            </div>
+          </div>
+          <div class="pick-group">
+            <b>调用链路</b>
+            <div v-for="(s, i) in mcpTestResult.trace" :key="i" class="trace-row" :class="s.ok ? 'ok' : 'fail'">
+              <span class="trace-step">{{ s.step }}</span>
+              <span class="trace-detail">{{ s.detail }}</span>
+              <span class="trace-ms">{{ s.ms }}ms</span>
+            </div>
+          </div>
+        </template>
+        <div class="modal-actions">
+          <button class="btn primary" @click="showMcpTest = false">关闭</button>
         </div>
       </div>
     </div>
@@ -1974,6 +2079,17 @@ function back() {
         <div class="modal-actions">
           <button class="btn ghost" @click="showSkillForm = false">取消</button>
           <button class="btn primary" @click="saveSkill()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skill 文件预览 -->
+    <div v-if="skillPreview" class="overlay" @click.self="skillPreview = null">
+      <div class="modal wide">
+        <h2>{{ skillPreview.path }}</h2>
+        <pre class="file-preview">{{ skillPreview.text }}</pre>
+        <div class="modal-actions">
+          <button class="btn primary" @click="skillPreview = null">关闭</button>
         </div>
       </div>
     </div>
@@ -2503,6 +2619,26 @@ function back() {
 .pick-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .pick-item { flex-direction: row !important; align-items: center; gap: 5px !important; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; font-weight: 500 !important; cursor: pointer; }
 .pick-item input { accent-color: var(--brand); }
+.mini-btn.accent { border-color: var(--brand); color: var(--brand-strong); background: var(--brand-soft); }
+.kb-kind { font-size: 11px; font-weight: 700; color: var(--ink-3); background: #f1f5f9; border-radius: 6px; padding: 2px 8px; display: inline-block; margin-top: 6px; }
+.test-status { font-size: 14px; font-weight: 800; border-radius: 10px; padding: 10px 14px; margin-bottom: 10px; }
+.test-status.ok { background: #ecfdf5; color: #047857; }
+.test-status.fail { background: var(--danger-soft); color: var(--danger); }
+.tool-row { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+.tool-row b { color: var(--brand-strong); white-space: nowrap; }
+.tool-row span { color: var(--ink-3); }
+.trace-row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 6px 8px; border-radius: 8px; margin: 4px 0; background: #f8fafc; }
+.trace-row.ok { border-left: 3px solid var(--success); }
+.trace-row.fail { border-left: 3px solid var(--danger); }
+.trace-step { font-weight: 800; white-space: nowrap; color: var(--ink); }
+.trace-row.fail .trace-step { color: var(--danger); }
+.trace-detail { flex: 1; color: var(--ink-2); word-break: break-all; line-height: 1.5; }
+.trace-ms { color: var(--ink-3); white-space: nowrap; font-size: 11px; }
+.skill-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.file-chip { border: 1px solid var(--line); background: #f8fafc; border-radius: 6px; font-size: 11px; padding: 2px 8px; cursor: pointer; color: var(--brand-strong); }
+.file-chip:hover { border-color: var(--brand); }
+.upload-btn { cursor: pointer; }
+.file-preview { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.6; background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 14px; max-height: 50vh; overflow: auto; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .btn.ghost { background: var(--surface); border: 1px solid var(--line); }
 

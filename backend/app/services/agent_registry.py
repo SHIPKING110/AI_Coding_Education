@@ -167,8 +167,14 @@ def effective_capabilities(db, owner_id, agent_id: str) -> dict:
                 mcp_ids.append(m.name or sid)
         for s in _ext.list_skills(db, owner_id=owner_id):
             sid = str(s.id)
-            if s.enabled and sid in want_skill and (s.content or "").strip():
-                skill_blocks.append(f"【Skill·{s.name}】\n{(s.content or '').strip()}")
+            if s.enabled and sid in want_skill and (((s.content or "").strip()) or (s.files or [])):
+                # 文件包注入：SKILL.md 摘要 + 文件清单（脚本默认不执行、仅引用）
+                try:
+                    from app.services import skill_bundle as _bundle
+
+                    skill_blocks.append(_bundle.skill_context_block(owner_id, sid, s.name, s.content or "", list(s.files or [])))
+                except Exception:
+                    skill_blocks.append(f"【Skill·{s.name}】\n{(s.content or '').strip()}")
     except Exception:
         pass
     return {"mcp_names": mcp_ids, "skill_blocks": skill_blocks}

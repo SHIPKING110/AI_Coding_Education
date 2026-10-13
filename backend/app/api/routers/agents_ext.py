@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -38,7 +38,7 @@ def _mcp_out(m) -> dict:
 def _skill_out(s) -> dict:
     return {
         "id": str(s.id), "name": s.name, "description": s.description,
-        "content": s.content, "enabled": s.enabled,
+        "content": s.content, "files": list(s.files or []), "enabled": s.enabled,
     }
 
 
@@ -101,10 +101,10 @@ def delete_custom_agent(agent_id: str, db: Session = Depends(get_db), user: User
 
 class McpIn(BaseModel):
     name: str = Field(max_length=64)
-    kind: str = Field(default="http", max_length=32)
+    kind: str = Field(default="streamable_http", max_length=32, description="streamable_http | http")
     endpoint: str = Field(default="", max_length=512)
     description: str = Field(default="", max_length=256)
-    config: dict = Field(default_factory=dict)
+    config: dict = Field(default_factory=dict, description="可选 headers，如 {headers: {Authorization: 'Bearer x'}}")
     enabled: bool = True
 
 
@@ -168,7 +168,63 @@ def delete_skill(skill_id: uuid.UUID, db: Session = Depends(get_db), user: User 
     if s is None:
         raise HTTPException(status_code=404, detail="Skill 不存在")
     ext_crud.delete_skill(db, s)
+    try:
+        from app.services import skill_bundle as _bundle
+
+        _bundle.remove_bundle(user.id, skill_id)
+    except Exception:
+        pass
     return {"ok": True}
+
+
+@router.post("/skills/{skill_id}/upload")
+async def upload_skill_bundle(
+    skill_id: uuid.UUID, file: UploadFile = File(...),
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """上传 Skill 文件包（zip，含 SKILL.md + 脚本/资源）：解压落盘隔离目录，文件清单写回 files。"""
+    from app.services import skill_bundle as _bundle
+
+    s = ext_crud.get_skill(db, owner_id=user.id, skill_id=skill_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Skill 不存在")
+    data = await file.read()
+    if len(data) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件过大（zip 需 ≤12MB）")
+    try:
+        info = _bundle.save_bundle(user.id, skill_id, data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    update: dict = {"files": info["files"]}
+    # 包内 SKILL.md 自动回填到指令内容（手工内容保留并前置）
+    if info["skill_md"]:
+        manual = (s.content or "").strip()
+        update["content"] = (manual + "\n\n" + info["skill_md"]).strip()[:8000] if manual else info["skill_md"]
+    s = ext_crud.update_skill(db, s, **update)
+    return _skill_out(s)
+
+
+@router.get("/skills/{skill_id}/files")
+def list_skill_files(skill_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    s = ext_crud.get_skill(db, owner_id=user.id, skill_id=skill_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Skill 不存在")
+    return {"files": list(s.files or [])}
+
+
+@router.get("/skills/{skill_id}/files/preview")
+def preview_skill_file(skill_id: uuid.UUID, path: str = Query(...), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from app.services import skill_bundle as _bundle
+
+    s = ext_crud.get_skill(db, owner_id=user.id, skill_id=skill_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Skill 不存在")
+    if path not in list(s.files or []):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    try:
+        return {"path": path, "text": _bundle.read_text_file(user.id, skill_id, path)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ---------------- 全局设置 ----------------
@@ -190,3 +246,11 @@ def put_global(body: GlobalIn, db: Session = Depends(get_db), user: User = Depen
         db, owner_id=user.id, default_mcp_ids=body.default_mcp_ids, default_skill_ids=body.default_skill_ids
     )
     return {"default_mcp_ids": list(g.default_mcp_ids or []), "default_skill_ids": list(g.default_skill_ids or [])}
+
+
+@router.post("/mcps/{mcp_id}/test")
+def test_mcp(mcp_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """测试 MCP 连接：握手 + tools/list，返回工具清单与 trace，前端直接展示。"""
+    from app.services import mcp_runner as _mcp
+
+    return _mcp.test_connection(db, user.id, mcp_id)
