@@ -38,8 +38,8 @@ class ConversationUpdate(BaseModel):
 
 
 @router.get("")
-def list_agents():
-    return {"items": agent_registry.AGENTS}
+def list_agents(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return {"items": agent_registry.list_for_owner(db, user.id)}
 
 
 @router.get("/conversations")
@@ -67,7 +67,7 @@ def list_conversations(db: Session = Depends(get_db), user: User = Depends(get_c
 def create_conversation(
     body: ConversationCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ):
-    if agent_registry.get_agent(body.agent_id) is None:
+    if agent_registry.resolve_agent(db, user.id, body.agent_id) is None:
         raise HTTPException(status_code=404, detail="Agent 不存在")
     conv = agent_crud.create_conversation(
         db, owner_id=user.id, agent_id=body.agent_id, context_ref=body.context_ref, title=body.title,
@@ -289,7 +289,7 @@ def conversation_build_ppt(
     conv = agent_crud.get_conversation(db, conv_id=conv_id, owner_id=user.id)
     if conv is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    if agent_registry.get_agent(conv.agent_id) is None:
+    if agent_registry.resolve_agent(db, user.id, conv.agent_id) is None:
         raise HTTPException(status_code=404, detail="Agent 不存在")
     spec = _latest_spec(db, conv.id)
     outline = body.outline if body.outline is not None else spec.get("outline") or []
@@ -550,7 +550,8 @@ def conversation_chat(
     conv = agent_crud.get_conversation(db, conv_id=conv_id, owner_id=user.id)
     if conv is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    if agent_registry.get_agent(conv.agent_id) is None:
+    agent_def = agent_registry.resolve_agent(db, user.id, conv.agent_id)
+    if agent_def is None:
         raise HTTPException(status_code=404, detail="Agent 不存在")
     from app.services import llm_context as _llm_ctx
 
@@ -566,7 +567,7 @@ def conversation_chat(
     context_ref = conv.context_ref or {}
 
     # 会话 stage：前端按路线图推进（缺省沿用会话当前 stage）
-    stage_keys = [s.get("key") for s in (agent_registry.get_agent(conv.agent_id) or {}).get("stages", [])]
+    stage_keys = [s.get("key") for s in (agent_def or {}).get("stages", [])]
     stage = body.stage if body.stage in stage_keys else (conv.stage if conv.stage in stage_keys else "chat")
     if stage != conv.stage:
         conv = agent_crud.update_conversation(db, conv, stage=stage)
@@ -581,8 +582,21 @@ def conversation_chat(
 
     mem_ctx = agent_memory.build_memory_context(db, owner_id=user.id, agent_id=conv.agent_id, conversation_id=conv.id)
     mem_block = agent_memory.memory_prompt_block(mem_ctx)
+    # 自定义 Agent 的 system_prompt 覆盖 + Skill/MCP 生效（per-agent ∪ 全局）：
+    # Skill 以追加指令块注入；MCP 以可用工具名单注入（只读声明，不自动调用外部）。
+    caps = agent_registry.effective_capabilities(db, user.id, conv.agent_id)
+    custom_sys = (agent_def or {}).get("system_prompt") or ""
+    extra_blocks: list[str] = []
+    if custom_sys.strip() and (agent_def or {}).get("custom"):
+        extra_blocks.append(f"【Agent 专属指令】\n{custom_sys.strip()}")
+    extra_blocks.extend(caps.get("skill_blocks") or [])
+    if caps.get("mcp_names"):
+        extra_blocks.append("【可用外部工具（MCP）】\n" + "\n".join(f"- {n}" for n in caps["mcp_names"]))
+    if extra_blocks:
+        extra = "\n\n".join(extra_blocks)
+        mem_block = (mem_block + "\n\n" + extra).strip() if mem_block else extra
     # RAG：会话开关默认关；单条消息可临时切换；关闭时不检索不注入
-    agent_info = agent_registry.get_agent(conv.agent_id) or {}
+    agent_info = agent_def or {}
     want_rag = body.use_rag if body.use_rag is not None else bool(conv.rag_enabled)
     citations: dict | None = None
     if want_rag and agent_info.get("supports_rag") and message.strip():

@@ -36,7 +36,7 @@ router = APIRouter(prefix="/schedules", tags=["schedules"])
 MANAGE_ROLES = (Role.ADMIN, Role.STAFF, Role.TEACHER)
 
 
-def _schedule_out(s: Schedule) -> ScheduleOut:
+def _schedule_out(s: Schedule, *, readonly: bool = False) -> ScheduleOut:
     return ScheduleOut(
         id=s.id,
         class_id=s.class_id,
@@ -48,6 +48,7 @@ def _schedule_out(s: Schedule) -> ScheduleOut:
         end_time=s.end_time,
         status=s.status,
         is_trial=s.is_trial,
+        readonly=readonly,
         created_at=s.created_at,
     )
 
@@ -259,8 +260,10 @@ def get_schedule(
     s = schedule_crud.get(db, schedule_id)
     if s is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
-    _require_own_schedule(s, user)
-    return _schedule_out(s)
+    # 只读开放：任何登录用户可点进去看详情（含学员考勤与划课时）；
+    # 写操作（改/取消/考勤标记）仍走各自的 _require_own_schedule 守卫。
+    readonly = bool(user.role == Role.TEACHER.value and s.teacher_id != user.id)
+    return _schedule_out(s, readonly=readonly)
 
 
 @router.patch("/{schedule_id}", response_model=ScheduleOut)
@@ -359,7 +362,7 @@ def get_attendance(
     s = schedule_crud.get(db, schedule_id)
     if s is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
-    _require_own_schedule(s, user)
+    # 只读开放：考勤列表任何管理端角色可看；标记/取消仍需属主（submit/cancel 守卫不变）。
     students = attendance_crud.all_students_for_schedule(db, s)
     by_sid = attendance_crud.ensure_for_students(db, schedule_id, [st.id for st in students])
     db.flush()

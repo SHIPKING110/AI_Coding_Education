@@ -29,8 +29,10 @@ const notStarted = computed(() => {
   if (!schedule.value || schedule.value.status !== 'scheduled') return false
   return parseServerTime(schedule.value.start_time).getTime() > today().getTime()
 })
-const attendDisabled = computed(() => markLocked.value || notStarted.value)
-const leaveDisabled = computed(() => markLocked.value)
+// 非属主只读：详情可看，标记/取消全部禁用（后端写接口仍有守卫，前端先置灰防误点）
+const isReadonly = computed(() => schedule.value?.readonly === true)
+const attendDisabled = computed(() => markLocked.value || notStarted.value || isReadonly.value)
+const leaveDisabled = computed(() => markLocked.value || isReadonly.value)
 
 const pending = ref<Set<string>>(new Set())
 const loadError = ref('')
@@ -73,6 +75,10 @@ function timeOf(iso: string): string {
 }
 
 async function mark(status: 'attended' | 'leave', studentId: string) {
+  if (schedule.value?.readonly) {
+    notice.value = { type: 'info', text: '只读查看：这是其他老师的排课，不可标记考勤' }
+    return
+  }
   if (status === 'attended' && attendDisabled.value) {
     notice.value = { type: 'info', text: '未到上课时间，暂不能签到；请假可提前标记' }
     return
@@ -152,7 +158,7 @@ onMounted(load)
             {{ schedule.teacher_name || '未分配教师' }}
           </p>
           <div class="head-ops">
-            <button v-if="schedule.status === 'scheduled'" class="btn danger-ghost" @click="cancelThis">
+            <button v-if="schedule.status === 'scheduled' && !schedule.readonly" class="btn danger-ghost" @click="cancelThis">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
               取消排课
             </button>
@@ -185,6 +191,11 @@ onMounted(load)
       <div v-if="markLocked" class="locked-tip">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z" /></svg>
         {{ schedule.status === 'completed' ? '该节课已完成考勤，不可再标记' : '该排课已取消' }}
+      </div>
+
+      <div v-else-if="schedule.readonly" class="locked-tip readonly-tip">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
+        这是 {{ schedule.teacher_name || '其他老师' }} 的排课，你当前为只读查看：可看学员考勤与划课时，不可标记/取消
       </div>
 
       <div v-else-if="notStarted" class="locked-tip not-started">
@@ -416,6 +427,11 @@ h1 {
 .locked-tip.not-started {
   background: var(--warning-soft);
   color: #92400e;
+}
+.locked-tip.readonly-tip {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
 }
 .locked-tip svg {
   width: 16px;

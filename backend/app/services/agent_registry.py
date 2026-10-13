@@ -1,6 +1,7 @@
 """Agent 注册表：工作台可用的 Agent 清单。
 
 id / 名称 / 所需上下文类型 / 系统提示词 / 可用动作集 / 是否支持 RAG / 图标。
+内置 3 个 + 用户自定义 Agent（custom_agents 表，list 时合并）。
 """
 
 from __future__ import annotations
@@ -91,4 +92,86 @@ def get_agent(agent_id: str) -> dict | None:
     return BY_ID.get(agent_id)
 
 
-__all__ = ["AGENTS", "BY_ID", "get_agent"]
+def list_for_owner(db, owner_id) -> list[dict]:
+    """内置 + 该用户的自定义 Agent 合并清单（自定义覆盖同名内置不可能，id 全局唯一）。"""
+    items = list(AGENTS)
+    try:
+        from app.crud import agent_ext as _ext
+
+        for c in _ext.list_custom_agents(db, owner_id=owner_id):
+            items.append({
+                "id": c.agent_id,
+                "name": c.name,
+                "description": c.description or "自定义 Agent",
+                "context_types": [],
+                "system_prompt": c.system_prompt or "",
+                "actions": ["send"],
+                "supports_rag": bool(c.supports_rag),
+                "icon": c.icon or "assistant",
+                "stages": c.stages or [{"key": "chat", "label": "智能问答", "desc": "直接提问", "prompt_stage": "chat"}],
+                "custom": True,
+            })
+    except Exception:
+        pass
+    return items
+
+
+def resolve_agent(db, owner_id, agent_id: str) -> dict | None:
+    """先查内置，再查自定义（含 system_prompt / stages 覆盖）。"""
+    hit = BY_ID.get(agent_id)
+    if hit is not None:
+        return hit
+    try:
+        from app.crud import agent_ext as _ext
+
+        c = _ext.get_custom_agent(db, owner_id=owner_id, agent_id=agent_id)
+        if c is None:
+            return None
+        return {
+            "id": c.agent_id,
+            "name": c.name,
+            "description": c.description or "自定义 Agent",
+            "context_types": [],
+            "system_prompt": c.system_prompt or "",
+            "actions": ["send"],
+            "supports_rag": bool(c.supports_rag),
+            "icon": c.icon or "assistant",
+            "stages": c.stages or [{"key": "chat", "label": "智能问答", "desc": "直接提问", "prompt_stage": "chat"}],
+            "custom": True,
+        }
+    except Exception:
+        return None
+
+
+def effective_capabilities(db, owner_id, agent_id: str) -> dict:
+    """某 Agent 生效的 MCP/Skill：per-agent 绑定 ∪ 全局默认（仅 enabled 的）。"""
+    mcp_ids: list[str] = []
+    skill_blocks: list[str] = []
+    try:
+        from app.crud import agent_ext as _ext
+
+        glob = _ext.get_global_setting(db, owner_id=owner_id)
+        per_mcp: list = []
+        per_skill: list = []
+        c = _ext.get_custom_agent(db, owner_id=owner_id, agent_id=agent_id)
+        if c is not None:
+            per_mcp = list(c.mcp_ids or [])
+            per_skill = list(c.skill_ids or [])
+        want_mcp = [str(x) for x in (per_mcp + list((glob.default_mcp_ids if glob else []) or []))]
+        want_skill = [str(x) for x in (per_skill + list((glob.default_skill_ids if glob else []) or []))]
+        seen: set[str] = set()
+        for m in _ext.list_mcps(db, owner_id=owner_id):
+            sid = str(m.id)
+            if m.enabled and sid in want_mcp and sid not in seen:
+                seen.add(sid)
+                mcp_ids.append(m.name or sid)
+        for s in _ext.list_skills(db, owner_id=owner_id):
+            sid = str(s.id)
+            if s.enabled and sid in want_skill and (s.content or "").strip():
+                skill_blocks.append(f"【Skill·{s.name}】\n{(s.content or '').strip()}")
+    except Exception:
+        pass
+    return {"mcp_names": mcp_ids, "skill_blocks": skill_blocks}
+
+
+__all__ = ["AGENTS", "BY_ID", "get_agent", "list_for_owner", "resolve_agent", "effective_capabilities"]

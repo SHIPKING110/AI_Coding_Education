@@ -41,11 +41,16 @@ import {
   type KnowledgeDoc,
 } from '@/api/knowledge'
 import { renderMarkdown } from '@/utils/markdown'
+import {
+  createCustomAgent, createMcp, createSkill, deleteCustomAgent, deleteMcp, deleteSkill,
+  getAgentGlobal, listCustomAgents, listMcps, listSkills, patchCustomAgent, patchMcp, patchSkill,
+  putAgentGlobal, type AgentMcp, type AgentSkill, type CustomAgent,
+} from '@/api/agentExt'
 
 const route = useRoute()
 const router = useRouter()
 
-const tab = ref<'chat' | 'mine' | 'plaza'>('chat')
+const tab = ref<'chat' | 'mine' | 'plaza' | 'mcp' | 'skill'>('chat')
 const sideCollapsed = ref(false)
 const agentDrop = ref(true)
 const histDrop = ref(true)
@@ -947,6 +952,7 @@ function startKbPoll() {
 }
 
 watch(tab, (t) => {
+  if (t === 'mcp' || t === 'skill') void loadExt()
   if (t !== 'chat') {
     void loadKb().then(() => startKbPoll())
   } else {
@@ -1082,6 +1088,165 @@ function progressLabel(p?: { stage: string; percent: number; detail: string } | 
   return `${name} ${p.percent}%`
 }
 
+/* —— Agent 扩展：自定义 Agent / MCP / Skill / 全局设置 —— */
+const customAgents = ref<CustomAgent[]>([])
+const mcps = ref<AgentMcp[]>([])
+const skills = ref<AgentSkill[]>([])
+const globMcp = ref<string[]>([])
+const globSkill = ref<string[]>([])
+const extLoading = ref(false)
+const extError = ref('')
+const showAgentForm = ref(false)
+const editingAgent = ref<CustomAgent | null>(null)
+const agentForm = ref({ name: '', description: '', system_prompt: '', supports_rag: true, icon: 'assistant', mcp_ids: [] as string[], skill_ids: [] as string[] })
+const showMcpForm = ref(false)
+const editingMcp = ref<AgentMcp | null>(null)
+const mcpForm = ref({ name: '', endpoint: '', description: '', enabled: true })
+const showSkillForm = ref(false)
+const editingSkill = ref<AgentSkill | null>(null)
+const skillForm = ref({ name: '', description: '', content: '', enabled: true })
+
+async function loadExt() {
+  extLoading.value = true
+  extError.value = ''
+  try {
+    const [ca, m, s, g] = await Promise.all([listCustomAgents(), listMcps(), listSkills(), getAgentGlobal()])
+    customAgents.value = ca
+    mcps.value = m
+    skills.value = s
+    globMcp.value = g.default_mcp_ids || []
+    globSkill.value = g.default_skill_ids || []
+    // 自定义 Agent 并入左侧可选列表（custom 标记避免与内置混淆）
+    for (const c of ca) {
+      if (!agents.value.some((a) => a.id === c.agent_id)) {
+        agents.value.push({ id: c.agent_id, name: c.name, description: c.description, context_types: [], supports_rag: c.supports_rag, icon: c.icon, stages: c.stages } as AgentInfo)
+      }
+    }
+  } catch (e: unknown) {
+    extError.value = e instanceof Error ? e.message : '扩展配置加载失败'
+  } finally {
+    extLoading.value = false
+  }
+}
+
+function openAgentCreate() {
+  editingAgent.value = null
+  agentForm.value = { name: '', description: '', system_prompt: '', supports_rag: true, icon: 'assistant', mcp_ids: [], skill_ids: [] }
+  showAgentForm.value = true
+}
+function openAgentEdit(c: CustomAgent) {
+  editingAgent.value = c
+  agentForm.value = { name: c.name, description: c.description, system_prompt: c.system_prompt, supports_rag: c.supports_rag, icon: c.icon, mcp_ids: [...(c.mcp_ids || [])], skill_ids: [...(c.skill_ids || [])] }
+  showAgentForm.value = true
+}
+async function saveAgent() {
+  if (!agentForm.value.name.trim()) { extError.value = '请填写 Agent 名称'; return }
+  const payload = { ...agentForm.value, name: agentForm.value.name.trim(), stages: [{ key: 'chat', label: '智能问答', desc: '直接提问', prompt_stage: 'chat' }] }
+  if (editingAgent.value) {
+    const updated = await patchCustomAgent(editingAgent.value.agent_id, payload)
+    Object.assign(editingAgent.value, updated)
+    const hit = agents.value.find((a) => a.id === updated.agent_id)
+    if (hit) { hit.name = updated.name; hit.description = updated.description }
+  } else {
+    const created = await createCustomAgent(payload)
+    customAgents.value.unshift(created)
+    agents.value.push({ id: created.agent_id, name: created.name, description: created.description, context_types: [], supports_rag: created.supports_rag, icon: created.icon, stages: created.stages } as AgentInfo)
+  }
+  showAgentForm.value = false
+  void loadExt()
+}
+async function removeAgent(c: CustomAgent) {
+  if (!confirm(`删除自定义 Agent「${c.name}」？其历史会话保留，但不可再新建该 Agent 的对话。`)) return
+  await deleteCustomAgent(c.agent_id)
+  customAgents.value = customAgents.value.filter((x) => x.agent_id !== c.agent_id)
+  agents.value = agents.value.filter((a) => a.id !== c.agent_id)
+  if (selectedAgent.value === c.agent_id) selectedAgent.value = agents.value[0]?.id ?? ''
+}
+
+function openMcpCreate() {
+  editingMcp.value = null
+  mcpForm.value = { name: '', endpoint: '', description: '', enabled: true }
+  showMcpForm.value = true
+}
+function openMcpEdit(m: AgentMcp) {
+  editingMcp.value = m
+  mcpForm.value = { name: m.name, endpoint: m.endpoint, description: m.description, enabled: m.enabled }
+  showMcpForm.value = true
+}
+async function saveMcp() {
+  if (!mcpForm.value.name.trim()) { extError.value = '请填写 MCP 名称'; return }
+  const payload = { ...mcpForm.value, name: mcpForm.value.name.trim(), kind: 'http', config: {} }
+  if (editingMcp.value) {
+    const updated = await patchMcp(editingMcp.value.id, payload)
+    Object.assign(editingMcp.value, updated)
+  } else {
+    mcps.value.unshift(await createMcp(payload))
+  }
+  showMcpForm.value = false
+}
+async function removeMcp(m: AgentMcp) {
+  if (!confirm(`删除 MCP「${m.name}」？已绑定的 Agent/全局配置将自动失效该项。`)) return
+  await deleteMcp(m.id)
+  mcps.value = mcps.value.filter((x) => x.id !== m.id)
+}
+async function toggleMcp(m: AgentMcp) {
+  const updated = await patchMcp(m.id, { name: m.name, kind: m.kind, endpoint: m.endpoint, description: m.description, config: m.config, enabled: !m.enabled })
+  m.enabled = updated.enabled
+}
+
+function openSkillCreate() {
+  editingSkill.value = null
+  skillForm.value = { name: '', description: '', content: '', enabled: true }
+  showSkillForm.value = true
+}
+function openSkillEdit(s: AgentSkill) {
+  editingSkill.value = s
+  skillForm.value = { name: s.name, description: s.description, content: s.content, enabled: s.enabled }
+  showSkillForm.value = true
+}
+async function saveSkill() {
+  if (!skillForm.value.name.trim()) { extError.value = '请填写 Skill 名称'; return }
+  if (!skillForm.value.content.trim()) { extError.value = '请填写 Skill 指令内容（将追加进 Agent 系统提示）'; return }
+  const payload = { ...skillForm.value, name: skillForm.value.name.trim() }
+  if (editingSkill.value) {
+    const updated = await patchSkill(editingSkill.value.id, payload)
+    Object.assign(editingSkill.value, updated)
+  } else {
+    skills.value.unshift(await createSkill(payload))
+  }
+  showSkillForm.value = false
+}
+async function removeSkill(s: AgentSkill) {
+  if (!confirm(`删除 Skill「${s.name}」？`)) return
+  await deleteSkill(s.id)
+  skills.value = skills.value.filter((x) => x.id !== s.id)
+}
+async function toggleSkill(s: AgentSkill) {
+  const updated = await patchSkill(s.id, { name: s.name, description: s.description, content: s.content, enabled: !s.enabled })
+  s.enabled = updated.enabled
+}
+
+function toggleGlobMcp(id: string) {
+  const s = new Set(globMcp.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  globMcp.value = [...s]
+  void putAgentGlobal({ default_mcp_ids: globMcp.value, default_skill_ids: globSkill.value })
+}
+function toggleGlobSkill(id: string) {
+  const s = new Set(globSkill.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  globSkill.value = [...s]
+  void putAgentGlobal({ default_mcp_ids: globMcp.value, default_skill_ids: globSkill.value })
+}
+function toggleAgentPick(arr: string[], id: string): string[] {
+  const s = new Set(arr)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  return [...s]
+}
+
 function back() {
   router.back()
 }
@@ -1137,7 +1302,7 @@ function back() {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path :d="iconOf(a)" /></svg>
               </span>
               <span class="agent-text">
-                <b>{{ a.name }}</b>
+                <b>{{ a.name }}<em v-if="(a as any).custom" class="custom-tag">自建</em></b>
                 <span>{{ a.description }}</span>
               </span>
               <svg v-if="a.supports_rag" class="agent-rag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" title="支持知识库引用"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
@@ -1148,6 +1313,7 @@ function back() {
         </div>
         </div>
 
+        <button class="mini-btn manage-agent" @click="openAgentCreate(); tab = 'chat'">＋ 新建 Agent</button>
         <button class="new-conv" :disabled="!selectedAgent || creating" @click="newConversation">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14" /></svg>
           {{ creating ? '创建中…' : '新建对话' }}
@@ -1266,6 +1432,14 @@ function back() {
           <button :class="{ on: tab === 'plaza' }" @click="tab = 'plaza'">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M9 12h.01M9 15h.01M15 9h.01M15 12h.01M15 15h.01" /></svg>
             广场
+          </button>
+          <button :class="{ on: tab === 'mcp' }" @click="tab = 'mcp'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+            MCP
+          </button>
+          <button :class="{ on: tab === 'skill' }" @click="tab = 'skill'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" /></svg>
+            Skill
           </button>
         </div>
 
@@ -1509,6 +1683,78 @@ function back() {
           <p v-if="!kbLoading && !plazaDocs.length" class="empty">广场暂无公开文档</p>
           </div>
         </template>
+
+        <!-- MCP：外部工具接入 + 全局默认 -->
+        <template v-if="tab === 'mcp'">
+          <div class="kb-scroll">
+            <div class="ext-hero">
+              <div>
+                <b>MCP 工具</b>
+                <p>接入外部 HTTP 工具（MCP）。勾选「全局默认」即作用于当前账户全部 Agent；也可在 Agent 表单里单独绑定某个 Agent。</p>
+              </div>
+              <button class="btn primary" @click="openMcpCreate()">＋ 新建 MCP</button>
+            </div>
+            <p v-if="extError" class="error">{{ extError }}</p>
+            <p v-if="extLoading" class="empty">加载中…</p>
+            <div class="kb-grid">
+              <div v-for="m in mcps" :key="m.id" class="kb-card ext-card">
+                <div class="kb-card-top">
+                  <span class="kb-badge" :class="m.enabled ? 'ready' : ''">{{ m.enabled ? '启用中' : '已停用' }}</span>
+                  <label class="glob-check" title="全局默认：作用于全部 Agent">
+                    <input type="checkbox" :checked="globMcp.includes(m.id)" @change="toggleGlobMcp(m.id)" /> 全局
+                  </label>
+                </div>
+                <b class="kb-title">{{ m.name }}</b>
+                <p class="kb-desc">{{ m.description || '暂无描述' }}</p>
+                <div class="kb-file">{{ m.endpoint || '未填 endpoint' }}</div>
+                <div class="kb-ops">
+                  <button class="mini-btn switch" :class="{ off: !m.enabled }" @click="toggleMcp(m)">
+                    <span class="switch-dot" />{{ m.enabled ? '启用' : '停用' }}
+                  </button>
+                  <button class="mini-btn" @click="openMcpEdit(m)">配置</button>
+                  <button class="mini-btn danger" @click="removeMcp(m)">删除</button>
+                </div>
+              </div>
+            </div>
+            <p v-if="!extLoading && !mcps.length" class="empty">还没有 MCP，先新建一个吧</p>
+          </div>
+        </template>
+
+        <!-- Skill：本地技能指令 + 全局默认 -->
+        <template v-if="tab === 'skill'">
+          <div class="kb-scroll">
+            <div class="ext-hero">
+              <div>
+                <b>Skill 技能</b>
+                <p>本地技能 = 追加进系统提示的专属指令。勾选「全局默认」即作用于全部 Agent；也可在 Agent 表单里单独绑定。</p>
+              </div>
+              <button class="btn primary" @click="openSkillCreate()">＋ 新建 Skill</button>
+            </div>
+            <p v-if="extError" class="error">{{ extError }}</p>
+            <p v-if="extLoading" class="empty">加载中…</p>
+            <div class="kb-grid">
+              <div v-for="s in skills" :key="s.id" class="kb-card ext-card">
+                <div class="kb-card-top">
+                  <span class="kb-badge" :class="s.enabled ? 'ready' : ''">{{ s.enabled ? '启用中' : '已停用' }}</span>
+                  <label class="glob-check" title="全局默认：作用于全部 Agent">
+                    <input type="checkbox" :checked="globSkill.includes(s.id)" @change="toggleGlobSkill(s.id)" /> 全局
+                  </label>
+                </div>
+                <b class="kb-title">{{ s.name }}</b>
+                <p class="kb-desc">{{ s.description || '暂无描述' }}</p>
+                <div class="kb-file">{{ (s.content || '').slice(0, 80) }}</div>
+                <div class="kb-ops">
+                  <button class="mini-btn switch" :class="{ off: !s.enabled }" @click="toggleSkill(s)">
+                    <span class="switch-dot" />{{ s.enabled ? '启用' : '停用' }}
+                  </button>
+                  <button class="mini-btn" @click="openSkillEdit(s)">配置</button>
+                  <button class="mini-btn danger" @click="removeSkill(s)">删除</button>
+                </div>
+              </div>
+            </div>
+            <p v-if="!extLoading && !skills.length" class="empty">还没有 Skill，先新建一个吧</p>
+          </div>
+        </template>
       </section>
 
       <aside v-if="tab === 'chat' && !wsOpen" class="ws-rail">
@@ -1664,6 +1910,84 @@ function back() {
           <p v-if="!outlineDraft.length" class="empty">还没有可用大纲，无法生成。</p>
         </div>
       </aside>
+    </div>
+
+    <!-- 自定义 Agent 表单 -->
+    <div v-if="showAgentForm" class="overlay" @click.self="showAgentForm = false">
+      <div class="modal wide">
+        <h2>{{ editingAgent ? '编辑 Agent' : '新建 Agent' }}</h2>
+        <label>名称<input v-model="agentForm.name" class="kb-input" maxlength="64" placeholder="如：续费跟进助手" /></label>
+        <label>描述<input v-model="agentForm.description" class="kb-input" maxlength="256" placeholder="一句话说明用途" /></label>
+        <label>系统提示词<textarea v-model="agentForm.system_prompt" rows="4" class="kb-input" placeholder="这个 Agent 的角色、语气、回答要求…" /></label>
+        <label class="check-line"><input v-model="agentForm.supports_rag" type="checkbox" /> 支持引用知识库（RAG）</label>
+        <div class="pick-group">
+          <b>绑定 MCP（单独作用于此 Agent，全局默认会自动叠加）</b>
+          <div class="pick-list">
+            <label v-for="m in mcps" :key="m.id" class="pick-item">
+              <input type="checkbox" :checked="agentForm.mcp_ids.includes(m.id)" @change="agentForm.mcp_ids = toggleAgentPick(agentForm.mcp_ids, m.id)" />
+              {{ m.name }}
+            </label>
+            <span v-if="!mcps.length" class="empty">暂无 MCP，先去 MCP 页新建</span>
+          </div>
+        </div>
+        <div class="pick-group">
+          <b>绑定 Skill</b>
+          <div class="pick-list">
+            <label v-for="s in skills" :key="s.id" class="pick-item">
+              <input type="checkbox" :checked="agentForm.skill_ids.includes(s.id)" @change="agentForm.skill_ids = toggleAgentPick(agentForm.skill_ids, s.id)" />
+              {{ s.name }}
+            </label>
+            <span v-if="!skills.length" class="empty">暂无 Skill，先去 Skill 页新建</span>
+          </div>
+        </div>
+        <p v-if="extError" class="error">{{ extError }}</p>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showAgentForm = false">取消</button>
+          <button class="btn primary" @click="saveAgent()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MCP 表单 -->
+    <div v-if="showMcpForm" class="overlay" @click.self="showMcpForm = false">
+      <div class="modal">
+        <h2>{{ editingMcp ? '配置 MCP' : '新建 MCP' }}</h2>
+        <label>名称<input v-model="mcpForm.name" class="kb-input" maxlength="64" /></label>
+        <label>Endpoint<input v-model="mcpForm.endpoint" class="kb-input" placeholder="https://…（HTTP 工具地址）" /></label>
+        <label>描述<input v-model="mcpForm.description" class="kb-input" maxlength="256" placeholder="这个工具能做什么" /></label>
+        <label class="check-line"><input v-model="mcpForm.enabled" type="checkbox" /> 启用</label>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showMcpForm = false">取消</button>
+          <button class="btn primary" @click="saveMcp()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skill 表单 -->
+    <div v-if="showSkillForm" class="overlay" @click.self="showSkillForm = false">
+      <div class="modal">
+        <h2>{{ editingSkill ? '配置 Skill' : '新建 Skill' }}</h2>
+        <label>名称<input v-model="skillForm.name" class="kb-input" maxlength="64" /></label>
+        <label>描述<input v-model="skillForm.description" class="kb-input" maxlength="256" /></label>
+        <label>指令内容<textarea v-model="skillForm.content" rows="5" class="kb-input" placeholder="追加进系统提示的指令，如：回答先给结论再列依据…" /></label>
+        <label class="check-line"><input v-model="skillForm.enabled" type="checkbox" /> 启用</label>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showSkillForm = false">取消</button>
+          <button class="btn primary" @click="saveSkill()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 自建 Agent 管理入口（对话 tab 下的列表） -->
+    <div v-if="tab === 'chat' && customAgents.length" class="custom-manage">
+      <span class="custom-manage-title">自建 Agent（{{ customAgents.length }}）</span>
+      <div class="custom-chips">
+        <span v-for="c in customAgents" :key="c.agent_id" class="custom-chip">
+          {{ c.name }}
+          <button title="查看配置" @click="openAgentEdit(c); showAgentForm = true">配</button>
+          <button title="删除" class="danger" @click="removeAgent(c)">×</button>
+        </span>
+      </div>
     </div>
   </div>
 </template>
@@ -2150,6 +2474,37 @@ function back() {
 .ppt-done { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--success); background: var(--success-soft); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 12.5px; }
 .result-download { display: inline-flex; align-items: center; justify-content: center; padding: 8px 14px; border-radius: var(--radius-sm); background: var(--brand-gradient); color: #fff; font-size: 13px; font-weight: 700; text-decoration: none; }
 .result-download:hover { filter: brightness(1.05); }
+
+.ext-hero {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 16px 18px; margin-bottom: 14px; border-radius: var(--radius);
+  background: linear-gradient(135deg, #eef2ff, #f5f3ff, #ecfeff); border: 1px solid #e0e7ff;
+}
+.ext-hero b { font-size: 16px; }
+.ext-hero p { margin: 4px 0 0; font-size: 12.5px; color: var(--ink-2); max-width: 560px; line-height: 1.6; }
+.ext-card { position: relative; }
+.glob-check { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 700; color: var(--brand-strong); cursor: pointer; }
+.glob-check input { accent-color: var(--brand); }
+.custom-tag { font-style: normal; font-size: 10px; font-weight: 700; color: var(--brand-strong); background: var(--brand-soft); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
+.manage-agent { align-self: flex-start; margin-bottom: 8px; }
+.custom-manage { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.custom-manage-title { font-size: 12px; font-weight: 700; color: var(--ink-3); }
+.custom-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.custom-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; background: var(--brand-soft); color: var(--brand-strong); border-radius: 999px; padding: 4px 6px 4px 12px; }
+.custom-chip button { border: none; background: var(--surface); border-radius: 50%; width: 20px; height: 20px; font-size: 11px; cursor: pointer; color: var(--brand-strong); }
+.custom-chip button.danger { color: var(--danger); }
+.overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: flex; align-items: center; justify-content: center; z-index: 200; }
+.modal { width: 440px; max-width: calc(100vw - 40px); max-height: 86vh; overflow: auto; background: var(--surface); border-radius: 16px; padding: 24px; display: flex; flex-direction: column; gap: 10px; }
+.modal.wide { width: 560px; }
+.modal h2 { margin: 0 0 6px; font-size: 16px; }
+.modal label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.check-line { flex-direction: row !important; align-items: center; gap: 6px !important; }
+.pick-group b { font-size: 12.5px; }
+.pick-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.pick-item { flex-direction: row !important; align-items: center; gap: 5px !important; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; font-weight: 500 !important; cursor: pointer; }
+.pick-item input { accent-color: var(--brand); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.btn.ghost { background: var(--surface); border: 1px solid var(--line); }
 
 @media (max-width: 900px) {
   .agents-layout, .agents-layout:has(.ws-side), .agents-layout:has(.ws-rail) { grid-template-columns: 1fr; }
