@@ -733,12 +733,12 @@ def conversation_chat(
         final_stage = _infer_stage(conv.agent_id, stage, options, spec)
         # 工具调用轨迹：随 citations 持久化（免迁移），前端在气泡下方可收起展开
         tool_trace = _tool_trace(plan_outcome)
+        msg_citations: dict | None = citations
         if mcp_tool_names:
             tool_trace = (tool_trace + [f"MCP:{n}" for n in mcp_tool_names]) if tool_trace else [f"MCP:{n}" for n in mcp_tool_names]
         if mcp_trace:
             msg_citations = dict(msg_citations or {})
             msg_citations["mcp_trace"] = mcp_trace
-        msg_citations: dict | None = citations
         if tool_trace:
             msg_citations = dict(msg_citations or {})
             msg_citations["tools"] = tool_trace
