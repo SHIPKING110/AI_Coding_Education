@@ -1247,7 +1247,7 @@ def _collect_report_material(db: Session, rep: Report, payload: ReportAiDraftIn)
                 topics = "、".join(les["topics"]) or "（课题未填）"
                 lines.append(
                     f"- {les['time']}｜{les['class_name']}｜{les['subject']}｜"
-                    f"课题：{topics}｜到课 {les['attended']} 人、缺课 {les['leave']} 人｜"
+                    f"课题：{topics}｜应到 {les['attended'] + les['leave']} 人、到课 {les['attended']} 人、缺课 {les['leave']} 人｜"
                     f"已发送反馈 {les['feedback_done']} 份"
                 )
         return "\n".join(lines)
@@ -1285,6 +1285,31 @@ def _collect_report_material(db: Session, rep: Report, payload: ReportAiDraftIn)
                 )
         else:
             lines.append("- 本月暂无已发布周报")
+        month_dailies = report_crud.list_published_reports(db, type=ReportType.DAILY.value, teacher_id=rep.teacher_id, start=rep.period_start, end=rep.period_end)
+        if month_dailies:
+            lines.append("\n【本月日报授课表汇总】（月报授课情况=直接汇总以下各日报授课表逐节拼接，日期写成年-月-日）：")
+            for d in month_dailies:
+                c = d.content or {}
+                day_label = d.period_start.strftime('%Y-%m-%d')
+                courses_md = (c.get('courses') or '').strip()
+                if courses_md:
+                    lines.append(f"\n日报[{day_label}]授课表原文如下，直接取其数据行拼入月报表（补齐日期列={day_label}）：\n{courses_md}")
+                else:
+                    lines.append(f"- 日报[{day_label}]：授课情况未填")
+        period_lessons = report_crud.collect_period_lesson_material(
+            db, teacher_id=rep.teacher_id, start=rep.period_start, end=rep.period_end
+        )
+        if not period_lessons:
+            lines.append("- 周期授课明细：本月无已完成授课")
+        else:
+            lines.append("【周期授课明细】（授课情况只准按以下逐节累积拼接，不编造）：")
+            for les in period_lessons:
+                topics = "、".join(les["topics"]) or "（课题未填）"
+                lines.append(
+                    f"- {les['day']}｜{les['time']}｜{les['class_name']}｜{les['subject']}｜"
+                    f"课题：{topics}｜应到 {les['attended'] + les['leave']} 人、到课 {les['attended']} 人、缺课 {les['leave']} 人｜"
+                    f"已发送反馈 {les['feedback_done']} 份"
+                )
         return "\n".join(lines)
 
     # 季度：聚合统计 + 周期内已发布周报摘要
@@ -1420,8 +1445,16 @@ def _collect_report_material(db: Session, rep: Report, payload: ReportAiDraftIn)
             c = d.content or {}
             lines.append(
                 f"- 日报[{d.period_start.strftime('%m-%d')}]工作：{c.get('work') or '（未填）'}"
-                + (f"｜授课：{c.get('courses')}" if c.get("courses") else "")
+                + ("｜授课见下方【本周日报授课表汇总】" if c.get("courses") else "")
                 + (f"｜问题：{c.get('problems')}" if c.get("problems") else "")
                 + (f"｜计划：{c.get('plan')}" if c.get("plan") else "")
             )
+    period_lessons = report_crud.collect_period_lesson_material(db, teacher_id=rep.teacher_id, start=rep.period_start, end=rep.period_end)
+    if not period_lessons:
+        lines.append("- 周期授课明细：本周无已完成授课")
+    else:
+        lines.append("【周期授课明细】（授课情况只准按以下逐节累积拼接，不编造）：")
+        for les in period_lessons:
+            topics = "、".join(les["topics"]) or "（课题未填）"
+            lines.append(f"- {les['day']}｜{les['time']}｜{les['class_name']}｜{les['subject']}｜课题：{topics}｜应到 {les['attended'] + les['leave']} 人、到课 {les['attended']} 人、缺课 {les['leave']} 人｜已发送反馈 {les['feedback_done']} 份")
     return "\n".join(lines)

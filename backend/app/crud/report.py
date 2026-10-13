@@ -1,4 +1,4 @@
-import uuid
+﻿import uuid
 from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -553,6 +553,88 @@ def collect_daily_lesson_material(
                 "subject": cls.subject if cls else "",
                 "attended": attended,
                 "leave": leave,
+                "expected": (attended or 0) + (leave or 0),
+                "expected": (attended or 0) + (leave or 0),
+                "topics": topics,
+                "feedback_done": feedback_done,
+            }
+        )
+    return lessons
+
+
+def collect_period_lesson_material(
+    db: Session, *, teacher_id: uuid.UUID, start: datetime, end: datetime
+) -> list[dict]:
+    """周报/月报「授课情况」素材：周期内已完成排课逐节明细（累积拼接基准）。
+
+    每条在日报明细基础上多带日期（MM-DD），供 AI 拼成一张大表：前端超过 10 行自动折叠。
+    """
+    from sqlalchemy.orm import selectinload
+
+    s_start, s_end = _day_start(start), _day_end(end)
+    scheds = list(
+        db.scalars(
+            select(Schedule)
+            .options(selectinload(Schedule.schedule_class))
+            .where(
+                Schedule.teacher_id == teacher_id,
+                Schedule.status == ScheduleStatus.COMPLETED.value,
+                Schedule.start_time >= s_start,
+                Schedule.start_time <= s_end,
+            )
+            .order_by(Schedule.start_time)
+        ).unique().all()
+    )
+    lessons: list[dict] = []
+    for s in scheds:
+        sids = [s.id]
+        attended = (
+            db.scalar(
+                select(func.count()).where(
+                    Attendance.schedule_id.in_(sids),
+                    Attendance.status == AttendanceStatus.ATTENDED.value,
+                )
+            )
+            or 0
+        )
+        leave = (
+            db.scalar(
+                select(func.count()).where(
+                    Attendance.schedule_id.in_(sids),
+                    Attendance.status == AttendanceStatus.LEAVE.value,
+                )
+            )
+            or 0
+        )
+        topics = [
+            r[0]
+            for r in db.execute(
+                select(Feedback.topic).where(Feedback.schedule_id.in_(sids)).distinct()
+            ).all()
+            if r[0] and str(r[0]).strip()
+        ]
+        feedback_done = (
+            db.scalar(
+                select(func.count()).where(
+                    Feedback.schedule_id.in_(sids),
+                    Feedback.status == FeedbackStatus.PUBLISHED.value,
+                )
+            )
+            or 0
+        )
+        cls = s.schedule_class
+        lessons.append(
+            {
+                "day": s.start_time.strftime("%m-%d"),
+                "time": f"{s.start_time.strftime('%H:%M')}-{s.end_time.strftime('%H:%M')}"
+                if s.end_time
+                else s.start_time.strftime("%H:%M"),
+                "class_name": cls.name if cls else "",
+                "subject": cls.subject if cls else "",
+                "attended": attended,
+                "leave": leave,
+                "expected": (attended or 0) + (leave or 0),
+                "expected": (attended or 0) + (leave or 0),
                 "topics": topics,
                 "feedback_done": feedback_done,
             }
