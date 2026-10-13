@@ -583,7 +583,7 @@ def conversation_chat(
     mem_ctx = agent_memory.build_memory_context(db, owner_id=user.id, agent_id=conv.agent_id, conversation_id=conv.id)
     mem_block = agent_memory.memory_prompt_block(mem_ctx)
     # 自定义 Agent 的 system_prompt 覆盖 + Skill/MCP 生效（per-agent ∪ 全局）：
-    # Skill 以追加指令块注入；MCP 以可用工具名单注入（只读声明，不自动调用外部）。
+    # Skill 以追加指令块注入；MCP 名单注入 + 运行时真实调用（规划→POST→回灌）。
     caps = agent_registry.effective_capabilities(db, user.id, conv.agent_id)
     custom_sys = (agent_def or {}).get("system_prompt") or ""
     extra_blocks: list[str] = []
@@ -595,6 +595,18 @@ def conversation_chat(
     if extra_blocks:
         extra = "\n\n".join(extra_blocks)
         mem_block = (mem_block + "\n\n" + extra).strip() if mem_block else extra
+    # MCP 运行时执行：LLM 决策是否调用生效的 MCP，POST endpoint 取结果回灌。
+    # 全部容错：无工具/无需调用/失败/超时静默跳过，不影响主回答。
+    mcp_tool_names: list[str] = []
+    try:
+        if message.strip():
+            from app.services import mcp_runner as _mcp
+
+            mcp_block, mcp_tool_names = _mcp.run(db, user.id, conv.agent_id, message.strip())
+            if mcp_block:
+                mem_block = (mem_block + "\n\n" + mcp_block).strip() if mem_block else mcp_block
+    except Exception:
+        mcp_tool_names = []
     # RAG：会话开关默认关；单条消息可临时切换；关闭时不检索不注入
     agent_info = agent_def or {}
     want_rag = body.use_rag if body.use_rag is not None else bool(conv.rag_enabled)
@@ -719,6 +731,8 @@ def conversation_chat(
         final_stage = _infer_stage(conv.agent_id, stage, options, spec)
         # 工具调用轨迹：随 citations 持久化（免迁移），前端在气泡下方可收起展开
         tool_trace = _tool_trace(plan_outcome)
+        if mcp_tool_names:
+            tool_trace = (tool_trace + [f"MCP:{n}" for n in mcp_tool_names]) if tool_trace else [f"MCP:{n}" for n in mcp_tool_names]
         msg_citations: dict | None = citations
         if tool_trace:
             msg_citations = dict(msg_citations or {})
