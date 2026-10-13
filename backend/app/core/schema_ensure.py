@@ -95,6 +95,10 @@ def ensure_business_schema(engine: Engine) -> None:
             f"{_nav_col} BOOLEAN NOT NULL DEFAULT TRUE",
             _nav_col,
         )
+    # Agent 扩展表补列（后加字段，存量库幂等补齐）
+    addcol("agent_skills", "files JSON DEFAULT '[]'", "files")
+    addcol("custom_agents", "mcp_ids JSON DEFAULT '[]'", "mcp_ids")
+    addcol("custom_agents", "skill_ids JSON DEFAULT '[]'", "skill_ids")
     # 敏感模块导航（默认关闭，需管理员显式授予）
     for _nav_col in ("nav_finance", "nav_settings"):
         addcol(
