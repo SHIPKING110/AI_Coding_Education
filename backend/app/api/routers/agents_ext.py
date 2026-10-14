@@ -308,21 +308,14 @@ def run_skill_script(
         raise HTTPException(status_code=404, detail="文件不在 Skill 包内")
     try:
         sb = ext_crud.get_sandbox_setting(db, owner_id=user.id)
-        if sb is not None and sb.enabled and sb.provider == "bailian" and (sb.workspace_id or "").strip():
-            result = _exec.run_remote(
-                user.id, skill_id, rel, args if isinstance(args, list) else [],
-                endpoint=sb.endpoint, token=sb.token or "", timeout_s=sb.timeout_s or 30,
-                workspace_id=sb.workspace_id or "", region=sb.region or "cn-beijing",
-                template_code=sb.template_code or "",
-            )
-            result["provider"] = "bailian"
-            return result
-        # 兼容旧的 aliyun_fc 自建函数配置：已废弃，请改用 bailian
-        if sb is not None and sb.enabled and sb.provider == "aliyun_fc":
-            raise ValueError("自建函数沙箱已下线，请在沙箱配置区改用“阿里云百炼”，填入工作空间/API Key/模板 code")
-        result = _exec.run_script(user.id, skill_id, rel, args if isinstance(args, list) else [])
-        result["provider"] = "local"
-        return result
+        return _exec.dispatch(
+            user.id, skill_id, rel, args if isinstance(args, list) else [],
+            provider=sb.provider if sb and sb.enabled else "local",
+            endpoint=sb.endpoint if sb else "", token=sb.token if sb else "",
+            timeout_s=sb.timeout_s if sb else 30,
+            workspace_id=sb.workspace_id if sb else "", region=sb.region if sb else "cn-beijing",
+            template_code=sb.template_code if sb else "",
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except TimeoutError:

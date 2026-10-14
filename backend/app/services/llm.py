@@ -235,6 +235,14 @@ TOOL_PLANNER_SYS = (
 )
 
 
+TOOL_PLANNER_SYS += (
+    "\n【Skill 脚本执行】：当用户要求用 Skill 干活（生成文件/跑脚本/做 PPT 等）"
+    "且消息中附带「可用 Skill」清单时，用 run_skill_script 实际执行包内脚本"
+    "（先按 SKILL.md 选对入口脚本，需要参数就传参），禁止只描述不执行；"
+    "工具返回的生成文件下载链接必须原样传达给用户。"
+)
+
+
 def tool_step(messages: list, tools: list[dict]) -> tuple[str, list[dict]]:
     """一次非流式 function-calling 步骤：返回 (文本内容, [{id, name, arguments}])。
 

@@ -51,6 +51,23 @@ def _elapsed_ms(t0: float) -> float:
     return (time.monotonic() - t0) * 1000.0
 
 
+def _skill_inventory(db, user) -> str:
+    """用户已启用的 Skill 及可执行脚本清单（供规划器选 run_skill_script 用）。"""
+    try:
+        from app.crud import agent_ext as _ext
+
+        lines = []
+        for s in _ext.list_skills(db, owner_id=user.id):
+            if not s.enabled:
+                continue
+            scripts = [str(f) for f in (s.files or []) if str(f).lower().endswith((".py", ".js", ".sh"))]
+            if scripts:
+                lines.append(f"- {s.name}：{(s.description or '')[:60]}；脚本：{'、'.join(scripts[:8])}")
+        return "\n".join(lines[:10])
+    except Exception:
+        return ""
+
+
 def plan_and_run(
     db: Session,
     user: User,
@@ -66,8 +83,10 @@ def plan_and_run(
     - LLM 不可用或规划失败：降级为关键词启发式单轮路由；
     - 任何工具异常：记录错误并继续，不中断整体流程。
     """
+    inv = _skill_inventory(db, user)
     if not agent_tools.looks_like_business(message):
-        return PlanOutcome()
+        if not (inv and agent_tools.looks_like_skill_task(message)):
+            return PlanOutcome()
 
     cfg = get_settings()
     budget_ms = time_budget_ms or cfg.AGENT_TOOL_TIME_BUDGET_MS
@@ -82,6 +101,8 @@ def plan_and_run(
     rounds = 0
     # 规划消息：只带「系统角色 + 用户问题 + 各轮工具结果」，不带历史对话，省 token
     messages: list = [llm._sys_msg(llm.TOOL_PLANNER_SYS), llm._human_msg(message)]
+    if inv and agent_tools.looks_like_skill_task(message):
+        messages.append(llm._sys_msg(f"可用 Skill（用户已绑定，可用 run_skill_script 实际执行包内脚本，生成文件会取回下载链接）：\n{inv}"))
     planner_failed = False
 
     for _ in range(rounds_cap):

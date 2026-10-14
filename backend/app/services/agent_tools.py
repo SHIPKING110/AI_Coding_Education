@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import pathlib
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -464,6 +465,53 @@ def _tool_sql_query(db: Session, user: User, *, sql: str = "") -> dict:
 # 注册表
 # ---------------------------------------------------------------------------
 
+def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: str = "", args: list | None = None) -> dict:
+    """执行用户 Skill 包内脚本（走用户沙箱配置：本地/百炼；产物自动取回给下载链接）。"""
+    from app.crud import agent_ext as _ext
+    from app.services import skill_exec as _exec
+
+    ref = (skill or "").strip()
+    rel = (path or "").strip().replace("\\", "/")
+    if not ref or not rel:
+        return {"错误": "需提供 skill（Skill 名或 id）与 path（包内脚本路径）"}
+    skills = [s for s in _ext.list_skills(db, owner_id=user.id) if s.enabled]
+    target = None
+    for s in skills:
+        sid = str(s.id)
+        if ref == sid or ref == sid[:8] or ref in (s.name or ""):
+            target = s
+            break
+    if target is None:
+        return {"错误": f"找不到启用的 Skill：{ref}（可用：{('、'.join(s.name for s in skills[:10])) or '无'}）"}
+    if rel not in list(target.files or []):
+        cands = [f for f in (target.files or []) if str(f).lower().endswith((".py", ".js", ".sh"))]
+        return {"错误": f"{target.name} 包内无此文件：{rel}（可执行：{'、'.join(cands[:10]) or '无'}）"}
+    if pathlib.PurePosixPath(rel).suffix.lower() not in (".py", ".js", ".sh"):
+        return {"错误": f"仅支持运行 .py/.js/.sh 脚本：{rel}"}
+    sb = _ext.get_sandbox_setting(db, owner_id=user.id)
+    try:
+        result = _exec.dispatch(
+            user.id, target.id, rel, list(args or [])[:8],
+            provider=sb.provider if sb and sb.enabled else "local",
+            endpoint=sb.endpoint if sb else "", token=sb.token if sb else "",
+            timeout_s=sb.timeout_s if sb else 30,
+            workspace_id=sb.workspace_id if sb else "", region=sb.region if sb else "cn-beijing",
+            template_code=sb.template_code if sb else "",
+        )
+    except (ValueError, TimeoutError) as e:
+        return {"错误": str(e)}
+    out: dict = {"skill": target.name, "脚本": rel, "成功": result.get("ok", False),
+                 "退出码": result.get("code"), "stdout": str(result.get("stdout", ""))[:2000],
+                 "stderr": str(result.get("stderr", ""))[:2000]}
+    if result.get("deps"):
+        out["依赖"] = result["deps"]
+    fnames = result.get("files") or []
+    if fnames:
+        out["生成文件"] = [{"名": f["name"], "下载": f["url"], "字节": f["bytes"]} for f in fnames]
+        out["提示"] = "生成的文件已有下载链接，请把链接直接给用户，不要只描述内容"
+    return out
+
+
 _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "my_schedule_overview": _tool_my_schedule_overview,
     "my_teaching_stats": _tool_my_teaching_stats,
@@ -475,6 +523,7 @@ _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "sql_list_tables": _tool_sql_list_tables,
     "sql_describe_table": _tool_sql_describe_table,
     "sql_query": _tool_sql_query,
+    "run_skill_script": _tool_run_skill_script,
 }
 
 # OpenAI 兼容 function-calling 的 tools schema
@@ -622,6 +671,26 @@ TOOLS_SCHEMA: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_skill_script",
+            "description": (
+                "执行用户 Skill 包内的 .py/.js/.sh 脚本（走沙箱：本地或阿里云百炼，依赖自动安装）。"
+                "用户要求生成文件/跑脚本/用 Skill 干活时用它：先按 SKILL.md 选对入口脚本，需要参数就传参；"
+                "返回含 stdout/stderr 与生成文件的下载链接，拿到链接后必须直接给用户。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "包内脚本路径，如 skills/ppt-master/scripts/build.py"},
+                    "args": {"type": "array", "items": {"type": "string"}, "description": "命令行参数数组"},
+                },
+                "required": ["skill", "path"],
+            },
+        },
+    },
 ]
 
 
@@ -652,6 +721,17 @@ def looks_like_business(message: str) -> bool:
     if not t:
         return False
     return any(k in t for k in _BIZ_KEYWORDS)
+
+
+_SKILL_KEYWORDS = ("生成", "创建", "制作", "运行", "执行", "脚本", "PPT", "ppt", "pptx", "下载", "导出")
+
+
+def looks_like_skill_task(message: str) -> bool:
+    """像是在让 Skill 干活（生成文件/跑脚本）：命中动词即放行 Planner，模型再按 Skill 清单决定。"""
+    t = (message or "").strip()
+    if not t:
+        return False
+    return any(k in t for k in _SKILL_KEYWORDS)
 
 
 def _heuristic_calls(message: str) -> list[dict]:

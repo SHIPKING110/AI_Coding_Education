@@ -98,6 +98,43 @@ def _bailian_base(workspace_id: str, region: str) -> str:
     return f"https://{ws}.{rg}.maas.aliyuncs.com/api/v1/agentstudio/sandbox"
 
 
+FETCH_MAX_FILES = 5
+FETCH_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _fetch_outputs(sent_keys, run_fn, fetch_fn, skill_id) -> list:
+    """取回沙箱中新生成的产物文件（如 .pptx），落盘 uploads/skills/<skill_id>/，返回 [{name, url, bytes}]。"""
+    try:
+        code, out, _ = run_fn("find /home/user/workspace -type f | sort", 30)
+    except Exception:
+        return []
+    if code != 0:
+        return []
+    sent = set(sent_keys or [])
+    produced = []
+    for line in (out or "").splitlines():
+        rel = line.strip()
+        if rel.startswith("/home/user/workspace/"):
+            rel = rel[len("/home/user/workspace/"):]
+        rel = rel.strip()
+        if not rel or rel in sent or "__pycache__" in rel.split("/"):
+            continue
+        if len(produced) >= FETCH_MAX_FILES:
+            break
+        try:
+            data = fetch_fn(f"/home/user/workspace/{rel}")
+        except Exception:
+            continue
+        if not data or len(data) > FETCH_MAX_BYTES:
+            continue
+        safe = pathlib.PurePosixPath(rel).name[:80] or "output.bin"
+        dest_dir = pathlib.Path("uploads") / "skills" / str(skill_id)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / safe).write_bytes(data)
+        produced.append({"name": safe, "url": f"/uploads/skills/{skill_id}/{safe}", "bytes": len(data)})
+    return produced
+
+
 def run_remote(owner_id, skill_id, rel: str, args: list, *, endpoint: str, token: str, timeout_s: int,
                workspace_id: str = "", region: str = "cn-beijing", template_code: str = "") -> dict:
     """百炼 Sandbox 执行：创建实例 → 写文件 →（有 requirements.txt 则先 pip 安装依赖）→ 跑命令 → 释放实例。"""
@@ -218,10 +255,41 @@ def run_remote(owner_id, skill_id, rel: str, args: list, *, endpoint: str, token
         # 5. 执行入口命令
         phases.append(f"③ 跑脚本 {command}")
         code, out, err = _data_exec(command, step_timeout)
+
+        def _fetch(abs_path: str) -> bytes:
+            fr = httpx.get(f"{domain}/files", params={"path": abs_path}, headers=dh, timeout=60)
+            if fr.status_code != 200:
+                raise ValueError(f"下载产物失败（{fr.status_code}）")
+            return fr.content
+
+        produced = _fetch_outputs(files.keys(), _data_exec, _fetch, skill_id) if code == 0 else []
+        if produced:
+            phases.append(f"④ 取回产物 {len(produced)} 个：" + "、".join(p["name"] for p in produced))
         return {"ok": code == 0, "code": code, "stdout": out[:MAX_OUT], "stderr": err[:MAX_OUT],
-                "deps": deps_note, "sandbox_id": sandbox_id, "phases": phases, "deps_log": deps_log}
+                "deps": deps_note, "sandbox_id": sandbox_id, "phases": phases, "deps_log": deps_log,
+                "files": produced}
     finally:
         _cleanup()
+
+
+def dispatch(owner_id, skill_id, rel: str, args: list, *, provider: str = "local", endpoint: str = "",
+             token: str = "", timeout_s: int = 30, workspace_id: str = "",
+             region: str = "cn-beijing", template_code: str = "") -> dict:
+    """统一执行入口（对话框工具与 Skill 页运行共用）：按沙箱配置路由到本地/百炼，结果带 provider。"""
+    if (provider or "local") == "bailian" and (workspace_id or "").strip():
+        result = run_remote(
+            owner_id, skill_id, rel, args if isinstance(args, list) else [],
+            endpoint=endpoint, token=token or "", timeout_s=timeout_s or 30,
+            workspace_id=workspace_id or "", region=region or "cn-beijing",
+            template_code=template_code or "",
+        )
+        result["provider"] = "bailian"
+        return result
+    if (provider or "") == "aliyun_fc":
+        raise ValueError("自建函数沙箱已下线，请在沙箱配置区改用“阿里云百炼”")
+    result = run_script(owner_id, skill_id, rel, args if isinstance(args, list) else [])
+    result["provider"] = "local"
+    return result
 
 
 def test_remote(*, endpoint: str, token: str, timeout_s: int,

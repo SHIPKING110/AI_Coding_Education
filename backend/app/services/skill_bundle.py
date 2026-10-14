@@ -147,11 +147,17 @@ def read_text_file(owner_id, skill_id, rel: str, limit: int = 6000) -> str:
 
 
 def skill_context_block(owner_id, skill_id, name: str, content: str, files: list) -> str:
-    """拼注入块：手工指令 + SKILL.md 摘要 + 文件清单（含脚本清单供引用，不执行）。"""
-    parts = [f"【Skill·{name}】"]
-    if (content or "").strip():
-        parts.append((content or "").strip()[:2000])
+    """拼注入块：手工指令 + SKILL.md 摘要 + 文件清单（含脚本清单，对话中可通过 run_skill_script 工具实际执行）。"""
     dest = skill_dir(owner_id, skill_id)
+    root = str(dest.resolve())
+
+    def _fill(text: str) -> str:
+        # Skill 文档里常引用 ${SKILL_DIR}：替换为真实绝对路径，模型不再报“未提供路径”
+        return (text or "").replace("${SKILL_DIR}", root).replace("$SKILL_DIR", root)
+
+    parts = [f"【Skill·{name}】", f"Skill 文件根目录：{root}"]
+    if (content or "").strip():
+        parts.append(_fill((content or "").strip())[:2000])
     md_path = None
     for rel in files or []:
         if str(rel).lower().endswith("skill.md"):
@@ -159,14 +165,15 @@ def skill_context_block(owner_id, skill_id, name: str, content: str, files: list
             break
     if md_path is not None and md_path.exists():
         try:
-            parts.append("SKILL.md 摘要：\n" + md_path.read_text(encoding="utf-8", errors="ignore")[:3000])
+            parts.append("SKILL.md 摘要：\n" + _fill(md_path.read_text(encoding="utf-8", errors="ignore"))[:3000])
         except Exception:
             pass
     # 专业结构分组：SKILL.md(已在摘要中) / scripts 可执行脚本 / references 参考资料 / assets 资源文件
     lowers = [(f, str(f).lower()) for f in (files or [])]
     scripts = [f for f, l in lowers if l.endswith((".py", ".js", ".sh")) and not l.endswith("skill.md")]
     if scripts:
-        parts.append("可执行脚本 scripts/（仅引用说明，不自动执行）：\n" + "\n".join(f"- {s}" for s in scripts[:20]))
+        parts.append("可执行脚本 scripts/（对话中可用 run_skill_script 工具实际执行：传 skill 名 + 脚本路径 + 参数；"
+                     "生成的文件会自动取回并给出下载链接，不要只描述不执行）：\n" + "\n".join(f"- {s}" for s in scripts[:20]))
     refs = [f for f, l in lowers if ("/references/" in f"/{l}" or l.endswith((".md", ".txt"))) and not l.endswith("skill.md") and f not in scripts]
     if refs:
         parts.append("参考资料 references/：\n" + "\n".join(f"- {s}" for s in refs[:20]))
