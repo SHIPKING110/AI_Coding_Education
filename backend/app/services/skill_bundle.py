@@ -154,12 +154,17 @@ def skill_context_block(owner_id, skill_id, name: str, content: str, files: list
             parts.append("SKILL.md 摘要：\n" + md_path.read_text(encoding="utf-8", errors="ignore")[:3000])
         except Exception:
             pass
-    scripts = [f for f in (files or []) if str(f).lower().endswith((".py", ".js", ".sh"))]
+    # 专业结构分组：SKILL.md(已在摘要中) / scripts 可执行脚本 / references 参考资料 / assets 资源文件
+    lowers = [(f, str(f).lower()) for f in (files or [])]
+    scripts = [f for f, l in lowers if l.endswith((".py", ".js", ".sh")) and not l.endswith("skill.md")]
     if scripts:
-        parts.append("配套脚本（仅引用说明，不自动执行）：\n" + "\n".join(f"- {s}" for s in scripts[:20]))
-    others = [f for f in (files or []) if f not in scripts and not str(f).lower().endswith("skill.md")]
-    if others:
-        parts.append("配套文件：\n" + "\n".join(f"- {s}" for s in others[:20]))
+        parts.append("可执行脚本 scripts/（仅引用说明，不自动执行）：\n" + "\n".join(f"- {s}" for s in scripts[:20]))
+    refs = [f for f, l in lowers if ("/references/" in f"/{l}" or l.endswith((".md", ".txt"))) and not l.endswith("skill.md") and f not in scripts]
+    if refs:
+        parts.append("参考资料 references/：\n" + "\n".join(f"- {s}" for s in refs[:20]))
+    assets = [f for f, _ in lowers if f not in scripts and f not in refs and not str(f).lower().endswith("skill.md")]
+    if assets:
+        parts.append("资源文件 assets/：\n" + "\n".join(f"- {s}" for s in assets[:20]))
     return "\n".join(parts)[:5000]
 
 

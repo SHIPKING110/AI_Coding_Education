@@ -44,7 +44,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import {
   createCustomAgent, createMcp, createSkill, deleteCustomAgent, deleteMcp, deleteSkill,
   getAgentGlobal, importSkillBundle, listCustomAgents, listMcps, listSkills, patchCustomAgent, patchMcp, patchSkill,
-  previewSkillFile, putAgentGlobal, runSkillScript, testMcp, uploadSkillBundle, type AgentMcp, type AgentSkill, type CustomAgent,
+  previewSkillFile, putAgentGlobal, runSkillScript, testMcp, type AgentMcp, type AgentSkill, type CustomAgent,
 } from '@/api/agentExt'
 
 const route = useRoute()
@@ -1242,25 +1242,10 @@ async function saveSkill() {
   }
   showSkillForm.value = false
 }
-/* —— Skill 文件包上传（zip）+ 直接导入 + 文件预览 + 受控运行 —— */
+/* —— Skill 直接导入（zip 免新建）+ 文件预览 + 受控运行 —— */
 const skillUploading = ref(false)
 const skillPreview = ref<{ path: string; text: string } | null>(null)
 const skillRunOut = ref<{ path: string; ok: boolean; stdout: string; stderr: string } | null>(null)
-async function onSkillZip(e: Event, s: AgentSkill) {
-  const input = e.target as HTMLInputElement
-  const f = input.files?.[0]
-  input.value = ''
-  if (!f) return
-  skillUploading.value = true
-  try {
-    const updated = await uploadSkillBundle(s.id, f)
-    Object.assign(s, updated)
-  } catch (err: unknown) {
-    extError.value = err instanceof Error ? err.message : '上传失败'
-  } finally {
-    skillUploading.value = false
-  }
-}
 async function openSkillPreview(s: AgentSkill, path: string) {
   try {
     skillPreview.value = await previewSkillFile(s.id, path)
@@ -1300,10 +1285,52 @@ async function runSkillFile(s: AgentSkill, path: string) {
     extError.value = err instanceof Error ? err.message : '运行失败'
   }
 }
-async function removeSkill(s: AgentSkill) {
-  if (!confirm(`删除 Skill「${s.name}」？`)) return
+async function removeSkill() {
+  const s = deletingSkill.value
+  if (!s) return
+  deletingSkill.value = null
   await deleteSkill(s.id)
   skills.value = skills.value.filter((x) => x.id !== s.id)
+}
+const deletingSkill = ref<AgentSkill | null>(null)
+function askRemoveSkill(s: AgentSkill) {
+  deletingSkill.value = s
+}
+
+/* —— Skill 专业结构：SKILL.md / scripts / references / assets，按顶层目录分组展示 —— */
+function skillGroups(s: AgentSkill): { dir: string; items: string[] }[] {
+  const map = new Map<string, string[]>()
+  for (const f of s.files ?? []) {
+    const parts = String(f).split('/')
+    const dir = parts.length > 1 ? parts.slice(0, -1).join('/') + '/' : '根目录 /'
+    if (!map.has(dir)) map.set(dir, [])
+    map.get(dir)!.push(String(f))
+  }
+  const order = (d: string) => d === '根目录 /' ? 0 : d.startsWith('scripts') ? 1 : d.startsWith('references') ? 2 : d.startsWith('assets') ? 3 : 4
+  return [...map.entries()]
+    .sort((a, b) => order(a[0]) - order(b[0]) || (a[0] < b[0] ? -1 : 1))
+    .map(([dir, items]) => ({ dir: `${dir}（${items.length}）`, items: items.slice(0, 100) }))
+}
+function shortName(f: string): string {
+  const base = String(f).split('/').pop() ?? String(f)
+  return base.length > 28 ? '…' + base.slice(-27) : base
+}
+function hasSkillMd(s: AgentSkill): boolean {
+  return (s.files ?? []).some((f) => String(f).toLowerCase().endsWith('skill.md'))
+}
+function countRole(s: AgentSkill, role: 'scripts' | 'refs' | 'assets'): number {
+  const files = s.files ?? []
+  if (role === 'scripts') return files.filter((f) => /\.(py|js|sh)$/i.test(String(f))).length
+  if (role === 'refs') {
+    return files.filter((f) => {
+      const l = String(f).toLowerCase()
+      return !l.endsWith('skill.md') && (l.includes('/references/') || /\.(md|txt)$/.test(l)) && !/\.(py|js|sh)$/.test(l)
+    }).length
+  }
+  return files.filter((f) => {
+    const l = String(f).toLowerCase()
+    return !l.endsWith('skill.md') && !/\.(py|js|sh|md|txt)$/.test(l) && !l.includes('/references/')
+  }).length
 }
 async function toggleSkill(s: AgentSkill) {
   const updated = await patchSkill(s.id, { name: s.name, description: s.description, content: s.content, enabled: !s.enabled })
@@ -1861,8 +1888,8 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 <p>本地技能 = 追加进系统提示的专属指令。勾选「全局默认」即作用于全部 Agent；也可在 Agent 表单里单独绑定。</p>
               </div>
               <button class="btn primary" @click="openSkillCreate()">＋ 新建 Skill</button>
-              <label class="btn ghost">
-                {{ skillUploading ? '导入中…' : '直接上传 Skill 包（.zip 免新建）' }}
+              <label class="btn ghost" title="上传 zip 包直接创建 Skill，无需先新建">
+                {{ skillUploading ? '导入中…' : '导入 ZIP' }}
                 <input type="file" accept=".zip" hidden @change="onSkillImport" />
               </label>
             </div>
@@ -1880,12 +1907,21 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 <p class="kb-desc">{{ s.description || '暂无描述' }}</p>
                 <div class="kb-file">{{ (s.content || '').slice(0, 80) }}</div>
                 <details v-if="s.files?.length" class="skill-files">
-                  <summary>配套文件（{{ s.files.length }}）· 点击展开</summary>
+                  <summary>文件结构（{{ s.files.length }}）· 点击展开</summary>
+                  <div class="skill-layout">
+                    <span class="layout-chip" :class="hasSkillMd(s) ? 'ok' : 'miss'">SKILL.md{{ hasSkillMd(s) ? '' : ' 缺失' }}</span>
+                    <span class="layout-chip" :class="countRole(s, 'scripts') ? 'ok' : ''">scripts {{ countRole(s, 'scripts') }}</span>
+                    <span class="layout-chip" :class="countRole(s, 'refs') ? 'ok' : ''">references {{ countRole(s, 'refs') }}</span>
+                    <span class="layout-chip" :class="countRole(s, 'assets') ? 'ok' : ''">assets {{ countRole(s, 'assets') }}</span>
+                  </div>
                   <div class="skill-file-list">
-                    <span v-for="f in s.files" :key="f" class="file-chip-wrap" :title="f">
-                      <button class="file-chip" @click="openSkillPreview(s, f)" :title="`预览 ${f}`">{{ f.length > 40 ? '…' + f.slice(-39) : f }}</button>
-                      <button v-if="/\.(py|js|sh)$/i.test(f)" class="file-run" title="受控运行（白名单解释器/5s超时/无网络）" @click="runSkillFile(s, f)">▶</button>
-                    </span>
+                    <div v-for="g in skillGroups(s)" :key="g.dir" class="skill-dir">
+                      <div class="skill-dir-name">{{ g.dir }}</div>
+                      <span v-for="f in g.items" :key="f" class="file-chip-wrap" :title="f">
+                        <button class="file-chip" @click="openSkillPreview(s, f)" :title="`预览 ${f}`">{{ shortName(f) }}</button>
+                        <button v-if="/\.(py|js|sh)$/i.test(f)" class="file-run" title="受控运行（白名单解释器/5s超时/无网络）" @click="runSkillFile(s, f)">▶</button>
+                      </span>
+                    </div>
                   </div>
                 </details>
                 <div v-if="skillRunOut" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
@@ -1897,12 +1933,8 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                   <button class="mini-btn switch" :class="{ off: !s.enabled }" @click="toggleSkill(s)">
                     <span class="switch-dot" />{{ s.enabled ? '启用' : '停用' }}
                   </button>
-                  <label class="mini-btn upload-btn">
-                    {{ skillUploading ? '上传中…' : '上传zip包' }}
-                    <input type="file" accept=".zip" hidden @change="onSkillZip($event, s)" />
-                  </label>
                   <button class="mini-btn" @click="openSkillEdit(s)">配置</button>
-                  <button class="mini-btn danger" @click="removeSkill(s)">删除</button>
+                  <button class="mini-btn danger" @click="askRemoveSkill(s)">删除</button>
                 </div>
               </div>
             </div>
@@ -2164,6 +2196,21 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
         <div class="modal-actions">
           <button class="btn ghost" @click="showSkillForm = false">取消</button>
           <button class="btn primary" @click="saveSkill()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skill 删除确认 -->
+    <div v-if="deletingSkill" class="overlay" @click.self="deletingSkill = null">
+      <div class="modal danger-modal">
+        <div class="danger-ico">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
+        </div>
+        <h2>删除 Skill？</h2>
+        <p class="danger-text">将删除「<b>{{ deletingSkill.name }}</b>」及其全部 {{ (deletingSkill.files ?? []).length }} 个配套文件，已绑定该 Skill 的 Agent 与全局配置将自动失效该项。此操作不可恢复。</p>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="deletingSkill = null">取消</button>
+          <button class="btn danger-solid" @click="removeSkill()">确认删除</button>
         </div>
       </div>
     </div>
@@ -2774,10 +2821,23 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .trace-ms { color: var(--ink-3); white-space: nowrap; font-size: 11px; }
 .skill-files { margin-top: 6px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; }
 .skill-files summary { cursor: pointer; padding: 6px 10px; font-size: 11.5px; font-weight: 700; color: var(--brand-strong); user-select: none; }
-.skill-file-list { display: flex; flex-wrap: wrap; gap: 6px; max-height: 132px; overflow-y: auto; padding: 0 8px 8px; }
+.skill-file-list { display: flex; flex-direction: column; gap: 8px; max-height: 180px; overflow-y: auto; padding: 0 8px 8px; }
+.skill-dir { display: block; }
+.skill-dir-name { font-size: 11px; font-weight: 800; color: var(--ink-3); padding-top: 4px; margin-bottom: 4px; }
+.skill-dir .file-chip-wrap { margin-right: 2px; }
+.skill-layout { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px 2px; }
+.layout-chip { font-size: 10.5px; font-weight: 700; padding: 2px 9px; border-radius: 999px; background: var(--bg-soft); color: var(--ink-3); }
+.layout-chip.ok { background: var(--success-soft); color: #047857; }
+.layout-chip.miss { background: var(--danger-soft); color: var(--danger); }
+.danger-modal { align-items: center; text-align: center; }
+.danger-ico { width: 48px; height: 48px; margin: 0 auto; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--danger-soft); color: var(--danger); }
+.danger-ico svg { width: 24px; height: 24px; }
+.danger-text { font-size: 13px; color: var(--ink-2); line-height: 1.7; margin: 0; }
+.danger-text b { color: var(--danger); }
+.btn.danger-solid { border: none; background: var(--danger); color: #fff; }
+.btn.danger-solid:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
 .file-chip { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; font-size: 11px; padding: 2px 8px; cursor: pointer; color: var(--brand-strong); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-chip:hover { border-color: var(--brand); }
-.upload-btn { cursor: pointer; }
 .file-preview { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.6; background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 14px; max-height: 50vh; overflow: auto; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .btn.ghost { background: var(--surface); border: 1px solid var(--line); }
