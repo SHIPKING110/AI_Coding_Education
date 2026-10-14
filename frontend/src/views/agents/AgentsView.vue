@@ -1273,12 +1273,20 @@ async function onSkillImport(e: Event) {
   const f = input.files?.[0]
   input.value = ''
   if (!f) return
+  if (f.size > 30 * 1024 * 1024) {
+    extError.value = `“${f.name}”(${(f.size / 1048576).toFixed(1)}MB)超过 30MB 上限，请精简后重试（解压后总量 ≤10MB、单文件 ≤2MB）`
+    return
+  }
   skillUploading.value = true
   try {
     const created = await importSkillBundle(f)
     skills.value.unshift(created)
   } catch (err: unknown) {
-    extError.value = err instanceof Error ? err.message : '导入失败'
+    const status = (err as { response?: { status?: number; data?: { detail?: unknown } } })?.response?.status
+    const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+    extError.value = status === 413
+      ? `上传被网关拒绝（413）：包超过大小上限。请压缩到 30MB 以内（解压后 ≤10MB）再试。${typeof detail === 'string' ? `（${detail}）` : ''}`
+      : (typeof detail === 'string' && detail) || (err instanceof Error ? err.message : '导入失败')
   } finally {
     skillUploading.value = false
   }
@@ -1326,6 +1334,41 @@ function toggleAgentPick(arr: string[], id: string): string[] {
 function back() {
   router.back()
 }
+
+/* —— Mermaid 懒加载渲染：CDN 按需加载，失败则保留源码预览 —— */
+let mermaidLoaded = false
+function ensureMermaid(): Promise<boolean> {
+  if (mermaidLoaded) return Promise.resolve(true)
+  if ((window as unknown as { mermaid?: unknown }).mermaid) {
+    mermaidLoaded = true
+    return Promise.resolve(true)
+  }
+  return new Promise((resolve) => {
+    const s = document.createElement('script')
+    s.src = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js'
+    s.onload = () => { mermaidLoaded = true; resolve(true) }
+    s.onerror = () => resolve(false)
+    document.head.appendChild(s)
+  })
+}
+async function renderMermaid() {
+  const els = chatEl.value?.querySelectorAll('.mermaid-render') ?? []
+  if (!els.length) return
+  const ok = await ensureMermaid()
+  if (!ok) return
+  const mm = (window as unknown as { mermaid?: { initialize?: (o: unknown) => void; run?: (o: unknown) => Promise<void> } }).mermaid
+  try {
+    mm?.initialize?.({ startOnLoad: false, theme: 'neutral' })
+    await mm?.run?.({ nodes: [...els] as unknown as Element[] })
+    els.forEach((el) => {
+      const html = (el as HTMLElement).innerHTML
+      if (html.includes('mermaid-render') || !html.trim()) return
+      const box = el.closest('.md-mermaid')
+      box?.classList.add('rendered')
+    })
+  } catch { /* 保留源码 */ }
+}
+watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid()) })
 </script>
 
 <template>
@@ -2133,15 +2176,17 @@ function back() {
       </div>
     </div>
 
-    <!-- 自建 Agent 管理入口（对话 tab 下的列表） -->
+    <!-- 自建 Agent 管理入口（对话 tab 下的列表）：纵向列表保证按钮永不挤压 -->
     <div v-if="tab === 'chat' && customAgents.length" class="custom-manage">
       <span class="custom-manage-title">自建 Agent（{{ customAgents.length }}）</span>
-      <div class="custom-chips">
-        <span v-for="c in customAgents" :key="c.agent_id" class="custom-chip">
+      <div class="custom-chips col">
+        <div v-for="c in customAgents" :key="c.agent_id" class="custom-row">
           <span class="custom-chip-name">{{ c.name }}</span>
-          <button class="custom-chip-btn" title="查看配置" @click="openAgentEdit(c); showAgentForm = true">查看配置</button>
-          <button title="删除" class="custom-chip-btn danger" @click="removeAgent(c)">删除</button>
-        </span>
+          <span class="custom-row-ops">
+            <button class="custom-chip-btn" title="查看配置" @click="openAgentEdit(c); showAgentForm = true">查看配置</button>
+            <button title="删除" class="custom-chip-btn danger" @click="removeAgent(c)">删除</button>
+          </span>
+        </div>
       </div>
     </div>
   </div>
@@ -2642,9 +2687,12 @@ function back() {
 .glob-check input { accent-color: var(--brand); }
 .custom-tag { font-style: normal; font-size: 10px; font-weight: 700; color: var(--brand-strong); background: var(--brand-soft); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
 .manage-agent { align-self: flex-start; margin-bottom: 8px; }
-.custom-manage { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); flex-shrink: 0; overflow: visible; }
+.custom-manage { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); flex-shrink: 0; overflow: visible; }
 .custom-manage-title { font-size: 12px; font-weight: 700; color: var(--ink-3); flex-shrink: 0; white-space: nowrap; }
 .custom-chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.custom-chips.col { flex-direction: column; align-items: stretch; }
+.custom-row { display: flex; align-items: center; gap: 8px; width: 100%; background: var(--brand-soft); border-radius: 10px; padding: 6px 8px 6px 12px; min-width: 0; }
+.custom-row-ops { margin-left: auto; display: inline-flex; gap: 6px; flex-shrink: 0; }
 .custom-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12.5px; font-weight: 600; background: var(--brand-soft); color: var(--brand-strong); border-radius: 999px; padding: 4px 6px 4px 12px; white-space: nowrap; }
 .custom-chip-name { overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
 .custom-chip-btn { flex-shrink: 0; border: none; background: var(--surface); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer; color: var(--brand-strong); white-space: nowrap; }
@@ -2684,15 +2732,18 @@ function back() {
 .bubble :deep(.md-timeline) { border-left: 2px solid var(--brand); margin: 8px 0 8px 6px; padding-left: 12px; display: flex; flex-direction: column; gap: 6px; }
 .bubble :deep(.md-tl-item) { display: flex; gap: 8px; font-size: 12.5px; }
 .bubble :deep(.md-tl-dot) { width: 8px; height: 8px; border-radius: 50%; background: var(--brand-strong); margin-top: 5px; flex-shrink: 0; }
-.bubble :deep(.md-mermaid-head) { font-size: 12px; font-weight: 700; color: var(--brand-strong); margin-bottom: 4px; }
+.bubble :deep(.md-mermaid-head) { font-size: 12px; font-weight: 700; color: var(--brand-strong); margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
 .bubble :deep(.md-mermaid pre) { background: #f8fafc; border: 1px dashed var(--brand); border-radius: 8px; padding: 10px; font-size: 11.5px; overflow-x: auto; }
+.bubble :deep(.md-mermaid.rendered pre.mermaid-src) { display: none; }
+.bubble :deep(.mermaid-render) { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow-x: auto; }
+.bubble :deep(.mermaid-render svg) { max-width: 100%; height: auto; }
+.bubble :deep(.md-code-wrap) { margin: 8px 0; border-radius: var(--radius-sm); overflow: hidden; border: 1px solid #1e293b; }
+.bubble :deep(.md-code-head) { display: flex; align-items: center; justify-content: space-between; background: #1e293b; color: #94a3b8; font-size: 11px; padding: 4px 10px; }
+.bubble :deep(.md-code-head .md-copy) { float: none; background: transparent; color: #e2e8f0; border-color: #475569; }
+.bubble :deep(.md-code-wrap .md-code) { margin: 0; border-radius: 0; }
+.bubble :deep(.md-code.yaml-hl) { color: #bae6fd; }
 .bubble :deep(.md-tasks) { list-style: none; padding-left: 4px; }
 .bubble :deep(.md-footnotes) { font-size: 11.5px; color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 8px; }
-.custom-manage-title { font-size: 12px; font-weight: 700; color: var(--ink-3); }
-.custom-chips { display: flex; gap: 8px; flex-wrap: wrap; }
-.custom-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; background: var(--brand-soft); color: var(--brand-strong); border-radius: 999px; padding: 4px 6px 4px 12px; }
-.custom-chip button { border: none; background: var(--surface); border-radius: 50%; width: 20px; height: 20px; font-size: 11px; cursor: pointer; color: var(--brand-strong); }
-.custom-chip button.danger { color: var(--danger); }
 .overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: flex; align-items: center; justify-content: center; z-index: 200; }
 .modal { width: 440px; max-width: calc(100vw - 40px); max-height: 86vh; overflow: auto; background: var(--surface); border-radius: 16px; padding: 24px; display: flex; flex-direction: column; gap: 10px; }
 .modal.wide { width: 560px; }

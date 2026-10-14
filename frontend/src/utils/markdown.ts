@@ -45,14 +45,17 @@ export function renderMarkdown(input: string): string {
     line.trim().startsWith('|') && next !== undefined && isDelimRow(next)
 
   // 特殊围栏渲染
+  const uid = () => `c${Math.random().toString(36).slice(2, 8)}`
+  const copyBtn = (id: string) => `<button class="md-copy" data-copy="${id}" onclick="(function(b){var t=document.getElementById(b.dataset.copy);var s=t?t.innerText:'';if(navigator.clipboard)navigator.clipboard.writeText(s).then(function(){b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1200)});})(this)">复制</button>`
   const fenceBlock = (lang: string, code: string): string => {
     const l = (lang || '').toLowerCase()
     const esc = escapeHtml(code)
     if (['mermaid', 'mmd'].includes(l)) {
       const kind = /gantt/.test(code) ? '甘特图' : /sequenceDiagram/.test(code) ? '时序图'
         : /stateDiagram/.test(code) ? '状态机图' : /mindmap/.test(code) ? '思维导图'
-        : /graph|flowchart/.test(code) ? '流程图' : '关系图'
-      return `<div class="md-mermaid" data-kind="${kind}"><div class="md-mermaid-head">◈ ${kind}（文本预览，可复制源码到 Mermaid Live 查看）</div><pre>${esc}</pre></div>`
+        : /graph|flowchart/.test(code) ? '流程图' : /pie/.test(code) ? '饼图' : '关系图'
+      const id = uid()
+      return `<div class="md-mermaid" data-kind="${kind}"><div class="md-mermaid-head">◈ ${kind} ${copyBtn(id)}</div><pre class="mermaid-src" id="${id}">${esc}</pre><div class="mermaid-render" data-src="${id}">${esc}</div></div>`
     }
     if (l === 'chart') {
       try {
@@ -100,14 +103,16 @@ export function renderMarkdown(input: string): string {
       return `<pre class="md-tree">${esc}</pre>`
     }
     if (['json', 'yaml', 'yml', 'diff'].includes(l)) {
-      const id = `c${Math.random().toString(36).slice(2, 8)}`
+      const id = uid()
       const title = l === 'diff' ? '变更对比' : l.toUpperCase()
-      return `<details class="md-fold code-fold" open><summary>${title} · 点击折叠 <button class="md-copy" data-copy="${id}">复制</button></summary><pre class="md-code ${l}" id="${id}"><code>${esc}</code></pre></details>`
+      const cls = l === 'yaml' || l === 'yml' ? 'yaml-hl' : l
+      return `<details class="md-fold code-fold" open><summary>${title} · 点击折叠 ${copyBtn(id)}</summary><pre class="md-code ${cls}" id="${id}"><code>${esc}</code></pre></details>`
     }
     if (['terminal', 'log', 'bash', 'console', 'shell'].includes(l)) {
       return `<pre class="md-terminal">${esc}</pre>`
     }
-    return `<pre class="md-code"><code data-lang="${escapeHtml(lang)}">${esc}</code></pre>`
+    const gid = uid()
+    return `<div class="md-code-wrap"><div class="md-code-head"><span>${escapeHtml(lang || 'code')}</span>${copyBtn(gid)}</div><pre class="md-code" id="${gid}"><code data-lang="${escapeHtml(lang)}">${esc}</code></pre></div>`
   }
 
   const lines = input.replace(/\r\n/g, '\n').split('\n')
