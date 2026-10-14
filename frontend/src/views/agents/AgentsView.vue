@@ -44,7 +44,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import {
   createCustomAgent, createMcp, createSkill, deleteCustomAgent, deleteMcp, deleteSkill,
   getAgentGlobal, importSkillBundle, listCustomAgents, listMcps, listSkills, patchCustomAgent, patchMcp, patchSkill,
-  previewSkillFile, putAgentGlobal, runSkillScript, testMcp, type AgentMcp, type AgentSkill, type CustomAgent,
+  getSandbox, previewSkillFile, putAgentGlobal, putSandbox, runSkillScript, testMcp, testSandbox, type AgentMcp, type AgentSkill, type CustomAgent,
 } from '@/api/agentExt'
 
 const route = useRoute()
@@ -955,6 +955,7 @@ function startKbPoll() {
 
 watch(tab, (t) => {
   if (t === 'mcp' || t === 'skill') void loadExt()
+  if (t === 'skill') void loadSandbox()
   if (t !== 'chat') {
     void loadKb().then(() => startKbPoll())
   } else {
@@ -1245,7 +1246,7 @@ async function saveSkill() {
 /* —— Skill 直接导入（zip 免新建）+ 文件预览 + 受控运行 —— */
 const skillUploading = ref(false)
 const skillPreview = ref<{ path: string; text: string } | null>(null)
-const skillRunOut = ref<{ skillId: string; path: string; ok: boolean; stdout: string; stderr: string } | null>(null)
+const skillRunOut = ref<{ skillId: string; path: string; ok: boolean; stdout: string; stderr: string; provider?: string } | null>(null)
 async function openSkillPreview(s: AgentSkill, path: string) {
   try {
     skillPreview.value = await previewSkillFile(s.id, path)
@@ -1276,14 +1277,73 @@ async function onSkillImport(e: Event) {
     skillUploading.value = false
   }
 }
-async function runSkillFile(s: AgentSkill, path: string) {
+/* —— 沙箱设置（本地受控 / 阿里云函数计算远程） —— */
+const sandbox = ref({ provider: 'local', endpoint: '', token: '', timeout_s: 25, enabled: true })
+const sbHasToken = ref(false)
+const sbOpen = ref(false)
+const sbLoading = ref(false)
+const sbTesting = ref(false)
+const sbMsg = ref('')
+async function loadSandbox() {
+  try {
+    const r = await getSandbox()
+    sandbox.value = { provider: r.provider, endpoint: r.endpoint, token: '', timeout_s: r.timeout_s, enabled: r.enabled }
+    sbHasToken.value = r.has_token
+  } catch { /* 保持默认 */ }
+}
+async function saveSandbox() {
+  sbLoading.value = true
+  sbMsg.value = ''
+  try {
+    const r = await putSandbox({ ...sandbox.value, token: sandbox.value.token || undefined } as { provider: string; endpoint: string; token?: string; timeout_s: number; enabled: boolean })
+    sandbox.value.token = ''
+    sbHasToken.value = r.has_token
+    sbMsg.value = '沙箱配置已保存'
+  } catch (err: unknown) {
+    sbMsg.value = err instanceof Error ? err.message : '保存失败'
+  } finally {
+    sbLoading.value = false
+  }
+}
+async function testSandboxConn() {
+  sbTesting.value = true
+  sbMsg.value = ''
+  try {
+    const r = await testSandbox({ provider: sandbox.value.provider, endpoint: sandbox.value.endpoint, token: sandbox.value.token || undefined, timeout_s: sandbox.value.timeout_s })
+    sbMsg.value = r.ok ? `✓ ${r.detail}` : `✕ ${r.detail}`
+  } catch (err: unknown) {
+    sbMsg.value = `✕ ${err instanceof Error ? err.message : '测试失败'}`
+  } finally {
+    sbTesting.value = false
+  }
+}
+
+/* —— 脚本运行弹窗（含参数输入） —— */
+const runTarget = ref<{ s: AgentSkill; path: string } | null>(null)
+const runArgs = ref('')
+const runLoading = ref(false)
+function openRunModal(s: AgentSkill, path: string) {
+  runTarget.value = { s, path }
+  runArgs.value = ''
+  runLoading.value = false
+}
+async function confirmRun() {
+  const t = runTarget.value
+  if (!t || runLoading.value) return
+  runLoading.value = true
   try {
     skillRunOut.value = null
-    const r = await runSkillScript(s.id, path)
-    skillRunOut.value = { skillId: s.id, path, ok: r.ok, stdout: r.stdout, stderr: r.stderr }
+    const args = runArgs.value.trim() ? runArgs.value.trim().split(/\s+/) : []
+    const r = await runSkillScript(t.s.id, t.path, args)
+    skillRunOut.value = { skillId: t.s.id, path: t.path, ok: r.ok, stdout: r.stdout, stderr: r.stderr, provider: r.provider }
   } catch (err: unknown) {
     extError.value = err instanceof Error ? err.message : '运行失败'
+  } finally {
+    runLoading.value = false
   }
+}
+async function runSkillFile(s: AgentSkill, path: string) {
+  openRunModal(s, path)
 }
 async function removeSkill() {
   const s = deletingSkill.value
@@ -1893,6 +1953,39 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 <input type="file" accept=".zip" hidden @change="onSkillImport" />
               </label>
             </div>
+            <div class="sandbox-card">
+              <button class="sandbox-head" @click="sbOpen = !sbOpen">
+                <b>脚本沙箱：{{ sandbox.provider === 'aliyun_fc' ? '阿里云函数计算' : '本地受控执行' }}</b>
+                <span>{{ sbOpen ? '收起' : '配置' }}</span>
+              </button>
+              <div v-if="sbOpen" class="sandbox-body">
+                <p class="sandbox-desc">本地沙箱无第三方依赖/无网络，仅冒烟测试。需要装依赖（如 python-pptx）就切到阿里云函数计算：按 <code>backend/scripts/fc_sandbox/README_DEPLOY.md</code> 建好函数后来填下面三项。</p>
+                <div class="sandbox-row">
+                  <label>提供商
+                    <select v-model="sandbox.provider" class="kb-input">
+                      <option value="local">本地受控执行（默认）</option>
+                      <option value="aliyun_fc">阿里云函数计算</option>
+                    </select>
+                  </label>
+                  <label>超时（秒）
+                    <input v-model.number="sandbox.timeout_s" type="number" min="5" max="120" class="kb-input" />
+                  </label>
+                </div>
+                <template v-if="sandbox.provider === 'aliyun_fc'">
+                  <label>函数 HTTP 触发器 URL
+                    <input v-model="sandbox.endpoint" class="kb-input" placeholder="https://xxx.cn-hangzhou.fcapp.run" />
+                  </label>
+                  <label>Token（暗号，不填则保留已存）
+                    <input v-model="sandbox.token" type="password" class="kb-input" :placeholder="sbHasToken ? '已保存（留空不改）' : '与函数 SANDBOX_TOKEN 一致'" />
+                  </label>
+                </template>
+                <div class="sandbox-ops">
+                  <button class="mini-btn" :disabled="sbTesting" @click="testSandboxConn()">{{ sbTesting ? '测试中…' : '测试连通' }}</button>
+                  <button class="mini-btn accent" :disabled="sbLoading" @click="saveSandbox()">{{ sbLoading ? '保存中…' : '保存配置' }}</button>
+                  <span v-if="sbMsg" class="sandbox-msg">{{ sbMsg }}</span>
+                </div>
+              </div>
+            </div>
             <p v-if="extError" class="error">{{ extError }}</p>
             <p v-if="extLoading" class="empty">加载中…</p>
             <div class="kb-grid">
@@ -1926,7 +2019,8 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 </details>
                 <div v-if="skillRunOut && skillRunOut.skillId === s.id" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
                   <b>{{ skillRunOut.path }} · {{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
-                  <span class="runout-tip">沙箱试运行（无第三方依赖/无网络）：失败通常是缺依赖或缺归属文件，不代表 Skill 本身不可用</span>
+                  <span class="runout-tag" :class="skillRunOut.provider === 'aliyun_fc' ? 'remote' : 'local'">{{ skillRunOut.provider === 'aliyun_fc' ? '阿里云沙箱' : '本地沙箱' }}</span>
+                  <span class="runout-tip">本地沙箱无第三方依赖/无网络，仅冒烟测试；缺参报错时点 ▶ 重新运行并填写参数</span>
                   <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
                   <pre v-if="skillRunOut.stderr" class="err">{{ skillRunOut.stderr }}</pre>
                 </div>
@@ -2212,6 +2306,27 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
         <div class="modal-actions">
           <button class="btn ghost" @click="deletingSkill = null">取消</button>
           <button class="btn danger-solid" @click="removeSkill()">确认删除</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 脚本运行弹窗（含参数） -->
+    <div v-if="runTarget" class="overlay" @click.self="runTarget = null">
+      <div class="modal">
+        <h2>运行脚本</h2>
+        <div class="run-path">{{ runTarget.path }}</div>
+        <label>运行参数（空格分隔，如 <code>docs/README.md --fix</code>；不需要可留空）
+          <input v-model="runArgs" class="kb-input" placeholder="check_annotations.py 需要 path 参数，如 docs/README.md" @keydown.enter="confirmRun()" />
+        </label>
+        <p class="run-provider">经由：{{ sandbox.provider === 'aliyun_fc' ? '阿里云沙箱' : '本地沙箱' }}（Skill 页沙箱配置区可切换）</p>
+        <div v-if="skillRunOut && skillRunOut.skillId === runTarget.s.id" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
+          <b>{{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
+          <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
+          <pre v-if="skillRunOut.stderr" class="err">{{ skillRunOut.stderr }}</pre>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="runTarget = null">关闭</button>
+          <button class="btn primary" :disabled="runLoading" @click="confirmRun()">{{ runLoading ? '运行中…' : '运行' }}</button>
         </div>
       </div>
     </div>
@@ -2755,6 +2870,21 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .skill-runout pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
 .skill-runout pre.err { color: var(--danger); }
 .runout-tip { display: block; font-size: 10.5px; font-weight: 500; color: var(--ink-3); margin-top: 2px; }
+.runout-tag { display: inline-block; font-size: 10px; font-weight: 800; border-radius: 999px; padding: 1px 8px; margin-left: 6px; background: var(--bg-soft); color: var(--ink-3); }
+.runout-tag.remote { background: var(--accent-soft); color: var(--accent-strong); }
+.runout-tag.local { background: var(--brand-soft); color: var(--brand-strong); }
+.run-path { font-size: 12px; color: var(--brand-strong); background: var(--brand-soft); border-radius: 8px; padding: 6px 10px; word-break: break-all; }
+.run-provider { font-size: 12px; color: var(--ink-3); margin: 0; }
+.sandbox-card { border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 14px; background: var(--surface-alt); }
+.sandbox-head { width: 100%; display: flex; align-items: center; justify-content: space-between; border: none; background: transparent; cursor: pointer; padding: 10px 14px; font-size: 13px; color: var(--ink-1); }
+.sandbox-head span { font-size: 12px; color: var(--brand-strong); font-weight: 700; }
+.sandbox-body { display: flex; flex-direction: column; gap: 8px; padding: 0 14px 14px; }
+.sandbox-desc { font-size: 12px; color: var(--ink-2); line-height: 1.7; margin: 0; }
+.sandbox-desc code { background: rgba(99,102,241,.12); padding: 1px 5px; border-radius: 4px; }
+.sandbox-row { display: grid; grid-template-columns: 1fr 160px; gap: 8px; }
+.sandbox-body label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.sandbox-ops { display: flex; align-items: center; gap: 8px; }
+.sandbox-msg { font-size: 12px; font-weight: 600; color: var(--brand-strong); }
 /* —— 通用渲染格式补齐：徽章/标签/折叠/进度/图表/时间轴/告警/终端 —— */
 .bubble :deep(.md-badge) { display: inline-block; font-size: 11px; font-weight: 800; color: #fff; background: var(--brand-gradient); border-radius: 999px; padding: 1px 9px; margin: 0 2px; }
 .bubble :deep(.md-tag) { display: inline-block; font-size: 11px; color: var(--brand-strong); background: var(--brand-soft); border-radius: 6px; padding: 1px 8px; margin: 0 2px; }

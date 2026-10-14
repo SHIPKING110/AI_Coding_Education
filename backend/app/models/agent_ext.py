@@ -78,4 +78,21 @@ class AgentGlobalSetting(Base):
     )
 
 
-__all__ = ["CustomAgent", "AgentMCP", "AgentSkill", "AgentGlobalSetting"]
+__all__ = ["CustomAgent", "AgentMCP", "AgentSkill", "AgentGlobalSetting", "SandboxSetting"]
+
+
+class SandboxSetting(Base):
+    """Skill 脚本沙箱配置（按用户）：本地受控执行 或 阿里云函数计算远程沙箱。"""
+
+    __tablename__ = "sandbox_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    provider: Mapped[str] = mapped_column(String(16), default="local")
+    endpoint: Mapped[str] = mapped_column(String(512), default="")
+    token: Mapped[str] = mapped_column(String(256), default="")
+    timeout_s: Mapped[int] = mapped_column(default=25)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

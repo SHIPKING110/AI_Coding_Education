@@ -307,11 +307,74 @@ def run_skill_script(
     if rel not in list(s.files or []):
         raise HTTPException(status_code=404, detail="文件不在 Skill 包内")
     try:
-        return _exec.run_script(user.id, skill_id, rel, args if isinstance(args, list) else [])
+        sb = ext_crud.get_sandbox_setting(db, owner_id=user.id)
+        if sb is not None and sb.enabled and sb.provider == "aliyun_fc" and sb.endpoint:
+            result = _exec.run_remote(
+                user.id, skill_id, rel, args if isinstance(args, list) else [],
+                endpoint=sb.endpoint, token=sb.token or "", timeout_s=sb.timeout_s or 25,
+            )
+            result["provider"] = "aliyun_fc"
+            return result
+        result = _exec.run_script(user.id, skill_id, rel, args if isinstance(args, list) else [])
+        result["provider"] = "local"
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except TimeoutError:
         raise HTTPException(status_code=408, detail="执行超时（5s），已终止")
+
+
+# ---------------- 沙箱设置（本地 / 阿里云函数计算） ----------------
+
+class SandboxIn(BaseModel):
+    provider: str = "local"
+    endpoint: str = ""
+    token: str = ""
+    timeout_s: int = 25
+    enabled: bool = True
+
+
+def _sandbox_out(row) -> dict:
+    return {
+        "provider": row.provider if row else "local",
+        "endpoint": row.endpoint if row else "",
+        "has_token": bool(row and row.token),
+        "timeout_s": row.timeout_s if row else 25,
+        "enabled": row.enabled if row is not None else True,
+    }
+
+
+@router.get("/sandbox")
+def get_sandbox(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return _sandbox_out(ext_crud.get_sandbox_setting(db, owner_id=user.id))
+
+
+@router.put("/sandbox")
+def put_sandbox(body: SandboxIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    provider = (body.provider or "local").strip()
+    if provider not in ("local", "aliyun_fc"):
+        raise HTTPException(status_code=400, detail="provider 仅支持 local / aliyun_fc")
+    if provider == "aliyun_fc" and not (body.endpoint or "").strip():
+        raise HTTPException(status_code=400, detail="远程沙箱需填写函数 HTTP 触发器 URL")
+    timeout_s = max(5, min(int(body.timeout_s or 25), 120))
+    row = ext_crud.upsert_sandbox_setting(
+        db, owner_id=user.id, provider=provider,
+        endpoint=(body.endpoint or "").strip(), timeout_s=timeout_s, enabled=body.enabled,
+        **({"token": body.token} if body.token else {}),
+    )
+    return _sandbox_out(row)
+
+
+@router.post("/sandbox/test")
+def test_sandbox(body: SandboxIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """测试远程沙箱连通性（用表单里的 endpoint/token，不落库）。"""
+    from app.services import skill_exec as _exec
+
+    if (body.provider or "local") != "aliyun_fc":
+        return {"ok": True, "detail": "本地沙箱无需测试"}
+    if not (body.endpoint or "").strip():
+        return {"ok": False, "detail": "请先填写函数 HTTP 触发器 URL"}
+    return _exec.test_remote(endpoint=body.endpoint.strip(), token=body.token or "", timeout_s=body.timeout_s or 25)
 
 
 @router.post("/mcps/{mcp_id}/test")

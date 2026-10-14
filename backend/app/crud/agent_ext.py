@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.agent_ext import AgentGlobalSetting, AgentMCP, AgentSkill, CustomAgent
+from app.models.agent_ext import AgentGlobalSetting, AgentMCP, AgentSkill, CustomAgent, SandboxSetting
 
 
 # ---------------- 自定义 Agent ----------------
@@ -27,6 +27,24 @@ def get_custom_agent(db: Session, *, owner_id, agent_id: str) -> CustomAgent | N
 def create_custom_agent(db: Session, *, owner_id, agent_id: str, **fields) -> CustomAgent:
     row = CustomAgent(owner_id=owner_id, agent_id=agent_id, **fields)
     db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_sandbox_setting(db: Session, *, owner_id) -> SandboxSetting | None:
+    return db.scalars(select(SandboxSetting).where(SandboxSetting.owner_id == owner_id)).first()
+
+
+def upsert_sandbox_setting(db: Session, *, owner_id, **fields) -> SandboxSetting:
+    row = get_sandbox_setting(db, owner_id=owner_id)
+    if row is None:
+        row = SandboxSetting(owner_id=owner_id, **{k: v for k, v in fields.items() if v is not None})
+        db.add(row)
+    else:
+        for k, v in fields.items():
+            if hasattr(row, k) and v is not None:
+                setattr(row, k, v)
     db.commit()
     db.refresh(row)
     return row
@@ -140,4 +158,5 @@ __all__ = [
     "list_mcps", "get_mcp", "create_mcp", "update_mcp", "delete_mcp",
     "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill",
     "get_global_setting", "upsert_global_setting",
+    "get_sandbox_setting", "upsert_sandbox_setting",
 ]

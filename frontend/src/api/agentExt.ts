@@ -111,12 +111,35 @@ export async function importSkillBundle(file: File): Promise<AgentSkill> {
   return data
 }
 
-export async function runSkillScript(id: string, path: string, args: string[] = []): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> {
+export async function runSkillScript(id: string, path: string, args: string[] = []): Promise<{ ok: boolean; code: number; stdout: string; stderr: string; provider?: string }> {
   const { data } = await http.post(`/agents/ext/skills/${id}/run`, { path, args })
   return data
 }
 
 export async function previewSkillFile(id: string, path: string): Promise<{ path: string; text: string }> {
   const { data } = await http.get(`/agents/ext/skills/${id}/files/preview`, { params: { path } })
+  return data
+}
+
+export interface SandboxSetting {
+  provider: string
+  endpoint: string
+  has_token: boolean
+  timeout_s: number
+  enabled: boolean
+}
+
+export async function getSandbox(): Promise<SandboxSetting> {
+  const { data } = await http.get('/agents/ext/sandbox')
+  return data
+}
+
+export async function putSandbox(payload: { provider: string; endpoint: string; token?: string; timeout_s: number; enabled: boolean }): Promise<SandboxSetting> {
+  const { data } = await http.put('/agents/ext/sandbox', payload)
+  return data
+}
+
+export async function testSandbox(payload: { provider: string; endpoint: string; token?: string; timeout_s: number }): Promise<{ ok: boolean; detail: string }> {
+  const { data } = await http.post('/agents/ext/sandbox/test', payload)
   return data
 }
