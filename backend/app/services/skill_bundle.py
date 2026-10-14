@@ -17,6 +17,8 @@ import zipfile
 
 ALLOWED_SUFFIX = {".md", ".txt", ".json", ".yaml", ".yml", ".py", ".js", ".sh",
                   ".png", ".jpg", ".jpeg", ".gif", ".webp"}
+# 无后缀的常见署名/说明文件也允许落盘（很多第三方 Skill 自带完整性校验，缺失会报 attribution 缺失）
+ALLOWED_BASENAMES = {"license", "licence", "notice", "authors", "copying", "attribution", "readme", "changelog"}
 MAX_FILES = 2000
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 80 * 1024 * 1024
@@ -68,7 +70,11 @@ def _safe_name(name: str) -> str | None:
     p = pathlib.PurePosixPath(name.replace("\\", "/"))
     if p.is_absolute() or ".." in p.parts:
         return None
-    if not p.suffix.lower() in ALLOWED_SUFFIX:
+    base = p.name.lower()
+    allowed = p.suffix.lower() in ALLOWED_SUFFIX or base in ALLOWED_BASENAMES or any(
+        base.startswith(prefix) for prefix in ("license", "licence", "notice", "attribution")
+    )
+    if not allowed:
         return None
     clean = "/".join(x for x in p.parts if x not in ("", "."))
     return clean or None
@@ -133,7 +139,9 @@ def read_text_file(owner_id, skill_id, rel: str, limit: int = 6000) -> str:
     target = (dest / rel).resolve()
     if dest.resolve() not in target.parents:
         raise ValueError("非法路径")
-    if target.suffix.lower() not in ALLOWED_SUFFIX or target.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+    if target.suffix.lower() not in ALLOWED_SUFFIX and target.name.lower() not in ALLOWED_BASENAMES:
+        if target.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            raise ValueError("图片类型不支持预览")
         raise ValueError("该类型不支持预览")
     return target.read_text(encoding="utf-8", errors="ignore")[:limit]
 

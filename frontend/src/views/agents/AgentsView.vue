@@ -1245,7 +1245,7 @@ async function saveSkill() {
 /* —— Skill 直接导入（zip 免新建）+ 文件预览 + 受控运行 —— */
 const skillUploading = ref(false)
 const skillPreview = ref<{ path: string; text: string } | null>(null)
-const skillRunOut = ref<{ path: string; ok: boolean; stdout: string; stderr: string } | null>(null)
+const skillRunOut = ref<{ skillId: string; path: string; ok: boolean; stdout: string; stderr: string } | null>(null)
 async function openSkillPreview(s: AgentSkill, path: string) {
   try {
     skillPreview.value = await previewSkillFile(s.id, path)
@@ -1280,7 +1280,7 @@ async function runSkillFile(s: AgentSkill, path: string) {
   try {
     skillRunOut.value = null
     const r = await runSkillScript(s.id, path)
-    skillRunOut.value = { path, ok: r.ok, stdout: r.stdout, stderr: r.stderr }
+    skillRunOut.value = { skillId: s.id, path, ok: r.ok, stdout: r.stdout, stderr: r.stderr }
   } catch (err: unknown) {
     extError.value = err instanceof Error ? err.message : '运行失败'
   }
@@ -1919,13 +1919,14 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                       <div class="skill-dir-name">{{ g.dir }}</div>
                       <span v-for="f in g.items" :key="f" class="file-chip-wrap" :title="f">
                         <button class="file-chip" @click="openSkillPreview(s, f)" :title="`预览 ${f}`">{{ shortName(f) }}</button>
-                        <button v-if="/\.(py|js|sh)$/i.test(f)" class="file-run" title="受控运行（白名单解释器/5s超时/无网络）" @click="runSkillFile(s, f)">▶</button>
+                        <button v-if="/\.(py|js|sh)$/i.test(f)" class="file-run" title="沙箱试运行（无第三方依赖/无网络，仅冒烟测试，失败多为缺依赖）" @click="runSkillFile(s, f)">▶</button>
                       </span>
                     </div>
                   </div>
                 </details>
-                <div v-if="skillRunOut" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
+                <div v-if="skillRunOut && skillRunOut.skillId === s.id" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
                   <b>{{ skillRunOut.path }} · {{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
+                  <span class="runout-tip">沙箱试运行（无第三方依赖/无网络）：失败通常是缺依赖或缺归属文件，不代表 Skill 本身不可用</span>
                   <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
                   <pre v-if="skillRunOut.stderr" class="err">{{ skillRunOut.stderr }}</pre>
                 </div>
@@ -2753,6 +2754,7 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .skill-runout.fail { border-color: #fca5a5; background: #fef2f2; }
 .skill-runout pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
 .skill-runout pre.err { color: var(--danger); }
+.runout-tip { display: block; font-size: 10.5px; font-weight: 500; color: var(--ink-3); margin-top: 2px; }
 /* —— 通用渲染格式补齐：徽章/标签/折叠/进度/图表/时间轴/告警/终端 —— */
 .bubble :deep(.md-badge) { display: inline-block; font-size: 11px; font-weight: 800; color: #fff; background: var(--brand-gradient); border-radius: 999px; padding: 1px 9px; margin: 0 2px; }
 .bubble :deep(.md-tag) { display: inline-block; font-size: 11px; color: var(--brand-strong); background: var(--brand-soft); border-radius: 6px; padding: 1px 8px; margin: 0 2px; }
