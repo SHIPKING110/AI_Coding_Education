@@ -17,7 +17,7 @@ import zipfile
 
 ALLOWED_SUFFIX = {".md", ".txt", ".json", ".yaml", ".yml", ".py", ".js", ".sh",
                   ".png", ".jpg", ".jpeg", ".gif", ".webp"}
-MAX_FILES = 500
+MAX_FILES = 2000
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 80 * 1024 * 1024
 # 整包导入时直接跳过的噪音目录（依赖产物/版本库/构建输出，Agent 引用无意义）
@@ -49,10 +49,16 @@ def save_bundle(owner_id, skill_id, data: bytes) -> dict:
     except Exception:
         raise ValueError("不是有效的 zip 包")
     names = [i.filename for i in zf.infolist() if not i.is_dir()]
-    # 先过滤噪音目录再计数：node_modules/.git/dist 等不计入文件数
-    names = [n for n in names if not any(f"/{d}/" in f"/{n.replace(chr(92), '/')}/" for d in SKIP_DIRS)]
-    if len(names) > MAX_FILES:
-        raise ValueError(f"文件过多（>{MAX_FILES}，已自动跳过 node_modules/.git/dist 等噪音目录），请精简")
+    # 先过滤噪音目录 + 非白名单后缀再计数：只有真正会落盘的文件才占名额
+    # （node_modules/.git/dist 等跳过；二进制/锁文件等后缀不计入）
+    def _countable(n: str) -> bool:
+        norm = n.replace("\\", "/")
+        if any(f"/{d}/" in f"/{norm}/" for d in SKIP_DIRS):
+            return False
+        return _safe_name(n) is not None
+    countable = [n for n in names if _countable(n)]
+    if len(countable) > MAX_FILES:
+        raise ValueError(f"文件过多（>{MAX_FILES}，已自动跳过 node_modules/.git/dist 等噪音目录与非文本文件），请精简")
     total = 0
     kept: list[tuple[str, bytes]] = []
     for info in zf.infolist():
