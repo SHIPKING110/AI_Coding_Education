@@ -1959,7 +1959,7 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 <span>{{ sbOpen ? '收起' : '配置' }}</span>
               </button>
               <div v-if="sbOpen" class="sandbox-body">
-                <p class="sandbox-desc">本地沙箱无第三方依赖/无网络，仅冒烟测试。切到阿里云百炼后，脚本在云端沙箱跑（可装依赖）。注意：<b>工作空间ID ≠ 模板 code</b>，工作空间ID 点控制台右上角「默认业务空间」查看；模板 code 填 Sandbox→我的模板里的 templateCode。</p>
+                <p class="sandbox-desc">本地沙箱无第三方依赖/无网络，仅冒烟测试。切到阿里云百炼后，脚本在云端沙箱跑（可装依赖）。工作空间ID点控制台右上角「默认业务空间」查看；模板 code 填 Sandbox→我的模板里的 templateCode。</p>
                 <div class="sandbox-row">
                   <label>提供商
                     <select v-model="sandbox.provider" class="kb-input">
@@ -1973,7 +1973,7 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 </div>
                 <template v-if="sandbox.provider === 'bailian'">
                   <div class="sandbox-row">
-                    <label>工作空间ID（不是模板ID）
+                    <label>工作空间ID
                       <input v-model="sandbox.workspace_id" class="kb-input" placeholder="点控制台右上角「默认业务空间」查看" />
                     </label>
                     <label>地域

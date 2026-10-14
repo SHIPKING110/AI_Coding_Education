@@ -384,15 +384,19 @@ def put_sandbox(body: SandboxIn, db: Session = Depends(get_db), user: User = Dep
 
 @router.post("/sandbox/test")
 def test_sandbox(body: SandboxIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """测试百炼沙箱连通性（用表单里的配置，不落库）。"""
+    """测试百炼沙箱连通性（用表单里的配置，不落库；为空的项自动回退到已保存配置，方便保存后直接点测试）。"""
     from app.services import skill_exec as _exec
 
     if (body.provider or "local") != "bailian":
         return {"ok": True, "detail": "本地沙箱无需测试"}
+    saved = ext_crud.get_sandbox_setting(db, owner_id=user.id)
     return _exec.test_remote(
-        endpoint=(body.endpoint or "").strip(), token=body.token or "", timeout_s=body.timeout_s or 30,
-        workspace_id=(body.workspace_id or "").strip(), region=(body.region or "cn-beijing").strip(),
-        template_code=(body.template_code or "").strip(),
+        endpoint=(body.endpoint or "").strip() or (saved.endpoint if saved else ""),
+        token=body.token or (saved.token if saved else ""),
+        timeout_s=body.timeout_s or (saved.timeout_s if saved else 30),
+        workspace_id=(body.workspace_id or "").strip() or (saved.workspace_id if saved else ""),
+        region=(body.region or "").strip() or (saved.region if saved else "") or "cn-beijing",
+        template_code=(body.template_code or "").strip() or (saved.template_code if saved else ""),
     )
 
 
