@@ -100,14 +100,15 @@ def _bailian_base(workspace_id: str, region: str) -> str:
 
 def run_remote(owner_id, skill_id, rel: str, args: list, *, endpoint: str, token: str, timeout_s: int,
                workspace_id: str = "", region: str = "cn-beijing", template_code: str = "") -> dict:
-    """百炼 Sandbox 执行：创建实例 → 写文件 → 跑命令 → 释放实例，全程 E2B 兼容协议。"""
+    """百炼 Sandbox 执行：创建实例 → 写文件 →（有 requirements.txt 则先 pip 安装依赖）→ 跑命令 → 释放实例。"""
     import httpx
 
     if not workspace_id or not token or not template_code:
         raise ValueError("百炼沙箱缺配置：工作空间ID / API Key / 模板 code 必填")
     base = _bailian_base(workspace_id, region)
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    timeout = max(10, min(int(timeout_s or 30), 120)) + 30
+    step_timeout = max(10, min(int(timeout_s or 30), 120))
+    timeout = step_timeout + 60
     entry = str(rel).replace("\\", "/")
     safe_args = [str(a)[:200] for a in (args or [])][:8]
     quoted = " ".join(f"'{a.replace(chr(39), chr(39) * 4)}'" for a in safe_args)
@@ -117,6 +118,11 @@ def run_remote(owner_id, skill_id, rel: str, args: list, *, endpoint: str, token
     files = collect_exec_files(owner_id, skill_id)
     if entry not in files:
         raise ValueError(f"入口脚本 {entry} 不在可发送文件内")
+    # 约定：包内 requirements*.txt 即依赖清单，运行时自动 pip 安装（后续 Skill 同理，无需额外配置）
+    req_files = sorted(
+        frel for frel in files
+        if frel.rsplit("/", 1)[-1].lower().startswith("requirements") and frel.lower().endswith(".txt")
+    )
 
     def _post(path: str, body: dict | None = None, method: str = "POST") -> httpx.Response:
         try:
@@ -168,21 +174,46 @@ def run_remote(owner_id, skill_id, rel: str, args: list, *, endpoint: str, token
             if wr.status_code != 200:
                 raise ValueError(f"写文件 {frel} 失败（{wr.status_code}）：{(wr.text or '')[:200]}")
 
-        # 4. 执行命令（E2B process.Start 等价，走 SDK 数据面；失败则回退 run_code 风格）
-        out, err, code = "", "", -1
-        try:
-            er = httpx.post(f"{domain}/process.Process/Start",
-                            json={"processName": command, "cwd": "/home/user/workspace"},
-                            headers=dh, timeout=timeout)
-            if er.status_code == 200:
+        # 4. （可选）先装依赖，再执行入口；封装为同一数据面调用
+        def _data_exec(cmd: str, limit: int) -> tuple[int, str, str]:
+            try:
+                er = httpx.post(f"{domain}/process.Process/Start",
+                                json={"processName": cmd, "cwd": "/home/user/workspace"},
+                                headers=dh, timeout=limit)
+            except Exception as e:
+                return -1, "", f"执行失败：{e}"
+            if er.status_code != 200:
+                return -1, "", f"执行接口返回 {er.status_code}：{(er.text or '')[:200]}"
+            try:
                 ed = er.json()
-                out, err = str(ed.get("stdout", "") or ed.get("output", "")), str(ed.get("stderr", ""))
-                code = int(ed.get("exitCode", ed.get("code", 0)))
-            else:
-                err = f"执行接口返回 {er.status_code}：{(er.text or '')[:200]}"
-        except Exception as e:
-            err = f"执行失败：{e}"
-        return {"ok": code == 0, "code": code, "stdout": out[:MAX_OUT], "stderr": err[:MAX_OUT]}
+            except Exception:
+                return -1, "", f"执行返回非 JSON：{(er.text or '')[:200]}"
+            return (
+                int(ed.get("exitCode", ed.get("code", 0))),
+                str(ed.get("stdout", "") or ed.get("output", "")),
+                str(ed.get("stderr", "")),
+            )
+
+        deps_note = ""
+        if req_files:
+            # 用国内镜像源加速；模板需在网络白名单放行 pypi（见模板高级配置→网络配置）
+            pip_cmd = " && ".join(
+                f"pip install -r '/home/user/workspace/{f}' -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet"
+                for f in req_files[:2]
+            )
+            pcode, pout, perr = _data_exec(pip_cmd, step_timeout + 60)
+            tail = ((pout or "") + "\n" + (perr or "")).strip().splitlines()[-8:]
+            if pcode != 0:
+                return {"ok": False, "code": pcode,
+                        "stdout": "",
+                        "stderr": f"依赖安装失败（{', '.join(req_files)}）：\n" + "\n".join(tail)
+                                 + "\n（如报网络不通，请在百炼模板→高级配置→网络配置放行 pypi）"}
+            deps_note = f"已自动安装依赖（{', '.join(req_files)}）"
+
+        # 5. 执行入口命令
+        code, out, err = _data_exec(command, step_timeout)
+        return {"ok": code == 0, "code": code, "stdout": out[:MAX_OUT], "stderr": err[:MAX_OUT],
+                "deps": deps_note}
     finally:
         _cleanup()
 

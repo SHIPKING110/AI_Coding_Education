@@ -1246,7 +1246,7 @@ async function saveSkill() {
 /* —— Skill 直接导入（zip 免新建）+ 文件预览 + 受控运行 —— */
 const skillUploading = ref(false)
 const skillPreview = ref<{ path: string; text: string } | null>(null)
-const skillRunOut = ref<{ skillId: string; path: string; ok: boolean; stdout: string; stderr: string; provider?: string } | null>(null)
+const skillRunOut = ref<{ skillId: string; path: string; ok: boolean; stdout: string; stderr: string; provider?: string; deps?: string } | null>(null)
 async function openSkillPreview(s: AgentSkill, path: string) {
   try {
     skillPreview.value = await previewSkillFile(s.id, path)
@@ -1335,7 +1335,7 @@ async function confirmRun() {
     skillRunOut.value = null
     const args = runArgs.value.trim() ? runArgs.value.trim().split(/\s+/) : []
     const r = await runSkillScript(t.s.id, t.path, args)
-    skillRunOut.value = { skillId: t.s.id, path: t.path, ok: r.ok, stdout: r.stdout, stderr: r.stderr, provider: r.provider }
+    skillRunOut.value = { skillId: t.s.id, path: t.path, ok: r.ok, stdout: r.stdout, stderr: r.stderr, provider: r.provider, deps: (r as { deps?: string }).deps }
   } catch (err: unknown) {
     extError.value = err instanceof Error ? err.message : '运行失败'
   } finally {
@@ -2329,8 +2329,10 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
           <input v-model="runArgs" class="kb-input" placeholder="check_annotations.py 需要 path 参数，如 docs/README.md" @keydown.enter="confirmRun()" />
         </label>
         <p class="run-provider">经由：{{ sandbox.provider === 'bailian' ? '百炼沙箱' : '本地沙箱' }}（Skill 页沙箱配置区可切换）</p>
+        <p v-if="runTarget && (runTarget.s.files ?? []).some((f) => String(f).split('/').pop()?.toLowerCase().startsWith('requirements'))" class="run-provider">检测到 requirements.txt：百炼沙箱会先自动 pip 安装依赖再运行（模板网络白名单需放行 pypi）</p>
         <div v-if="skillRunOut && skillRunOut.skillId === runTarget.s.id" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
           <b>{{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
+          <span v-if="skillRunOut.deps" class="runout-tip">✓ {{ skillRunOut.deps }}</span>
           <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
           <pre v-if="skillRunOut.stderr" class="err">{{ skillRunOut.stderr }}</pre>
         </div>
