@@ -512,6 +512,32 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
     return out
 
 
+def _tool_read_skill_file(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
+    """读用户 Skill 包内文本文件（先读 SKILL.md/入口脚本/参考资料，再决定跑哪个脚本、传什么参）。"""
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    ref = (skill or "").strip()
+    rel = (path or "").strip().replace("\\", "/")
+    if not ref or not rel:
+        return {"错误": "需提供 skill（Skill 名或 id）与 path（包内文件路径）"}
+    target = None
+    for s in _ext.list_skills(db, owner_id=user.id):
+        sid = str(s.id)
+        if ref == sid or ref == sid[:8] or ref in (s.name or ""):
+            target = s
+            break
+    if target is None:
+        return {"错误": f"找不到 Skill：{ref}"}
+    if rel not in list(target.files or []):
+        return {"错误": f"{target.name} 包内无此文件：{rel}"}
+    try:
+        text = _bundle.read_text_file(user.id, target.id, rel)
+    except ValueError as e:
+        return {"错误": str(e)}
+    return {"skill": target.name, "文件": rel, "内容": text[:3000]}
+
+
 _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "my_schedule_overview": _tool_my_schedule_overview,
     "my_teaching_stats": _tool_my_teaching_stats,
@@ -524,6 +550,7 @@ _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "sql_describe_table": _tool_sql_describe_table,
     "sql_query": _tool_sql_query,
     "run_skill_script": _tool_run_skill_script,
+    "read_skill_file": _tool_read_skill_file,
 }
 
 # OpenAI 兼容 function-calling 的 tools schema
@@ -686,6 +713,24 @@ TOOLS_SCHEMA: list[dict] = [
                     "skill": {"type": "string", "description": "Skill 名（或 id）"},
                     "path": {"type": "string", "description": "包内脚本路径，如 skills/ppt-master/scripts/build.py"},
                     "args": {"type": "array", "items": {"type": "string"}, "description": "命令行参数数组"},
+                },
+                "required": ["skill", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill_file",
+            "description": (
+                "读取用户 Skill 包内的文本文件（SKILL.md、脚本源码、references 参考资料）。"
+                "跑脚本之前先用它读 SKILL.md 确认入口与参数，不要凭文件名猜。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "包内文件路径，如 SKILL.md"},
                 },
                 "required": ["skill", "path"],
             },

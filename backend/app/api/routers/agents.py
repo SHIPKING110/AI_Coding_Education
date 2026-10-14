@@ -17,7 +17,7 @@ from app.crud import agent as agent_crud
 from app.crud import knowledge as knowledge_crud
 from app.crud import report as report_crud
 from app.models.user import User
-from app.services import agent_chat, agent_memory, agent_planner, agent_registry, llm, ppt_chat
+from app.services import agent_chat, agent_memory, agent_planner, agent_registry, agent_tools, llm, ppt_chat
 from app.services import rag as rag_service
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -641,9 +641,16 @@ def conversation_chat(
     # 智能助手：多轮规划层执行只读业务工具（排课考勤/教学数据/班级/学员/评估）。
     # 规划→执行→观察，带预算护栏与降级；非业务问题或失败时静默跳过，不影响流式回答。
     plan_outcome = agent_planner.PlanOutcome()
-    if conv.agent_id == "assistant" and message.strip():
+    has_skill_tools = bool(caps.get("skill_blocks"))
+    if (conv.agent_id == "assistant" or has_skill_tools) and message.strip():
         try:
-            plan_outcome = agent_planner.plan_and_run(db, user, message.strip())
+            if has_skill_tools and agent_tools.looks_like_skill_task(message.strip()):
+                # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
+                plan_outcome = agent_planner.plan_and_run(
+                    db, user, message.strip(), max_rounds=6, max_calls=12, time_budget_ms=300000,
+                )
+            else:
+                plan_outcome = agent_planner.plan_and_run(db, user, message.strip())
             if plan_outcome.block:
                 mem_block = (mem_block + "\n\n" + plan_outcome.block).strip() if mem_block else plan_outcome.block
         except Exception:

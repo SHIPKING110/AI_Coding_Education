@@ -1045,6 +1045,8 @@ const TOOL_LABELS: Record<string, string> = {
   sql_list_tables: '数据库·表清单',
   sql_describe_table: '数据库·表结构',
   sql_query: '数据库查询',
+  run_skill_script: 'Skill脚本执行',
+  read_skill_file: 'Skill文件读取',
 }
 
 function toolsOf(m: { citations?: Record<string, unknown> | null }): {
@@ -1071,9 +1073,23 @@ function toolArgsText(args: Record<string, unknown>): string {
       }
       return `周期=${labels[String(v)] ?? String(v)}`
     }
+    if (k === 'skill') return `Skill=${String(v)}`
+    if (k === 'path') return `${String(v).split('/').pop()}`
+    if (k === 'args' && Array.isArray(v)) return v.length ? `参数=${v.join(' ')}` : '无参数'
     return `${k}=${String(v)}`
   })
   return parts.length ? parts.join('，') : '默认参数'
+}
+
+/* —— 工具结果里的生成文件（run_skill_script 回传的下载链接）渲染为可点按钮 —— */
+function toolFiles(summary: string): { 名?: string; name?: string; 下载?: string; url?: string }[] {
+  try {
+    const obj = JSON.parse(summary || '')
+    const arr = obj?.['生成文件']
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
 }
 
 function statusText(d: KnowledgeDoc): string {
@@ -1754,7 +1770,7 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                   <details v-if="toolsOf(m).length" class="cite-drop tool-drop">
                     <summary>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
-                      业务工具调用（{{ toolsOf(m).length }}）
+                      执行链路（{{ toolsOf(m).length }}）：读文件 / 跑脚本 / 查数据
                       <span v-if="(m.citations as Record<string, unknown>)?.degraded" class="tool-flag">启发式</span>
                     </summary>
                     <p v-if="(m.citations as Record<string, unknown>)?.rounds" class="tool-meta">
@@ -1768,6 +1784,9 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                         <span class="tool-args">{{ toolArgsText(t.args) }}</span>
                       </div>
                       <p v-if="t.ok" class="tool-summary">{{ t.summary }}</p>
+                      <div v-if="toolFiles(t.summary).length" class="tool-files">
+                        <a v-for="(f, fi) in toolFiles(t.summary)" :key="fi" class="file-dl" :href="f['下载'] ?? f.url" download target="_blank" rel="noopener">⬇ {{ f['名'] ?? f.name }}</a>
+                      </div>
                       <p v-else class="tool-error">查询失败：{{ t.error }}（已跳过该项，其余数据不受影响）</p>
                     </div>
                   </details>
@@ -2704,6 +2723,9 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .tool-step-head b { color: var(--ink-1); }
 .tool-args { font-size: 11px; color: var(--ink-3); background: var(--bg-soft); padding: 1px 7px; border-radius: 4px; }
 .tool-summary { margin: 5px 0 0; color: var(--ink-2); line-height: 1.55; word-break: break-all; }
+.tool-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.file-dl { font-size: 11.5px; font-weight: 700; color: #fff; background: var(--brand); border-radius: 999px; padding: 3px 12px; text-decoration: none; }
+.file-dl:hover { filter: brightness(1.1); color: #fff; }
 .tool-error { margin: 5px 0 0; color: #b91c1c; line-height: 1.55; }
 
 .error { color: var(--danger); font-size: 12.5px; padding: 4px 0; }
