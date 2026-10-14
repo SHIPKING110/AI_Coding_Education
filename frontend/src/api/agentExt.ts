@@ -127,6 +127,9 @@ export interface SandboxSetting {
   has_token: boolean
   timeout_s: number
   enabled: boolean
+  workspace_id: string
+  region: string
+  template_code: string
 }
 
 export async function getSandbox(): Promise<SandboxSetting> {
@@ -134,12 +137,12 @@ export async function getSandbox(): Promise<SandboxSetting> {
   return data
 }
 
-export async function putSandbox(payload: { provider: string; endpoint: string; token?: string; timeout_s: number; enabled: boolean }): Promise<SandboxSetting> {
+export async function putSandbox(payload: { provider: string; endpoint: string; token?: string; timeout_s: number; enabled: boolean; workspace_id: string; region: string; template_code: string }): Promise<SandboxSetting> {
   const { data } = await http.put('/agents/ext/sandbox', payload)
   return data
 }
 
-export async function testSandbox(payload: { provider: string; endpoint: string; token?: string; timeout_s: number }): Promise<{ ok: boolean; detail: string }> {
+export async function testSandbox(payload: { provider: string; endpoint: string; token?: string; timeout_s: number; workspace_id: string; region: string; template_code: string }): Promise<{ ok: boolean; detail: string }> {
   const { data } = await http.post('/agents/ext/sandbox/test', payload)
   return data
 }

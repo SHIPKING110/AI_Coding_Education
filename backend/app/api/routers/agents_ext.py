@@ -308,13 +308,18 @@ def run_skill_script(
         raise HTTPException(status_code=404, detail="文件不在 Skill 包内")
     try:
         sb = ext_crud.get_sandbox_setting(db, owner_id=user.id)
-        if sb is not None and sb.enabled and sb.provider == "aliyun_fc" and sb.endpoint:
+        if sb is not None and sb.enabled and sb.provider == "bailian" and (sb.workspace_id or "").strip():
             result = _exec.run_remote(
                 user.id, skill_id, rel, args if isinstance(args, list) else [],
-                endpoint=sb.endpoint, token=sb.token or "", timeout_s=sb.timeout_s or 25,
+                endpoint=sb.endpoint, token=sb.token or "", timeout_s=sb.timeout_s or 30,
+                workspace_id=sb.workspace_id or "", region=sb.region or "cn-beijing",
+                template_code=sb.template_code or "",
             )
-            result["provider"] = "aliyun_fc"
+            result["provider"] = "bailian"
             return result
+        # 兼容旧的 aliyun_fc 自建函数配置：已废弃，请改用 bailian
+        if sb is not None and sb.enabled and sb.provider == "aliyun_fc":
+            raise ValueError("自建函数沙箱已下线，请在沙箱配置区改用“阿里云百炼”，填入工作空间/API Key/模板 code")
         result = _exec.run_script(user.id, skill_id, rel, args if isinstance(args, list) else [])
         result["provider"] = "local"
         return result
@@ -330,8 +335,11 @@ class SandboxIn(BaseModel):
     provider: str = "local"
     endpoint: str = ""
     token: str = ""
-    timeout_s: int = 25
+    timeout_s: int = 30
     enabled: bool = True
+    workspace_id: str = ""
+    region: str = "cn-beijing"
+    template_code: str = ""
 
 
 def _sandbox_out(row) -> dict:
@@ -339,8 +347,11 @@ def _sandbox_out(row) -> dict:
         "provider": row.provider if row else "local",
         "endpoint": row.endpoint if row else "",
         "has_token": bool(row and row.token),
-        "timeout_s": row.timeout_s if row else 25,
+        "timeout_s": row.timeout_s if row else 30,
         "enabled": row.enabled if row is not None else True,
+        "workspace_id": row.workspace_id if row else "",
+        "region": (row.region if row else "") or "cn-beijing",
+        "template_code": row.template_code if row else "",
     }
 
 
@@ -352,14 +363,20 @@ def get_sandbox(db: Session = Depends(get_db), user: User = Depends(get_current_
 @router.put("/sandbox")
 def put_sandbox(body: SandboxIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     provider = (body.provider or "local").strip()
-    if provider not in ("local", "aliyun_fc"):
-        raise HTTPException(status_code=400, detail="provider 仅支持 local / aliyun_fc")
-    if provider == "aliyun_fc" and not (body.endpoint or "").strip():
-        raise HTTPException(status_code=400, detail="远程沙箱需填写函数 HTTP 触发器 URL")
-    timeout_s = max(5, min(int(body.timeout_s or 25), 120))
+    if provider not in ("local", "bailian"):
+        raise HTTPException(status_code=400, detail="provider 仅支持 local / bailian")
+    if provider == "bailian":
+        if not (body.workspace_id or "").strip():
+            raise HTTPException(status_code=400, detail="百炼沙箱需填写工作空间ID")
+        if not (body.template_code or "").strip():
+            raise HTTPException(status_code=400, detail="百炼沙箱需填写模板 code")
+    timeout_s = max(10, min(int(body.timeout_s or 30), 120))
     row = ext_crud.upsert_sandbox_setting(
         db, owner_id=user.id, provider=provider,
         endpoint=(body.endpoint or "").strip(), timeout_s=timeout_s, enabled=body.enabled,
+        workspace_id=(body.workspace_id or "").strip(),
+        region=(body.region or "cn-beijing").strip() or "cn-beijing",
+        template_code=(body.template_code or "").strip(),
         **({"token": body.token} if body.token else {}),
     )
     return _sandbox_out(row)
@@ -367,14 +384,16 @@ def put_sandbox(body: SandboxIn, db: Session = Depends(get_db), user: User = Dep
 
 @router.post("/sandbox/test")
 def test_sandbox(body: SandboxIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """测试远程沙箱连通性（用表单里的 endpoint/token，不落库）。"""
+    """测试百炼沙箱连通性（用表单里的配置，不落库）。"""
     from app.services import skill_exec as _exec
 
-    if (body.provider or "local") != "aliyun_fc":
+    if (body.provider or "local") != "bailian":
         return {"ok": True, "detail": "本地沙箱无需测试"}
-    if not (body.endpoint or "").strip():
-        return {"ok": False, "detail": "请先填写函数 HTTP 触发器 URL"}
-    return _exec.test_remote(endpoint=body.endpoint.strip(), token=body.token or "", timeout_s=body.timeout_s or 25)
+    return _exec.test_remote(
+        endpoint=(body.endpoint or "").strip(), token=body.token or "", timeout_s=body.timeout_s or 30,
+        workspace_id=(body.workspace_id or "").strip(), region=(body.region or "cn-beijing").strip(),
+        template_code=(body.template_code or "").strip(),
+    )
 
 
 @router.post("/mcps/{mcp_id}/test")

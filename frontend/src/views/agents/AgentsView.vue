@@ -1278,7 +1278,7 @@ async function onSkillImport(e: Event) {
   }
 }
 /* —— 沙箱设置（本地受控 / 阿里云函数计算远程） —— */
-const sandbox = ref({ provider: 'local', endpoint: '', token: '', timeout_s: 25, enabled: true })
+const sandbox = ref({ provider: 'local', endpoint: '', token: '', timeout_s: 30, enabled: true, workspace_id: '', region: 'cn-beijing', template_code: '' })
 const sbHasToken = ref(false)
 const sbOpen = ref(false)
 const sbLoading = ref(false)
@@ -1287,7 +1287,7 @@ const sbMsg = ref('')
 async function loadSandbox() {
   try {
     const r = await getSandbox()
-    sandbox.value = { provider: r.provider, endpoint: r.endpoint, token: '', timeout_s: r.timeout_s, enabled: r.enabled }
+    sandbox.value = { provider: r.provider, endpoint: r.endpoint, token: '', timeout_s: r.timeout_s, enabled: r.enabled, workspace_id: r.workspace_id, region: r.region, template_code: r.template_code }
     sbHasToken.value = r.has_token
   } catch { /* 保持默认 */ }
 }
@@ -1295,7 +1295,7 @@ async function saveSandbox() {
   sbLoading.value = true
   sbMsg.value = ''
   try {
-    const r = await putSandbox({ ...sandbox.value, token: sandbox.value.token || undefined } as { provider: string; endpoint: string; token?: string; timeout_s: number; enabled: boolean })
+    const r = await putSandbox({ ...sandbox.value, token: sandbox.value.token || undefined } as { provider: string; endpoint: string; token?: string; timeout_s: number; enabled: boolean; workspace_id: string; region: string; template_code: string })
     sandbox.value.token = ''
     sbHasToken.value = r.has_token
     sbMsg.value = '沙箱配置已保存'
@@ -1309,7 +1309,7 @@ async function testSandboxConn() {
   sbTesting.value = true
   sbMsg.value = ''
   try {
-    const r = await testSandbox({ provider: sandbox.value.provider, endpoint: sandbox.value.endpoint, token: sandbox.value.token || undefined, timeout_s: sandbox.value.timeout_s })
+    const r = await testSandbox({ provider: sandbox.value.provider, endpoint: sandbox.value.endpoint, token: sandbox.value.token || undefined, timeout_s: sandbox.value.timeout_s, workspace_id: sandbox.value.workspace_id, region: sandbox.value.region, template_code: sandbox.value.template_code })
     sbMsg.value = r.ok ? `✓ ${r.detail}` : `✕ ${r.detail}`
   } catch (err: unknown) {
     sbMsg.value = `✕ ${err instanceof Error ? err.message : '测试失败'}`
@@ -1955,28 +1955,38 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
             </div>
             <div class="sandbox-card">
               <button class="sandbox-head" @click="sbOpen = !sbOpen">
-                <b>脚本沙箱：{{ sandbox.provider === 'aliyun_fc' ? '阿里云函数计算' : '本地受控执行' }}</b>
+                <b>脚本沙箱：{{ sandbox.provider === 'bailian' ? '阿里云百炼' : '本地受控执行' }}</b>
                 <span>{{ sbOpen ? '收起' : '配置' }}</span>
               </button>
               <div v-if="sbOpen" class="sandbox-body">
-                <p class="sandbox-desc">本地沙箱无第三方依赖/无网络，仅冒烟测试。需要装依赖（如 python-pptx）就切到阿里云函数计算：按 <code>backend/scripts/fc_sandbox/README_DEPLOY.md</code> 建好函数后来填下面三项。</p>
+                <p class="sandbox-desc">本地沙箱无第三方依赖/无网络，仅冒烟测试。切到阿里云百炼后，脚本在云端沙箱跑（可装依赖），填下面四项即可：工作空间ID（控制台右上角）→ API Key（左下角 API-KEY）→ 模板 code（Sandbox→我的模板，你那串 6bdb4f32…）。</p>
                 <div class="sandbox-row">
                   <label>提供商
                     <select v-model="sandbox.provider" class="kb-input">
                       <option value="local">本地受控执行（默认）</option>
-                      <option value="aliyun_fc">阿里云函数计算</option>
+                      <option value="bailian">阿里云百炼 Sandbox</option>
                     </select>
                   </label>
                   <label>超时（秒）
-                    <input v-model.number="sandbox.timeout_s" type="number" min="5" max="120" class="kb-input" />
+                    <input v-model.number="sandbox.timeout_s" type="number" min="10" max="120" class="kb-input" />
                   </label>
                 </div>
-                <template v-if="sandbox.provider === 'aliyun_fc'">
-                  <label>函数 HTTP 触发器 URL
-                    <input v-model="sandbox.endpoint" class="kb-input" placeholder="https://xxx.cn-hangzhou.fcapp.run" />
+                <template v-if="sandbox.provider === 'bailian'">
+                  <div class="sandbox-row">
+                    <label>工作空间ID
+                      <input v-model="sandbox.workspace_id" class="kb-input" placeholder="百炼控制台右上角下拉菜单查看" />
+                    </label>
+                    <label>地域
+                      <select v-model="sandbox.region" class="kb-input">
+                        <option value="cn-beijing">华北2北京（当前仅支持）</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label>API Key（sk-…，不填则保留已存）
+                    <input v-model="sandbox.token" type="password" class="kb-input" :placeholder="sbHasToken ? '已保存（留空不改）' : 'sk- 开头，Sandbox 页左下角创建'" />
                   </label>
-                  <label>Token（暗号，不填则保留已存）
-                    <input v-model="sandbox.token" type="password" class="kb-input" :placeholder="sbHasToken ? '已保存（留空不改）' : '与函数 SANDBOX_TOKEN 一致'" />
+                  <label>模板 code
+                    <input v-model="sandbox.template_code" class="kb-input" placeholder="Sandbox → 我的模板 → templateCode" />
                   </label>
                 </template>
                 <div class="sandbox-ops">
@@ -2019,7 +2029,7 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 </details>
                 <div v-if="skillRunOut && skillRunOut.skillId === s.id" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
                   <b>{{ skillRunOut.path }} · {{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
-                  <span class="runout-tag" :class="skillRunOut.provider === 'aliyun_fc' ? 'remote' : 'local'">{{ skillRunOut.provider === 'aliyun_fc' ? '阿里云沙箱' : '本地沙箱' }}</span>
+                  <span class="runout-tag" :class="skillRunOut.provider === 'bailian' ? 'remote' : 'local'">{{ skillRunOut.provider === 'bailian' ? '百炼沙箱' : '本地沙箱' }}</span>
                   <span class="runout-tip">本地沙箱无第三方依赖/无网络，仅冒烟测试；缺参报错时点 ▶ 重新运行并填写参数</span>
                   <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
                   <pre v-if="skillRunOut.stderr" class="err">{{ skillRunOut.stderr }}</pre>
@@ -2318,7 +2328,7 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
         <label>运行参数（空格分隔，如 <code>docs/README.md --fix</code>；不需要可留空）
           <input v-model="runArgs" class="kb-input" placeholder="check_annotations.py 需要 path 参数，如 docs/README.md" @keydown.enter="confirmRun()" />
         </label>
-        <p class="run-provider">经由：{{ sandbox.provider === 'aliyun_fc' ? '阿里云沙箱' : '本地沙箱' }}（Skill 页沙箱配置区可切换）</p>
+        <p class="run-provider">经由：{{ sandbox.provider === 'bailian' ? '百炼沙箱' : '本地沙箱' }}（Skill 页沙箱配置区可切换）</p>
         <div v-if="skillRunOut && skillRunOut.skillId === runTarget.s.id" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
           <b>{{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
           <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>

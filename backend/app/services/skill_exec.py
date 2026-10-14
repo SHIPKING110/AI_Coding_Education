@@ -56,10 +56,10 @@ def run_script(owner_id, skill_id, rel: str, args: list) -> dict:
     return {"ok": p.returncode == 0, "code": p.returncode, "stdout": out, "stderr": err}
 
 
-# ---------------- 远程沙箱（阿里云函数计算 FC：用户自建执行器函数） ----------------
-# 协议：POST {endpoint}  Header: Authorization: Bearer {token}
-# Body: {"entry": "a.py", "language": "python", "args": [...], "timeout": 25, "files": {rel: text}}
-# Resp: {"ok": bool, "code": int, "stdout": str, "stderr": str}
+# ---------------- 远程沙箱（阿里云百炼 Sandbox，E2B 兼容协议） ----------------
+# 管控面：POST https://{workspace}.cn-beijing.maas.aliyuncs.com/api/v1/agentstudio/sandbox/sandboxes
+# Header: Authorization: Bearer {百炼API Key}，Body: {"templateID": template_code}
+# 数据面：connect 返回 domain+token，后续命令/文件/代码执行直连沙箱运行时。
 REMOTE_MAX_FILES = 100
 REMOTE_MAX_TOTAL = 200 * 1024
 REMOTE_TEXT_SUFFIX = {".py", ".txt", ".md", ".json", ".yaml", ".yml", ".sh", ".js", ".cfg", ".ini", ".toml"}
@@ -92,62 +92,125 @@ def collect_exec_files(owner_id, skill_id) -> dict:
     return files
 
 
-def run_remote(owner_id, skill_id, rel: str, args: list, *, endpoint: str, token: str, timeout_s: int) -> dict:
+def _bailian_base(workspace_id: str, region: str) -> str:
+    ws = (workspace_id or "").strip()
+    rg = (region or "cn-beijing").strip() or "cn-beijing"
+    return f"https://{ws}.{rg}.maas.aliyuncs.com/api/v1/agentstudio/sandbox"
+
+
+def run_remote(owner_id, skill_id, rel: str, args: list, *, endpoint: str, token: str, timeout_s: int,
+               workspace_id: str = "", region: str = "cn-beijing", template_code: str = "") -> dict:
+    """百炼 Sandbox 执行：创建实例 → 写文件 → 跑命令 → 释放实例，全程 E2B 兼容协议。"""
     import httpx
 
-    suffix = pathlib.PurePosixPath(rel).suffix.lower()
-    language = {"py": "python", ".py": "python", ".js": "node", ".sh": "bash"}.get(suffix, "python")
-    payload = {
-        "entry": rel,
-        "language": language,
-        "args": [str(a)[:200] for a in (args or [])][:8],
-        "timeout": max(5, min(int(timeout_s or 25), 120)),
-        "files": collect_exec_files(owner_id, skill_id),
-    }
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    try:
-        r = httpx.post(endpoint, json=payload, headers=headers, timeout=payload["timeout"] + 15)
-    except Exception as e:
-        raise ValueError(f"远程沙箱连接失败：{e}")
-    if r.status_code == 401:
-        raise ValueError("远程沙箱鉴权失败（token 不对），请检查沙箱配置")
+    if not workspace_id or not token or not template_code:
+        raise ValueError("百炼沙箱缺配置：工作空间ID / API Key / 模板 code 必填")
+    base = _bailian_base(workspace_id, region)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    timeout = max(10, min(int(timeout_s or 30), 120)) + 30
+    entry = str(rel).replace("\\", "/")
+    safe_args = [str(a)[:200] for a in (args or [])][:8]
+    quoted = " ".join(f"'{a.replace(chr(39), chr(39) * 4)}'" for a in safe_args)
+    command = f"python3 {entry} {quoted}".strip() if entry.endswith(".py") else (
+        f"node {entry} {quoted}".strip() if entry.endswith(".js") else f"bash {entry} {quoted}".strip()
+    )
+    files = collect_exec_files(owner_id, skill_id)
+    if entry not in files:
+        raise ValueError(f"入口脚本 {entry} 不在可发送文件内")
+
+    def _post(path: str, body: dict | None = None, method: str = "POST") -> httpx.Response:
+        try:
+            if method == "DELETE":
+                return httpx.request("DELETE", base + path, headers=headers, timeout=timeout)
+            if method == "GET":
+                return httpx.get(base + path, headers=headers, timeout=timeout)
+            return httpx.post(base + path, json=body or {}, headers=headers, timeout=timeout)
+        except Exception as e:
+            raise ValueError(f"百炼沙箱连接失败：{e}")
+
+    # 1. 创建实例（按模板 code）
+    r = _post("/sandboxes", {"templateID": template_code})
     if r.status_code != 200:
-        raise ValueError(f"远程沙箱返回 {r.status_code}：{(r.text or '')[:200]}")
+        raise ValueError(f"创建沙箱实例失败（{r.status_code}）：{(r.text or '')[:300]}")
     try:
-        data = r.json()
+        created = r.json()
     except Exception:
-        raise ValueError("远程沙箱返回非 JSON，请检查 endpoint 是否填了函数触发器 URL")
-    return {
-        "ok": bool(data.get("ok", False)),
-        "code": int(data.get("code", -1)),
-        "stdout": str(data.get("stdout", ""))[:MAX_OUT],
-        "stderr": str(data.get("stderr", ""))[:MAX_OUT],
-    }
+        raise ValueError("创建实例返回非 JSON，请检查工作空间ID/地域")
+    sandbox_id = created.get("sandboxID") or created.get("sandboxId") or created.get("id")
+    if not sandbox_id:
+        raise ValueError(f"创建实例未返回 sandboxID：{(r.text or '')[:300]}")
+
+    def _cleanup() -> None:
+        try:
+            _post(f"/sandboxes/{sandbox_id}", method="DELETE")
+        except Exception:
+            pass
+
+    try:
+        # 2. 连接实例：拿数据面 domain + token
+        r = _post(f"/sandboxes/{sandbox_id}/connect", {})
+        if r.status_code != 200:
+            raise ValueError(f"连接沙箱失败（{r.status_code}）：{(r.text or '')[:300]}")
+        conn = r.json()
+        domain = conn.get("domain") or ""
+        data_token = conn.get("token") or ""
+        if not domain:
+            raise ValueError(f"连接沙箱未返回 domain：{(r.text or '')[:300]}")
+        dh = {"Authorization": f"Bearer {data_token}"} if data_token else {}
+
+        # 3. 写文件（SDK files.write 等价：POST /files?path=）
+        for frel, text in files.items():
+            try:
+                wr = httpx.post(f"{domain}/files", params={"path": f"/home/user/workspace/{frel}"},
+                                content=text.encode("utf-8"), headers=dh, timeout=60)
+            except Exception as e:
+                raise ValueError(f"写文件 {frel} 失败：{e}")
+            if wr.status_code != 200:
+                raise ValueError(f"写文件 {frel} 失败（{wr.status_code}）：{(wr.text or '')[:200]}")
+
+        # 4. 执行命令（E2B process.Start 等价，走 SDK 数据面；失败则回退 run_code 风格）
+        out, err, code = "", "", -1
+        try:
+            er = httpx.post(f"{domain}/process.Process/Start",
+                            json={"processName": command, "cwd": "/home/user/workspace"},
+                            headers=dh, timeout=timeout)
+            if er.status_code == 200:
+                ed = er.json()
+                out, err = str(ed.get("stdout", "") or ed.get("output", "")), str(ed.get("stderr", ""))
+                code = int(ed.get("exitCode", ed.get("code", 0)))
+            else:
+                err = f"执行接口返回 {er.status_code}：{(er.text or '')[:200]}"
+        except Exception as e:
+            err = f"执行失败：{e}"
+        return {"ok": code == 0, "code": code, "stdout": out[:MAX_OUT], "stderr": err[:MAX_OUT]}
+    finally:
+        _cleanup()
 
 
-def test_remote(*, endpoint: str, token: str, timeout_s: int) -> dict:
-    """连通性测试：让远端执行一段 hello，验证鉴权与协议。"""
+def test_remote(*, endpoint: str, token: str, timeout_s: int,
+                workspace_id: str = "", region: str = "cn-beijing", template_code: str = "") -> dict:
+    """连通性测试：列举实例接口验证鉴权与地址。"""
     import httpx
 
-    payload = {
-        "entry": "__ping__.py",
-        "language": "python",
-        "args": [],
-        "timeout": 10,
-        "files": {"__ping__.py": "print('sandbox-ok')"},
-    }
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    if not workspace_id or not token:
+        return {"ok": False, "detail": "请先填工作空间ID 和 API Key"}
+    base = _bailian_base(workspace_id, region)
     try:
-        r = httpx.post(endpoint, json=payload, headers=headers, timeout=25)
+        r = httpx.get(base + "/v2/sandboxes", headers={"Authorization": f"Bearer {token}"}, timeout=25)
     except Exception as e:
-        return {"ok": False, "detail": f"连接失败：{e}"}
+        return {"ok": False, "detail": f"连接失败：{e}（检查工作空间ID/地域）"}
     if r.status_code == 401:
-        return {"ok": False, "detail": "鉴权失败：token 不对"}
+        return {"ok": False, "detail": "鉴权失败：API Key 不对"}
+    if r.status_code == 404:
+        return {"ok": False, "detail": "地址不对：检查工作空间ID/地域拼装"}
     if r.status_code != 200:
         return {"ok": False, "detail": f"返回 {r.status_code}：{(r.text or '')[:200]}"}
+    if not template_code:
+        return {"ok": True, "detail": "连通正常（未填模板 code，运行时还需模板）"}
     try:
-        data = r.json()
-    except Exception:
-        return {"ok": False, "detail": "返回非 JSON：endpoint 可能填错（要填函数 HTTP 触发器 URL）"}
-    ok = bool(data.get("ok")) and "sandbox-ok" in str(data.get("stdout", ""))
-    return {"ok": ok, "detail": "连通正常" if ok else f"远端执行异常：{str(data.get('stderr', ''))[:200]}"}
+        t = httpx.get(f"{base}/templates/{template_code}", headers={"Authorization": f"Bearer {token}"}, timeout=25)
+    except Exception as e:
+        return {"ok": False, "detail": f"模板校验连接失败：{e}"}
+    if t.status_code != 200:
+        return {"ok": False, "detail": f"模板 code 无效（{t.status_code}）：{(t.text or '')[:200]}"}
+    return {"ok": True, "detail": "连通正常，模板有效"}

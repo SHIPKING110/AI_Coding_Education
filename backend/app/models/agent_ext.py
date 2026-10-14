@@ -93,6 +93,10 @@ class SandboxSetting(Base):
     token: Mapped[str] = mapped_column(String(256), default="")
     timeout_s: Mapped[int] = mapped_column(default=25)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 百炼 Sandbox 专用：工作空间/地域/模板 code（token 复用存 API Key）
+    workspace_id: Mapped[str] = mapped_column(String(64), default="")
+    region: Mapped[str] = mapped_column(String(32), default="cn-beijing")
+    template_code: Mapped[str] = mapped_column(String(64), default="")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
