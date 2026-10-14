@@ -43,8 +43,8 @@ import {
 import { renderMarkdown } from '@/utils/markdown'
 import {
   createCustomAgent, createMcp, createSkill, deleteCustomAgent, deleteMcp, deleteSkill,
-  getAgentGlobal, listCustomAgents, listMcps, listSkills, patchCustomAgent, patchMcp, patchSkill,
-  previewSkillFile, putAgentGlobal, testMcp, uploadSkillBundle, type AgentMcp, type AgentSkill, type CustomAgent,
+  getAgentGlobal, importSkillBundle, listCustomAgents, listMcps, listSkills, patchCustomAgent, patchMcp, patchSkill,
+  previewSkillFile, putAgentGlobal, runSkillScript, testMcp, uploadSkillBundle, type AgentMcp, type AgentSkill, type CustomAgent,
 } from '@/api/agentExt'
 
 const route = useRoute()
@@ -1242,9 +1242,10 @@ async function saveSkill() {
   }
   showSkillForm.value = false
 }
-/* —— Skill 文件包上传（zip）+ 文件预览 —— */
+/* —— Skill 文件包上传（zip）+ 直接导入 + 文件预览 + 受控运行 —— */
 const skillUploading = ref(false)
 const skillPreview = ref<{ path: string; text: string } | null>(null)
+const skillRunOut = ref<{ path: string; ok: boolean; stdout: string; stderr: string } | null>(null)
 async function onSkillZip(e: Event, s: AgentSkill) {
   const input = e.target as HTMLInputElement
   const f = input.files?.[0]
@@ -1265,6 +1266,30 @@ async function openSkillPreview(s: AgentSkill, path: string) {
     skillPreview.value = await previewSkillFile(s.id, path)
   } catch (err: unknown) {
     extError.value = err instanceof Error ? err.message : '预览失败'
+  }
+}
+async function onSkillImport(e: Event) {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f) return
+  skillUploading.value = true
+  try {
+    const created = await importSkillBundle(f)
+    skills.value.unshift(created)
+  } catch (err: unknown) {
+    extError.value = err instanceof Error ? err.message : '导入失败'
+  } finally {
+    skillUploading.value = false
+  }
+}
+async function runSkillFile(s: AgentSkill, path: string) {
+  try {
+    skillRunOut.value = null
+    const r = await runSkillScript(s.id, path)
+    skillRunOut.value = { path, ok: r.ok, stdout: r.stdout, stderr: r.stderr }
+  } catch (err: unknown) {
+    extError.value = err instanceof Error ? err.message : '运行失败'
   }
 }
 async function removeSkill(s: AgentSkill) {
@@ -1793,6 +1818,10 @@ function back() {
                 <p>本地技能 = 追加进系统提示的专属指令。勾选「全局默认」即作用于全部 Agent；也可在 Agent 表单里单独绑定。</p>
               </div>
               <button class="btn primary" @click="openSkillCreate()">＋ 新建 Skill</button>
+              <label class="btn ghost">
+                {{ skillUploading ? '导入中…' : '直接上传 Skill 包（.zip 免新建）' }}
+                <input type="file" accept=".zip" hidden @change="onSkillImport" />
+              </label>
             </div>
             <p v-if="extError" class="error">{{ extError }}</p>
             <p v-if="extLoading" class="empty">加载中…</p>
@@ -1808,7 +1837,15 @@ function back() {
                 <p class="kb-desc">{{ s.description || '暂无描述' }}</p>
                 <div class="kb-file">{{ (s.content || '').slice(0, 80) }}</div>
                 <div v-if="s.files?.length" class="skill-files">
-                  <button v-for="f in s.files" :key="f" class="file-chip" @click="openSkillPreview(s, f)">{{ f }}</button>
+                  <span v-for="f in s.files" :key="f" class="file-chip-wrap">
+                    <button class="file-chip" @click="openSkillPreview(s, f)" :title="`预览 ${f}`">{{ f }}</button>
+                    <button v-if="/\.(py|js|sh)$/i.test(f)" class="file-run" title="受控运行（白名单解释器/5s超时/无网络）" @click="runSkillFile(s, f)">▶</button>
+                  </span>
+                </div>
+                <div v-if="skillRunOut" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
+                  <b>{{ skillRunOut.path }} · {{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
+                  <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
+                  <pre v-if="skillRunOut.stderr" class="err">{{ skillRunOut.stderr }}</pre>
                 </div>
                 <div class="kb-ops">
                   <button class="mini-btn switch" :class="{ off: !s.enabled }" @click="toggleSkill(s)">
@@ -2101,9 +2138,9 @@ function back() {
       <span class="custom-manage-title">自建 Agent（{{ customAgents.length }}）</span>
       <div class="custom-chips">
         <span v-for="c in customAgents" :key="c.agent_id" class="custom-chip">
-          {{ c.name }}
-          <button title="查看配置" @click="openAgentEdit(c); showAgentForm = true">配</button>
-          <button title="删除" class="danger" @click="removeAgent(c)">×</button>
+          <span class="custom-chip-name">{{ c.name }}</span>
+          <button class="custom-chip-btn" title="查看配置" @click="openAgentEdit(c); showAgentForm = true">查看配置</button>
+          <button title="删除" class="custom-chip-btn danger" @click="removeAgent(c)">删除</button>
         </span>
       </div>
     </div>
@@ -2605,7 +2642,52 @@ function back() {
 .glob-check input { accent-color: var(--brand); }
 .custom-tag { font-style: normal; font-size: 10px; font-weight: 700; color: var(--brand-strong); background: var(--brand-soft); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
 .manage-agent { align-self: flex-start; margin-bottom: 8px; }
-.custom-manage { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.custom-manage { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); flex-shrink: 0; overflow: visible; }
+.custom-manage-title { font-size: 12px; font-weight: 700; color: var(--ink-3); flex-shrink: 0; white-space: nowrap; }
+.custom-chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.custom-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12.5px; font-weight: 600; background: var(--brand-soft); color: var(--brand-strong); border-radius: 999px; padding: 4px 6px 4px 12px; white-space: nowrap; }
+.custom-chip-name { overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+.custom-chip-btn { flex-shrink: 0; border: none; background: var(--surface); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer; color: var(--brand-strong); white-space: nowrap; }
+.custom-chip-btn.danger { color: var(--danger); }
+.file-chip-wrap { display: inline-flex; align-items: center; gap: 2px; }
+.file-run { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; font-size: 10px; cursor: pointer; padding: 2px 6px; color: var(--success, #047857); }
+.skill-runout { margin-top: 6px; font-size: 11.5px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #f8fafc; }
+.skill-runout.fail { border-color: #fca5a5; background: #fef2f2; }
+.skill-runout pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
+.skill-runout pre.err { color: var(--danger); }
+/* —— 通用渲染格式补齐：徽章/标签/折叠/进度/图表/时间轴/告警/终端 —— */
+.bubble :deep(.md-badge) { display: inline-block; font-size: 11px; font-weight: 800; color: #fff; background: var(--brand-gradient); border-radius: 999px; padding: 1px 9px; margin: 0 2px; }
+.bubble :deep(.md-tag) { display: inline-block; font-size: 11px; color: var(--brand-strong); background: var(--brand-soft); border-radius: 6px; padding: 1px 8px; margin: 0 2px; }
+.bubble :deep(.md-hr) { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
+.bubble :deep(.md-math) { font-family: Consolas, monospace; background: rgba(99,102,241,.08); padding: 1px 6px; border-radius: 4px; }
+.bubble :deep(.md-math.block) { display: block; text-align: center; padding: 8px; margin: 8px 0; }
+.bubble :deep(.md-fold) { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; background: var(--surface); }
+.bubble :deep(.md-fold summary) { cursor: pointer; padding: 7px 11px; font-size: 12.5px; font-weight: 700; color: var(--brand-strong); }
+.bubble :deep(.md-fold > div), .bubble :deep(.md-fold > pre) { margin: 0 11px 11px; }
+.bubble :deep(.md-copy) { float: right; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; padding: 1px 8px; }
+.bubble :deep(.md-kv-row) { display: flex; gap: 10px; font-size: 12.5px; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.bubble :deep(.md-kv-row b) { min-width: 90px; color: var(--ink-1); }
+.bubble :deep(.md-tree) { background: #0f172a; color: #a5f3fc; border-radius: 8px; padding: 10px 12px; font-size: 12px; overflow-x: auto; }
+.bubble :deep(.md-terminal) { background: #0f172a; color: #86efac; border-radius: 8px; padding: 10px 12px; font-size: 12px; overflow-x: auto; }
+.bubble :deep(.md-alert) { border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin: 8px 0; }
+.bubble :deep(.md-alert.info) { background: #eff6ff; border-left: 3px solid #3b82f6; }
+.bubble :deep(.md-alert.warn) { background: #fffbeb; border-left: 3px solid #f59e0b; }
+.bubble :deep(.md-alert.error) { background: #fef2f2; border-left: 3px solid #ef4444; }
+.bubble :deep(.md-alert.success) { background: #ecfdf5; border-left: 3px solid #10b981; }
+.bubble :deep(.md-progress) { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 12px; }
+.bubble :deep(.md-progress-track) { flex: 1; height: 8px; background: var(--bg-soft); border-radius: 999px; overflow: hidden; }
+.bubble :deep(.md-progress-fill) { height: 100%; background: var(--brand-gradient); border-radius: 999px; }
+.bubble :deep(.md-chart-row) { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 4px 0; }
+.bubble :deep(.md-chart-lb) { width: 90px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bubble :deep(.md-chart-track) { flex: 1; height: 10px; background: var(--bg-soft); border-radius: 999px; overflow: hidden; }
+.bubble :deep(.md-chart-fill) { display: block; height: 100%; background: var(--brand-gradient); }
+.bubble :deep(.md-timeline) { border-left: 2px solid var(--brand); margin: 8px 0 8px 6px; padding-left: 12px; display: flex; flex-direction: column; gap: 6px; }
+.bubble :deep(.md-tl-item) { display: flex; gap: 8px; font-size: 12.5px; }
+.bubble :deep(.md-tl-dot) { width: 8px; height: 8px; border-radius: 50%; background: var(--brand-strong); margin-top: 5px; flex-shrink: 0; }
+.bubble :deep(.md-mermaid-head) { font-size: 12px; font-weight: 700; color: var(--brand-strong); margin-bottom: 4px; }
+.bubble :deep(.md-mermaid pre) { background: #f8fafc; border: 1px dashed var(--brand); border-radius: 8px; padding: 10px; font-size: 11.5px; overflow-x: auto; }
+.bubble :deep(.md-tasks) { list-style: none; padding-left: 4px; }
+.bubble :deep(.md-footnotes) { font-size: 11.5px; color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 8px; }
 .custom-manage-title { font-size: 12px; font-weight: 700; color: var(--ink-3); }
 .custom-chips { display: flex; gap: 8px; flex-wrap: wrap; }
 .custom-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; background: var(--brand-soft); color: var(--brand-strong); border-radius: 999px; padding: 4px 6px 4px 12px; }

@@ -248,6 +248,67 @@ def put_global(body: GlobalIn, db: Session = Depends(get_db), user: User = Depen
     return {"default_mcp_ids": list(g.default_mcp_ids or []), "default_skill_ids": list(g.default_skill_ids or [])}
 
 
+@router.post("/skills/import", status_code=status.HTTP_201_CREATED)
+def import_skill_bundle(
+    file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """直接上传 zip 建 Skill（免预建）：校验→建记录→解压落盘→SKILL.md 回填 content。"""
+    from app.services import skill_bundle as _bundle
+
+    data = file.file.read() if hasattr(file.file, "read") else b""
+    # UploadFile 在新版 Starlette 下需 await；此处为同步路由，用 file.file 读取
+    if not data:
+        try:
+            file.file.seek(0)
+            data = file.file.read() or b""
+        except Exception:
+            data = b""
+    if len(data) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件过大（zip 需 ≤12MB）")
+    if not (file.filename or "").lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="仅支持 .zip 包")
+    name = (file.filename or "imported-skill").rsplit(".", 1)[0][:64] or "imported-skill"
+    s = ext_crud.create_skill(db, owner_id=user.id, name=name, description="zip 导入", content="")
+    try:
+        info = _bundle.save_bundle(user.id, s.id, data)
+    except ValueError as e:
+        ext_crud.delete_skill(db, s)
+        raise HTTPException(status_code=400, detail=str(e))
+    update: dict = {"files": info["files"]}
+    if info["skill_md"]:
+        # 首行 # 标题优先作为 Skill 名
+        first = next((ln.strip("# ").strip() for ln in info["skill_md"].splitlines() if ln.strip()), "")
+        update["content"] = info["skill_md"]
+        if first and (s.name == name):
+            update["name"] = first[:64]
+            update["description"] = f"从 {file.filename} 导入"
+    s = ext_crud.update_skill(db, s, **update)
+    return _skill_out(s)
+
+
+@router.post("/skills/{skill_id}/run")
+def run_skill_script(
+    skill_id: uuid.UUID, body: dict | None = None,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """受控执行 Skill 内白名单脚本：仅 .py/.js/.sh，无网络、5s 超时、只读技能目录、禁 env。"""
+    from app.services import skill_exec as _exec
+
+    s = ext_crud.get_skill(db, owner_id=user.id, skill_id=skill_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Skill 不存在")
+    rel = str((body or {}).get("path", ""))
+    args = (body or {}).get("args", [])
+    if rel not in list(s.files or []):
+        raise HTTPException(status_code=404, detail="文件不在 Skill 包内")
+    try:
+        return _exec.run_script(user.id, skill_id, rel, args if isinstance(args, list) else [])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except TimeoutError:
+        raise HTTPException(status_code=408, detail="执行超时（5s），已终止")
+
+
 @router.post("/mcps/{mcp_id}/test")
 def test_mcp(mcp_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """测试 MCP 连接：握手 + tools/list，返回工具清单与 trace，前端直接展示。"""

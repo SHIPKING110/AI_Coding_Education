@@ -102,6 +102,20 @@ export async function uploadSkillBundle(id: string, file: File): Promise<AgentSk
   return data
 }
 
+export async function importSkillBundle(file: File): Promise<AgentSkill> {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await http.post('/agents/ext/skills/import', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+export async function runSkillScript(id: string, path: string, args: string[] = []): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> {
+  const { data } = await http.post(`/agents/ext/skills/${id}/run`, { path, args })
+  return data
+}
+
 export async function previewSkillFile(id: string, path: string): Promise<{ path: string; text: string }> {
   const { data } = await http.get(`/agents/ext/skills/${id}/files/preview`, { params: { path } })
   return data
