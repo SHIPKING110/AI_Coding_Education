@@ -2,7 +2,7 @@
 
 安全设计（默认全部收紧）：
 - 只允许解压 .md/.txt/.json/.yaml/.yml/.py/.js/.sh/.png/.jpg/.jpeg/.gif/.webp，
-  其余一律跳过；zip 内拒绝绝对路径与 `..` 穿越；单文件 ≤2MB、解压总量 ≤10MB、文件数 ≤50。
+  其余一律跳过；zip 内拒绝绝对路径与 `..` 穿越；单文件 ≤10MB、解压总量 ≤80MB、文件数 ≤200。
 - 脚本默认不执行：SKILL.md 与脚本内容只以文本形式注入上下文供 Agent 引用；
   如需执行，走受控子进程（见 skill_exec）：白名单 python3/node/bash、无网络、5s 超时、
   只读挂载技能目录、禁 env 透传，后续按需开放。
@@ -17,9 +17,9 @@ import zipfile
 
 ALLOWED_SUFFIX = {".md", ".txt", ".json", ".yaml", ".yml", ".py", ".js", ".sh",
                   ".png", ".jpg", ".jpeg", ".gif", ".webp"}
-MAX_FILES = 50
-MAX_FILE_BYTES = 2 * 1024 * 1024
-MAX_TOTAL_BYTES = 10 * 1024 * 1024
+MAX_FILES = 200
+MAX_FILE_BYTES = 10 * 1024 * 1024
+MAX_TOTAL_BYTES = 80 * 1024 * 1024
 
 
 def skill_dir(owner_id, skill_id) -> pathlib.Path:
@@ -62,7 +62,7 @@ def save_bundle(owner_id, skill_id, data: bytes) -> dict:
             continue
         total += len(raw)
         if total > MAX_TOTAL_BYTES:
-            raise ValueError("解压后总量超 10MB，请精简")
+            raise ValueError("解压后总量超 80MB，请精简")
         kept.append((clean, raw))
     if not kept:
         raise ValueError("包内无可用文件（仅支持 md/txt/json/yaml/py/js/sh/图片）")

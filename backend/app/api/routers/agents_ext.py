@@ -189,8 +189,8 @@ async def upload_skill_bundle(
     if s is None:
         raise HTTPException(status_code=404, detail="Skill 不存在")
     data = await file.read()
-    if len(data) > 30 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="文件过大（zip 需 ≤30MB，解压后总量需 ≤10MB、单文件 ≤2MB、≤50 个文件）。请精简后重试。")
+    if len(data) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="文件过大（zip 需 ≤100MB，解压后总量需 ≤80MB、单文件 ≤10MB、≤200 个文件）。请精简后重试。")
     try:
         info = _bundle.save_bundle(user.id, skill_id, data)
     except ValueError as e:
@@ -263,7 +263,7 @@ def import_skill_bundle(
             data = file.file.read() or b""
         except Exception:
             data = b""
-    if len(data) > 12 * 1024 * 1024:
+    if len(data) > 100 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="文件过大（zip 需 ≤12MB）")
     if not (file.filename or "").lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="仅支持 .zip 包")

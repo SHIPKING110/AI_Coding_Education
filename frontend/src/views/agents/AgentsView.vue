@@ -1273,8 +1273,8 @@ async function onSkillImport(e: Event) {
   const f = input.files?.[0]
   input.value = ''
   if (!f) return
-  if (f.size > 30 * 1024 * 1024) {
-    extError.value = `“${f.name}”(${(f.size / 1048576).toFixed(1)}MB)超过 30MB 上限，请精简后重试（解压后总量 ≤10MB、单文件 ≤2MB）`
+  if (f.size > 100 * 1024 * 1024) {
+    extError.value = `“${f.name}”(${(f.size / 1048576).toFixed(1)}MB)超过 100MB 上限，请精简后重试（解压后总量 ≤80MB、单文件 ≤10MB）`
     return
   }
   skillUploading.value = true
@@ -1285,7 +1285,7 @@ async function onSkillImport(e: Event) {
     const status = (err as { response?: { status?: number; data?: { detail?: unknown } } })?.response?.status
     const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
     extError.value = status === 413
-      ? `上传被网关拒绝（413）：包超过大小上限。请压缩到 30MB 以内（解压后 ≤10MB）再试。${typeof detail === 'string' ? `（${detail}）` : ''}`
+      ? `上传被网关拒绝（413）：包超过大小上限。请压缩到 100MB 以内（解压后 ≤80MB）再试。${typeof detail === 'string' ? `（${detail}）` : ''}`
       : (typeof detail === 'string' && detail) || (err instanceof Error ? err.message : '导入失败')
   } finally {
     skillUploading.value = false
