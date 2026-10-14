@@ -196,10 +196,16 @@ async def upload_skill_bundle(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     update: dict = {"files": info["files"]}
-    # 包内 SKILL.md 自动回填到指令内容（手工内容保留并前置）
+    # 包内 SKILL.md：frontmatter 的 name/description 回填名称/描述（仅当为空或默认值时），正文追加到指令内容
     if info["skill_md"]:
+        meta = _bundle.parse_skill_md(info["skill_md"])
         manual = (s.content or "").strip()
-        update["content"] = (manual + "\n\n" + info["skill_md"]).strip()[:8000] if manual else info["skill_md"]
+        body = meta["body"] or info["skill_md"]
+        update["content"] = (manual + "\n\n" + body).strip()[:8000] if manual and body not in manual else (manual or body)
+        if meta["name"] and (not (s.name or "").strip() or (s.name or "").startswith("从 ")):
+            update["name"] = meta["name"]
+        if meta["description"] and not (s.description or "").strip():
+            update["description"] = meta["description"]
     s = ext_crud.update_skill(db, s, **update)
     return _skill_out(s)
 
@@ -264,7 +270,7 @@ def import_skill_bundle(
         except Exception:
             data = b""
     if len(data) > 100 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="文件过大（zip 需 ≤12MB）")
+        raise HTTPException(status_code=413, detail="文件过大（zip 需 ≤100MB，解压后总量需 ≤80MB、单文件 ≤10MB、≤2000 个文件）。请精简后重试。")
     if not (file.filename or "").lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="仅支持 .zip 包")
     name = (file.filename or "imported-skill").rsplit(".", 1)[0][:64] or "imported-skill"
@@ -276,12 +282,11 @@ def import_skill_bundle(
         raise HTTPException(status_code=400, detail=str(e))
     update: dict = {"files": info["files"]}
     if info["skill_md"]:
-        # 首行 # 标题优先作为 Skill 名
-        first = next((ln.strip("# ").strip() for ln in info["skill_md"].splitlines() if ln.strip()), "")
-        update["content"] = info["skill_md"]
-        if first and (s.name == name):
-            update["name"] = first[:64]
-            update["description"] = f"从 {file.filename} 导入"
+        # SKILL.md frontmatter(name/description)分别落到名称/描述，正文落到指令内容
+        meta = _bundle.parse_skill_md(info["skill_md"])
+        update["content"] = meta["body"] or info["skill_md"]
+        update["name"] = meta["name"] or name
+        update["description"] = meta["description"] or f"从 {file.filename} 导入"
     s = ext_crud.update_skill(db, s, **update)
     return _skill_out(s)
 

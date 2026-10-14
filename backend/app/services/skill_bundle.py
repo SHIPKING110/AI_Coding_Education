@@ -24,6 +24,38 @@ MAX_TOTAL_BYTES = 80 * 1024 * 1024
 SKIP_DIRS = {"node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", ".next", "coverage"}
 
 
+def parse_skill_md(text: str) -> dict:
+    """解析 SKILL.md：YAML frontmatter(name/description) + 正文。
+
+    返回 {"name": str, "description": str, "body": str}。
+    无 frontmatter 时 name/description 为空，body 为原文。
+    """
+    name, description, body = "", "", (text or "")
+    lines = (text or "").splitlines()
+    if lines and lines[0].strip() == "---":
+        end = next((idx for idx in range(1, len(lines)) if lines[idx].strip() in ("---", "...")), None)
+        if end is not None:
+            fm = lines[1:end]
+            body = "\n".join(lines[end + 1 :]).strip()
+            data: dict[str, str] = {}
+            cur_key: str | None = None
+            for ln in fm:
+                if not ln.strip() or ln.strip().startswith("#"):
+                    continue
+                m = ln.split(":", 1)
+                if len(m) == 2 and not ln.startswith((" ", "\t")) and m[0].strip().lower() in ("name", "description"):
+                    cur_key = m[0].strip().lower()
+                    data[cur_key] = m[1].strip().lstrip(">").strip().strip("\"'")
+                elif cur_key and ln.startswith((" ", "\t")):
+                    data[cur_key] = (data[cur_key] + " " + ln.strip()).strip()
+            name = data.get("name", "")
+            description = data.get("description", "")
+    if not name:
+        first = next((ln.strip("# ").strip() for ln in body.splitlines() if ln.strip()), "")
+        name = first[:64]
+    return {"name": name, "description": description[:256], "body": body[:8000]}
+
+
 def skill_dir(owner_id, skill_id) -> pathlib.Path:
     from app.core.config import get_settings
 

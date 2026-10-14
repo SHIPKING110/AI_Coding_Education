@@ -1879,12 +1879,15 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 <b class="kb-title">{{ s.name }}</b>
                 <p class="kb-desc">{{ s.description || '暂无描述' }}</p>
                 <div class="kb-file">{{ (s.content || '').slice(0, 80) }}</div>
-                <div v-if="s.files?.length" class="skill-files">
-                  <span v-for="f in s.files" :key="f" class="file-chip-wrap">
-                    <button class="file-chip" @click="openSkillPreview(s, f)" :title="`预览 ${f}`">{{ f }}</button>
-                    <button v-if="/\.(py|js|sh)$/i.test(f)" class="file-run" title="受控运行（白名单解释器/5s超时/无网络）" @click="runSkillFile(s, f)">▶</button>
-                  </span>
-                </div>
+                <details v-if="s.files?.length" class="skill-files">
+                  <summary>配套文件（{{ s.files.length }}）· 点击展开</summary>
+                  <div class="skill-file-list">
+                    <span v-for="f in s.files" :key="f" class="file-chip-wrap" :title="f">
+                      <button class="file-chip" @click="openSkillPreview(s, f)" :title="`预览 ${f}`">{{ f.length > 40 ? '…' + f.slice(-39) : f }}</button>
+                      <button v-if="/\.(py|js|sh)$/i.test(f)" class="file-run" title="受控运行（白名单解释器/5s超时/无网络）" @click="runSkillFile(s, f)">▶</button>
+                    </span>
+                  </div>
+                </details>
                 <div v-if="skillRunOut" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
                   <b>{{ skillRunOut.path }} · {{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
                   <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
@@ -2769,8 +2772,10 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .trace-row.fail .trace-step { color: var(--danger); }
 .trace-detail { flex: 1; color: var(--ink-2); word-break: break-all; line-height: 1.5; }
 .trace-ms { color: var(--ink-3); white-space: nowrap; font-size: 11px; }
-.skill-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.file-chip { border: 1px solid var(--line); background: #f8fafc; border-radius: 6px; font-size: 11px; padding: 2px 8px; cursor: pointer; color: var(--brand-strong); }
+.skill-files { margin-top: 6px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; }
+.skill-files summary { cursor: pointer; padding: 6px 10px; font-size: 11.5px; font-weight: 700; color: var(--brand-strong); user-select: none; }
+.skill-file-list { display: flex; flex-wrap: wrap; gap: 6px; max-height: 132px; overflow-y: auto; padding: 0 8px 8px; }
+.file-chip { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; font-size: 11px; padding: 2px 8px; cursor: pointer; color: var(--brand-strong); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-chip:hover { border-color: var(--brand); }
 .upload-btn { cursor: pointer; }
 .file-preview { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.6; background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 14px; max-height: 50vh; overflow: auto; }
