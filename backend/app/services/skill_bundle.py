@@ -17,9 +17,11 @@ import zipfile
 
 ALLOWED_SUFFIX = {".md", ".txt", ".json", ".yaml", ".yml", ".py", ".js", ".sh",
                   ".png", ".jpg", ".jpeg", ".gif", ".webp"}
-MAX_FILES = 200
+MAX_FILES = 500
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 80 * 1024 * 1024
+# 整包导入时直接跳过的噪音目录（依赖产物/版本库/构建输出，Agent 引用无意义）
+SKIP_DIRS = {"node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", ".next", "coverage"}
 
 
 def skill_dir(owner_id, skill_id) -> pathlib.Path:
@@ -47,12 +49,17 @@ def save_bundle(owner_id, skill_id, data: bytes) -> dict:
     except Exception:
         raise ValueError("不是有效的 zip 包")
     names = [i.filename for i in zf.infolist() if not i.is_dir()]
+    # 先过滤噪音目录再计数：node_modules/.git/dist 等不计入文件数
+    names = [n for n in names if not any(f"/{d}/" in f"/{n.replace(chr(92), '/')}/" for d in SKIP_DIRS)]
     if len(names) > MAX_FILES:
-        raise ValueError(f"文件过多（>{MAX_FILES}），请精简")
+        raise ValueError(f"文件过多（>{MAX_FILES}，已自动跳过 node_modules/.git/dist 等噪音目录），请精简")
     total = 0
     kept: list[tuple[str, bytes]] = []
     for info in zf.infolist():
         if info.is_dir():
+            continue
+        norm = info.filename.replace("\\", "/")
+        if any(f"/{d}/" in f"/{norm}/" for d in SKIP_DIRS):
             continue
         clean = _safe_name(info.filename)
         if clean is None:
