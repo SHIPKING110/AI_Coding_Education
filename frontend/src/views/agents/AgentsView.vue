@@ -1246,7 +1246,7 @@ async function saveSkill() {
 /* —— Skill 直接导入（zip 免新建）+ 文件预览 + 受控运行 —— */
 const skillUploading = ref(false)
 const skillPreview = ref<{ path: string; text: string } | null>(null)
-const skillRunOut = ref<{ skillId: string; path: string; ok: boolean; stdout: string; stderr: string; provider?: string; deps?: string } | null>(null)
+const skillRunOut = ref<{ skillId: string; path: string; ok: boolean; stdout: string; stderr: string; provider?: string; deps?: string; sandbox_id?: string; phases?: string[]; deps_log?: string } | null>(null)
 async function openSkillPreview(s: AgentSkill, path: string) {
   try {
     skillPreview.value = await previewSkillFile(s.id, path)
@@ -1335,7 +1335,7 @@ async function confirmRun() {
     skillRunOut.value = null
     const args = runArgs.value.trim() ? runArgs.value.trim().split(/\s+/) : []
     const r = await runSkillScript(t.s.id, t.path, args)
-    skillRunOut.value = { skillId: t.s.id, path: t.path, ok: r.ok, stdout: r.stdout, stderr: r.stderr, provider: r.provider, deps: (r as { deps?: string }).deps }
+    skillRunOut.value = { skillId: t.s.id, path: t.path, ok: r.ok, stdout: r.stdout, stderr: r.stderr, provider: r.provider, deps: (r as { deps?: string }).deps, sandbox_id: (r as { sandbox_id?: string }).sandbox_id, phases: (r as { phases?: string[] }).phases, deps_log: (r as { deps_log?: string }).deps_log }
   } catch (err: unknown) {
     extError.value = err instanceof Error ? err.message : '运行失败'
   } finally {
@@ -2333,6 +2333,11 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
         <div v-if="skillRunOut && skillRunOut.skillId === runTarget.s.id" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
           <b>{{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
           <span v-if="skillRunOut.deps" class="runout-tip">✓ {{ skillRunOut.deps }}</span>
+          <details v-if="skillRunOut.phases?.length" class="runout-steps">
+            <summary>执行过程（{{ skillRunOut.phases.length }} 步）· 含 sandboxID 与依赖日志</summary>
+            <div v-for="(p, i) in skillRunOut.phases" :key="i" class="runout-step">{{ p }}</div>
+            <pre v-if="skillRunOut.deps_log">{{ skillRunOut.deps_log }}</pre>
+          </details>
           <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
           <pre v-if="skillRunOut.stderr" class="err">{{ skillRunOut.stderr }}</pre>
         </div>
@@ -2885,6 +2890,9 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .runout-tag { display: inline-block; font-size: 10px; font-weight: 800; border-radius: 999px; padding: 1px 8px; margin-left: 6px; background: var(--bg-soft); color: var(--ink-3); }
 .runout-tag.remote { background: var(--accent-soft); color: var(--accent-strong); }
 .runout-tag.local { background: var(--brand-soft); color: var(--brand-strong); }
+.runout-steps { margin-top: 6px; border: 1px dashed var(--line); border-radius: 8px; padding: 4px 8px 8px; }
+.runout-steps summary { cursor: pointer; font-size: 11.5px; font-weight: 700; color: var(--brand-strong); }
+.runout-step { font-size: 11.5px; color: var(--ink-2); padding: 2px 0; word-break: break-all; }
 .run-path { font-size: 12px; color: var(--brand-strong); background: var(--brand-soft); border-radius: 8px; padding: 6px 10px; word-break: break-all; }
 .run-provider { font-size: 12px; color: var(--ink-3); margin: 0; }
 .sandbox-card { border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 14px; background: var(--surface-alt); }

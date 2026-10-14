@@ -194,26 +194,32 @@ def run_remote(owner_id, skill_id, rel: str, args: list, *, endpoint: str, token
                 str(ed.get("stderr", "")),
             )
 
+        phases = [f"① 建实例 sandboxID={sandbox_id}"]
         deps_note = ""
+        deps_log = ""
         if req_files:
             # 用国内镜像源加速；模板需在网络白名单放行 pypi（见模板高级配置→网络配置）
             pip_cmd = " && ".join(
-                f"pip install -r '/home/user/workspace/{f}' -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet"
+                f"pip install -r '/home/user/workspace/{f}' -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet --disable-pip-version-check"
                 for f in req_files[:2]
             )
             pcode, pout, perr = _data_exec(pip_cmd, step_timeout + 60)
-            tail = ((pout or "") + "\n" + (perr or "")).strip().splitlines()[-8:]
+            tail = ((pout or "") + "\n" + (perr or "")).strip().splitlines()[-20:]
+            deps_log = "\n".join(tail)
+            phases.append(f"② 装依赖 {', '.join(req_files)} → {'成功' if pcode == 0 else '失败(code ' + str(pcode) + ')'}")
             if pcode != 0:
                 return {"ok": False, "code": pcode,
                         "stdout": "",
                         "stderr": f"依赖安装失败（{', '.join(req_files)}）：\n" + "\n".join(tail)
-                                 + "\n（如报网络不通，请在百炼模板→高级配置→网络配置放行 pypi）"}
+                                 + "\n（如报网络不通，请在百炼模板→高级配置→网络配置放行 pypi；域名需带 https:// 前缀）",
+                        "sandbox_id": sandbox_id, "phases": phases, "deps_log": deps_log}
             deps_note = f"已自动安装依赖（{', '.join(req_files)}）"
 
         # 5. 执行入口命令
+        phases.append(f"③ 跑脚本 {command}")
         code, out, err = _data_exec(command, step_timeout)
         return {"ok": code == 0, "code": code, "stdout": out[:MAX_OUT], "stderr": err[:MAX_OUT],
-                "deps": deps_note}
+                "deps": deps_note, "sandbox_id": sandbox_id, "phases": phases, "deps_log": deps_log}
     finally:
         _cleanup()
 
