@@ -530,7 +530,10 @@ def _tool_read_skill_file(db: Session, user: User, *, skill: str = "", path: str
     if target is None:
         return {"错误": f"找不到 Skill：{ref}"}
     if rel not in list(target.files or []):
-        return {"错误": f"{target.name} 包内无此文件：{rel}"}
+        base = rel.rsplit("/", 1)[-1].lower()
+        same = [f for f in (target.files or []) if str(f).rsplit("/", 1)[-1].lower() == base][:3]
+        hint = f"（同名文件：{'、'.join(same)}，请用完整包内路径）" if same else ""
+        return {"错误": f"{target.name} 包内无此文件：{rel}{hint}"}
     try:
         text = _bundle.read_text_file(user.id, target.id, rel)
     except ValueError as e:
@@ -704,8 +707,9 @@ TOOLS_SCHEMA: list[dict] = [
             "name": "run_skill_script",
             "description": (
                 "执行用户 Skill 包内的 .py/.js/.sh 脚本（走沙箱：本地或阿里云百炼，依赖自动安装）。"
-                "用户要求生成文件/跑脚本/用 Skill 干活时用它：先按 SKILL.md 选对入口脚本，需要参数就传参；"
-                "返回含 stdout/stderr 与生成文件的下载链接，拿到链接后必须直接给用户。"
+                "用户要求生成文件/跑脚本/用 Skill 干活时用它：读完 SKILL.md 确认入口后立即执行，"
+                "不要继续读文件浪费次数。执行环境：沙箱工作区根目录即包根，包内相对路径不变，"
+                "args 为命令行参数数组；返回含 stdout/stderr 与生成文件的下载链接，拿到链接后必须直接给用户。"
             ),
             "parameters": {
                 "type": "object",

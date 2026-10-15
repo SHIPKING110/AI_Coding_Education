@@ -667,16 +667,18 @@ def conversation_chat(
                 if suser is None:
                     plan_box["outcome"] = agent_planner.PlanOutcome()
                     return
-                if skill_mode:
-                    # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
-                    out = agent_planner.plan_and_run(
-                        sdb, suser, _msg, max_rounds=6, max_calls=12, time_budget_ms=300000,
-                    )
-                else:
-                    out = agent_planner.plan_and_run(sdb, suser, _msg)
-                plan_box["outcome"] = out
-                logger.info("plan done agent=%s skill_mode=%s steps=%s",
-                            conv.agent_id, skill_mode, [s.tool for s in out.steps])
+                # 线程不继承 contextvar：在此重新压入教师个人模型配置，否则规划模型拿不到 Key
+                with _llm_ctx.use_llm(resolved):
+                    if skill_mode:
+                        # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
+                        out = agent_planner.plan_and_run(
+                            sdb, suser, _msg, max_rounds=8, max_calls=20, time_budget_ms=300000,
+                        )
+                    else:
+                        out = agent_planner.plan_and_run(sdb, suser, _msg)
+                    plan_box["outcome"] = out
+                    logger.info("plan done agent=%s skill_mode=%s steps=%s",
+                                conv.agent_id, skill_mode, [s.tool for s in out.steps])
             except Exception as e:  # noqa: BLE001 —— 规划失败静默降级，不拖垮对话
                 logger.exception("plan failed agent=%s skill_mode=%s", conv.agent_id, skill_mode)
                 plan_box["error"] = e

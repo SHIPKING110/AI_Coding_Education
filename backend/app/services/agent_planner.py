@@ -60,9 +60,15 @@ def _skill_inventory(db, user) -> str:
         for s in _ext.list_skills(db, owner_id=user.id):
             if not s.enabled:
                 continue
-            scripts = [str(f) for f in (s.files or []) if str(f).lower().endswith((".py", ".js", ".sh"))]
+            files = [str(f) for f in (s.files or [])]
+            scripts = [f for f in files if f.lower().endswith((".py", ".js", ".sh"))]
             if scripts:
-                lines.append(f"- {s.name}：{(s.description or '')[:60]}；脚本：{'、'.join(scripts[:8])}")
+                doc = next((f for f in files if f.lower().endswith("skill.md")), "")
+                seg = f"- {s.name}：{(s.description or '')[:60]}；"
+                if doc:
+                    seg += f"说明文档：{doc}（读它确认入口与参数，path 必须用这个完整路径）；"
+                seg += f"脚本：{'、'.join(scripts[:8])}"
+                lines.append(seg)
         return "\n".join(lines[:10])
     except Exception:
         return ""
@@ -146,6 +152,61 @@ def plan_and_run(
         # 规划成功但返回空（模型漏调，某些模型 function-calling 偏保守）时，
         # 若关键词启发式能命中，也走启发式兜底——业务问题绝不允许"零工具"回答。
         heuristic = agent_tools._heuristic_calls(message)[:calls_cap]
+        # Skill 任务优先兜底（必须放业务分支之前：教师自配 Key 时 is_llm_configured() 为 False，
+        # 原顺序会直接吞掉 Skill 路径，导致"零工具纯描述"）。
+        # 强制先读 SKILL.md，再带着文档内容继续多轮规划，让模型真正去执行脚本。
+        if _skill_inventory(db, user) and agent_tools.looks_like_skill_task(message):
+            skill_calls = agent_tools.heuristic_skill_calls(db, user)[:calls_cap]
+            if skill_calls:
+                logger.info("Skill 兜底：规划零工具，强制读 SKILL.md 后继续多轮规划")
+                observations: list[str] = []
+                for c in skill_calls:
+                    if len(steps) >= calls_cap:
+                        break
+                    name = str(c.get("name") or "")
+                    args = c.get("arguments") or {}
+                    ok, payload = _exec(db, user, name, args)
+                    steps.append(Step(tool=name, args=args, ok=ok,
+                                      result=payload if ok else None, error=None if ok else str(payload)))
+                    observations.append(f"· {name}：{compact_result(payload, result_chars)}")
+                if observations:
+                    observations.append("（SKILL.md 已读：下一步必须调 run_skill_script 执行入口脚本，禁止再读文件；"
+                                        "先跑 Skill 自带的校验脚本，不通过就停并如实告诉用户）")
+                    messages.append(llm._human_msg("工具结果：\n" + "\n".join(observations)))
+                for _ in range(rounds_cap):
+                    if len(steps) >= calls_cap or _elapsed_ms(t0) > budget_ms:
+                        break
+                    try:
+                        _, calls = llm.tool_step(messages, agent_tools.TOOLS_SCHEMA)
+                    except Exception:
+                        break
+                    if not calls:
+                        break
+                    rounds += 1
+                    round_obs: list[str] = []
+                    for c in calls:
+                        if len(steps) >= calls_cap:
+                            break
+                        name = str(c.get("name") or "")
+                        args = c.get("arguments") or {}
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except (ValueError, TypeError):
+                                args = {}
+                        key = f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+                        if key in seen:
+                            round_obs.append(f"· {name}：{json.dumps(args, ensure_ascii=False)}（重复调用已跳过）")
+                            continue
+                        seen.add(key)
+                        ok, payload = _exec(db, user, name, args)
+                        steps.append(Step(tool=name, args=args, ok=ok,
+                                          result=payload if ok else None, error=None if ok else str(payload)))
+                        round_obs.append(f"· {name}：{compact_result(payload, result_chars)}")
+                    if round_obs:
+                        messages.append(llm._human_msg("工具结果：\n" + "\n".join(round_obs)))
+                block = _format_block(steps, block_chars, result_chars=result_chars)
+                return PlanOutcome(steps=steps, block=block, rounds=rounds, degraded=True)
         if planner_failed or not llm.is_llm_configured() or heuristic:
             if planner_failed:
                 logger.warning("工具规划失败，已降级启发式路由")
@@ -154,15 +215,6 @@ def plan_and_run(
             steps = _heuristic_run(db, user, message, calls_cap)
             block = _format_block(steps, block_chars, result_chars=result_chars)
             return PlanOutcome(steps=steps, block=block, degraded=True)
-        # Skill 任务兜底：业务启发式无命中，但用户有可执行 Skill 且问题像在让 Skill 干活 →
-        # 强制先读 SKILL.md，保证执行链路非空、模型拿到入口说明后再决策，绝不"零工具纯描述"。
-        if _skill_inventory(db, user) and agent_tools.looks_like_skill_task(message):
-            skill_calls = agent_tools.heuristic_skill_calls(db, user)[:calls_cap]
-            if skill_calls:
-                logger.info("Skill 兜底：规划零工具，强制读 SKILL.md")
-                steps = _heuristic_run(db, user, message, calls_cap, calls=skill_calls)
-                block = _format_block(steps, block_chars, result_chars=result_chars)
-                return PlanOutcome(steps=steps, block=block, degraded=True)
         return PlanOutcome()
 
     block = _format_block(steps, block_chars, result_chars=result_chars)

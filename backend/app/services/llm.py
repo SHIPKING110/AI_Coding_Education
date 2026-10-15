@@ -242,6 +242,9 @@ TOOL_PLANNER_SYS += (
     "工具返回的生成文件下载链接必须原样传达给用户。"
     "\n【先读后跑】：跑脚本前先用 read_skill_file 读 SKILL.md 与入口脚本源码，"
     "确认参数与产物路径；需要多步完成（读文档→装依赖→跑脚本→取产物）就分多轮调用，不要一次编造结果。"
+    "\n【Skill 执行纪律】：读文件最多 3 次（SKILL.md→路由/入口文档→profile），随后必须调 run_skill_script 执行，"
+    "禁止把调用次数耗尽在读文件上；Skill 自带的校验脚本（如 attribution_guard.py）先跑，不通过就停并如实告诉用户；"
+    "执行环境说明：脚本跑在沙箱工作区根目录，包内相对路径保持不变，不要 cd、用相对路径传参。"
 )
 
 
@@ -249,10 +252,16 @@ def tool_step(messages: list, tools: list[dict]) -> tuple[str, list[dict]]:
     """一次非流式 function-calling 步骤：返回 (文本内容, [{id, name, arguments}])。
 
     供规划层多轮循环使用：把上一轮工具结果以 HumanMessage 追加后再调用本函数即可。
-    温度取 0（规划要确定性）。未配置 LLM 时返回 ("", [])。
+    温度取 0（规划要确定性）。全局 Key 与本次请求解析出的教师 Key 都没有时返回 ("", [])。
     """
     if not is_llm_configured():
-        return "", []
+        try:
+            from app.services import llm_context as _ctx
+
+            if _ctx.get_current() is None:
+                return "", []
+        except Exception:
+            return "", []
     model = _plan_model()
     bound = model.bind_tools(tools)
     resp = bound.invoke(messages)
