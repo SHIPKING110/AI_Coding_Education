@@ -612,6 +612,42 @@ def _tool_write_skill_file(db: Session, user: User, *, skill: str = "", path: st
             "提示": "文件已就位，可继续写其余页面，然后用 run_skill_script 跑该 Skill 的转换脚本生成 PPTX"}
 
 
+def _tool_list_skill_files(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
+    """列出 Skill 包内某个目录下的文件（用于发现已生成的项目、找到正确的脚本/源文件路径）。"""
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    ref = (skill or "").strip()
+    if not ref:
+        return {"错误": "需提供 skill（Skill 名或 id）"}
+    prefix = (path or "").strip().replace("\\", "/").strip("/")
+    target = None
+    for s in _ext.list_skills(db, owner_id=user.id):
+        sid = str(s.id)
+        if ref == sid or ref == sid[:8] or ref in (s.name or ""):
+            target = s
+            break
+    if target is None:
+        return {"错误": f"找不到 Skill：{ref}"}
+    dest = _bundle.skill_dir(user.id, target.id)
+    base = dest / prefix if prefix else dest
+    if not base.exists() or not base.is_dir():
+        # 兜底：把包内所有目录一级列一下，帮助模型导航
+        tops = sorted({str(p.relative_to(dest)).replace("\\", "/").split("/")[0] for p in dest.iterdir()})[:30]
+        return {"错误": f"目录不存在：{prefix or '/'}", "包内顶层": tops}
+    dirs: list[str] = []
+    files: list[str] = []
+    for p in sorted(base.iterdir()):
+        rel = str(p.relative_to(dest)).replace("\\", "/")
+        if p.is_dir():
+            dirs.append(rel + "/")
+        else:
+            files.append(rel)
+    return {"skill": target.name, "目录": (prefix + "/") if prefix else "（包根）",
+            "子目录": dirs[:50], "文件": files[:80],
+            "提示": "用这里列出的真实路径调用 read_skill_file / run_skill_script / write_skill_file"}
+
+
 def _tool_read_skill_file(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
     """读用户 Skill 包内文本文件（先读 SKILL.md/入口脚本/参考资料，再决定跑哪个脚本、传什么参）。"""
     from app.crud import agent_ext as _ext
@@ -655,6 +691,7 @@ _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "run_skill_script": _tool_run_skill_script,
     "write_skill_file": _tool_write_skill_file,
     "read_skill_file": _tool_read_skill_file,
+    "list_skill_files": _tool_list_skill_files,
 }
 
 # OpenAI 兼容 function-calling 的 tools schema
@@ -838,6 +875,24 @@ TOOLS_SCHEMA: list[dict] = [
                     "path": {"type": "string", "description": "包内文件路径，如 SKILL.md"},
                 },
                 "required": ["skill", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skill_files",
+            "description": (
+                "列出 Skill 包内某个目录下的子目录与文件。"
+                "当需要找已有项目/源文件、或不确定脚本真实路径时先用它（例如列出 projects/ 看已生成的项目）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "包内目录路径，留空列包根，如 projects"},
+                },
+                "required": ["skill"],
             },
         },
     },

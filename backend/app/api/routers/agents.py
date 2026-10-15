@@ -213,12 +213,21 @@ def _tool_trace(plan_outcome) -> list[dict]:
     trace: list[dict] = []
     for i, s in enumerate(plan_outcome.steps):
         summary = agent_planner.compact_result(s.result, 900) if s.ok else ""
+        files: list[dict] = []
+        if s.ok and isinstance(s.result, dict):
+            raw = s.result.get("生成文件")
+            if isinstance(raw, list):
+                files = [
+                    {"名": f.get("名"), "下载": f.get("下载"), "字节": f.get("字节")}
+                    for f in raw if isinstance(f, dict) and f.get("下载")
+                ]
         trace.append({
             "seq": i + 1,
             "tool": s.tool,
             "args": s.args,
             "ok": s.ok,
             "summary": summary,
+            "files": files,
             "error": None if s.ok else (s.error or "执行失败"),
         })
     return trace

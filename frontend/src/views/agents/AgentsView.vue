@@ -1053,15 +1053,18 @@ const TOOL_LABELS: Record<string, string> = {
   sql_describe_table: '数据库·表结构',
   sql_query: '数据库查询',
   run_skill_script: 'Skill脚本执行',
+  write_skill_file: 'Skill文件写入',
   read_skill_file: 'Skill文件读取',
 }
 
 function toolsOf(m: { citations?: Record<string, unknown> | null }): {
-  seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null;
+  seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string;
+  files?: { 名?: string; name?: string; 下载?: string; url?: string }[]; error?: string | null;
 }[] {
   const arr = (m.citations as { tools?: unknown } | null)?.tools
   return Array.isArray(arr) ? (arr as {
-    seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null;
+    seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string;
+    files?: { 名?: string; name?: string; 下载?: string; url?: string }[]; error?: string | null;
   }[]) : []
 }
 /* —— MCP 调用链路（citations.mcp_trace）：规划→握手→调用→结果，每步 ok/ms/detail —— */
@@ -1089,10 +1092,17 @@ function toolArgsText(args: Record<string, unknown>): string {
 }
 
 /* —— 工具结果里的生成文件（run_skill_script 回传的下载链接）渲染为可点按钮 —— */
-function toolFiles(summary: string): { 名?: string; name?: string; 下载?: string; url?: string }[] {
+function parseFiles(step: {
+  files?: { 名?: string; name?: string; 下载?: string; url?: string }[]; summary?: string
+}): { 名?: string; name?: string; 下载?: string; url?: string }[] {
+  // 优先用结构化 files 字段（后端已单独下发，不受摘要截断影响）
+  if (Array.isArray(step?.files) && step.files.length) return step.files
+  // 兜底：从 summary 里解析（摘要可能被追加“…（已截断）”，故用非严格提取）
+  const s = step?.summary || ''
+  const m = s.match(/"生成文件"\s*:\s*(\[[\s\S]*?\])/)
+  if (!m) return []
   try {
-    const obj = JSON.parse(summary || '')
-    const arr = obj?.['生成文件']
+    const arr = JSON.parse(m[1])
     return Array.isArray(arr) ? arr : []
   } catch {
     return []
@@ -1791,8 +1801,8 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                         <span class="tool-args">{{ toolArgsText(t.args) }}</span>
                       </div>
                       <p v-if="t.ok" class="tool-summary">{{ t.summary }}</p>
-                      <div v-if="t.ok && toolFiles(t.summary).length" class="tool-files">
-                        <a v-for="(f, fi) in toolFiles(t.summary)" :key="fi" class="file-dl" :href="f['下载'] ?? f.url" download target="_blank" rel="noopener">⬇ {{ f['名'] ?? f.name }}</a>
+                      <div v-if="t.ok && parseFiles(t).length" class="tool-files">
+                        <a v-for="(f, fi) in parseFiles(t)" :key="fi" class="file-dl" :href="f['下载'] ?? f.url" download target="_blank" rel="noopener">⬇ {{ f['名'] ?? f.name }}</a>
                       </div>
                       <p v-if="!t.ok" class="tool-error">查询失败：{{ t.error }}（已跳过该项，其余数据不受影响）</p>
                     </div>
