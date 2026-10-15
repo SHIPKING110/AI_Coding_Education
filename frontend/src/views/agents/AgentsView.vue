@@ -68,6 +68,7 @@ const selectedAgent = ref('')
 const activeConv = ref<ConversationOut | null>(null)
 const messages = ref<{ role: string; content: string; citations?: Record<string, unknown> | null; options?: ChatOption[] | null; spec?: ChatMessage['spec'] }[]>([])
 const streamBuf = ref('')
+const liveTools = ref<{ seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[]>([])
 const streaming = ref(false)
 const phaseLabel = ref('')
 const input = ref('')
@@ -755,6 +756,7 @@ async function send(preset?: { text: string; stage?: string }) {
   streaming.value = true
   streamBuf.value = ''
   phaseLabel.value = '准备中'
+  liveTools.value = []
   await scrollBottom()
   let full = ''
   let timedOut = false
@@ -799,6 +801,10 @@ async function send(preset?: { text: string; stage?: string }) {
         idleTimeoutMs: 90000,
         onTimeout: () => {
           timedOut = true
+        },
+        onToolsLive: (steps) => {
+          liveTools.value = steps
+          scrollBottom()
         },
       },
     )
@@ -856,6 +862,7 @@ async function send(preset?: { text: string; stage?: string }) {
     if (abortCtrl.value === ctrl) abortCtrl.value = null
     streaming.value = false
     streamBuf.value = ''
+    liveTools.value = []
     conversations.value = await listConversations()
     await scrollBottom()
   }
@@ -1811,6 +1818,16 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                     <button class="pause-btn" @click="pauseStream">暂停</button>
                   </div>
                   <div v-if="stripPartialJson(streamBuf)" v-html="renderMarkdown(stripPartialJson(streamBuf))" />
+                  <div v-if="liveTools.length" class="live-tools">
+                    <div class="live-tools-title">执行中（{{ liveTools.length }} 步，完成后可在回答下方展开全链路）</div>
+                    <div v-for="t in liveTools" :key="t.seq" class="tool-step" :class="{ fail: !t.ok }">
+                      <div class="tool-step-head">
+                        <span class="tool-dot" :class="{ ok: t.ok, fail: !t.ok }">{{ t.ok ? '✓' : '✕' }}</span>
+                        <b>{{ t.seq }}. {{ TOOL_LABELS[t.tool] ?? t.tool }}</b>
+                        <span class="tool-args">{{ toolArgsText(t.args) }}</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2694,6 +2711,8 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .pause-btn { margin-left: auto; border: 1px solid var(--brand); background: var(--surface); color: var(--brand-strong); border-radius: var(--radius-pill); padding: 2px 10px; font-size: 11.5px; cursor: pointer; }
 .pause-btn:hover { background: var(--brand-soft); }
 .spinner { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--brand-glow); border-top-color: var(--brand-strong); animation: spin .8s linear infinite; display: inline-block; }
+.live-tools { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.live-tools-title { font-size: 11.5px; font-weight: 700; color: var(--brand-strong); }
 @keyframes spin { to { transform: rotate(360deg); } }
 .cite-drop { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 6px; }
 .cite-drop summary {

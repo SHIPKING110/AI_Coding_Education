@@ -177,7 +177,7 @@ export async function agentChatStream(
     tool_trace?: ToolTraceStep[]; tool_rounds?: number; tool_degraded?: boolean;
     mcp_trace?: { step: string; ok: boolean; ms: number; detail: string }[];
   }) => void,
-  opts?: { idleTimeoutMs?: number; onTimeout?: () => void },
+  opts?: { idleTimeoutMs?: number; onTimeout?: () => void; onToolsLive?: (steps: ToolTraceStep[]) => void },
 ): Promise<void> {
   const token = localStorage.getItem('access_token')
   const resp = await fetch(`/api/agents/conversations/${convId}/chat`, {
@@ -240,6 +240,7 @@ export async function agentChatStream(
           title?: string
           error?: string
           phase?: AgentPhase
+          tools_live?: ToolTraceStep[]
           tool_trace?: ToolTraceStep[]
           tool_rounds?: number
           tool_degraded?: boolean
@@ -252,6 +253,7 @@ export async function agentChatStream(
         }
         if (data.error) throw new Error(data.error)
         if (data.phase && onPhase) onPhase(data.phase)
+        if (data.tools_live && opts?.onToolsLive) opts.onToolsLive(data.tools_live)
         if (data.delta) onDelta(data.delta)
         if (data.done) {
           if (onDone) {

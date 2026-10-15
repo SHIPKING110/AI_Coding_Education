@@ -638,42 +638,89 @@ def conversation_chat(
                 mem_block = (mem_block + "\n\n" + rag_block).strip() if mem_block else rag_block
         except Exception:
             pass
-    # 智能助手：多轮规划层执行只读业务工具（排课考勤/教学数据/班级/学员/评估）。
+    # 智能助手：多轮规划层执行只读业务工具（排课考勤/教学数据/班级/学员/评估）或 Skill 脚本。
     # 规划→执行→观察，带预算护栏与降级；非业务问题或失败时静默跳过，不影响流式回答。
-    plan_outcome = agent_planner.PlanOutcome()
+    # 长耗时（沙箱建实例/装依赖按分钟计）不能在发流前同步等：提前扔后台线程，
+    # event_stream 里一边心跳报进度一边等，完工立刻推送执行链路，再组装 prompt 进模型。
+    plan_outcome: agent_planner.PlanOutcome = agent_planner.PlanOutcome()
     has_skill_tools = bool(caps.get("skill_blocks"))
+    skill_mode = has_skill_tools and bool(message.strip()) and agent_tools.looks_like_skill_task(message.strip())
+    plan_box: dict = {}
+    plan_thread = None
     if (conv.agent_id == "assistant" or has_skill_tools) and message.strip():
-        try:
-            if has_skill_tools and agent_tools.looks_like_skill_task(message.strip()):
-                # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
-                plan_outcome = agent_planner.plan_and_run(
-                    db, user, message.strip(), max_rounds=6, max_calls=12, time_budget_ms=300000,
-                )
-            else:
-                plan_outcome = agent_planner.plan_and_run(db, user, message.strip())
-            if plan_outcome.block:
-                mem_block = (mem_block + "\n\n" + plan_outcome.block).strip() if mem_block else plan_outcome.block
-        except Exception:
-            plan_outcome = agent_planner.PlanOutcome()
-    tool_names = plan_outcome.tools
-    system, prompt = agent_chat.build_unified_prompt(
-        agent_id=conv.agent_id,
-        stage=prompt_stage,
-        user_message=message,
-        state=state,
-        context_ref=context_ref,
-        memory_block=mem_block,
-        material=material,
-    )
-    if message.strip():
-        agent_crud.add_message(db, conversation_id=conv.id, role="user", content=message.strip())
+        import threading as _plan_th
+
+        from app.core.database import SessionLocal as _SessionLocal
+
+        _uid = user.id
+        _msg = message.strip()
+
+        def _run_plan():
+            sdb = _SessionLocal()
+            try:
+                from app.models.user import User as _User
+
+                suser = sdb.get(_User, _uid)
+                if suser is None:
+                    plan_box["outcome"] = agent_planner.PlanOutcome()
+                    return
+                if skill_mode:
+                    # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
+                    out = agent_planner.plan_and_run(
+                        sdb, suser, _msg, max_rounds=6, max_calls=12, time_budget_ms=300000,
+                    )
+                else:
+                    out = agent_planner.plan_and_run(sdb, suser, _msg)
+                plan_box["outcome"] = out
+            except Exception as e:  # noqa: BLE001 —— 规划失败静默降级，不拖垮对话
+                plan_box["error"] = e
+            finally:
+                sdb.close()
+
+        plan_thread = _plan_th.Thread(target=_run_plan, daemon=True)
+        plan_thread.start()
+    # prompt 组装所需的变量先在端点作用域占位，真实赋值在 event_stream 等规划完成后进行
+    # （_run_stream 与 done 帧都闭包读取它们）
+    tool_names: list = []
+    system, prompt = "", ""
 
     def _frame(obj: dict) -> str:
         return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
     def event_stream():
         # 最外层兜底：任何未预期异常都必须以 error 帧结束，绝不能让前端无限卡"接收中"
+        nonlocal plan_outcome, mem_block, tool_names, system, prompt
         try:
+            # 等后台规划（心跳报进度，不再是发流前的黑盒等待）；完工立刻把执行链路推给前端
+            if plan_thread is not None:
+                import time as _pt
+
+                t_plan = _pt.monotonic()
+                while plan_thread.is_alive():
+                    plan_thread.join(timeout=5)
+                    if plan_thread.is_alive():
+                        el = int(_pt.monotonic() - t_plan)
+                        doing = "正在执行 Skill（读文件/跑脚本/取产物）" if skill_mode else "正在查询业务数据"
+                        yield _frame({"phase": {"key": "plan", "label": f"{doing}（已用 {el} 秒）"}})
+                got = plan_box.get("outcome")
+                if isinstance(got, agent_planner.PlanOutcome):
+                    plan_outcome = got
+            tool_names = plan_outcome.tools
+            if plan_outcome.block:
+                mem_block = (mem_block + "\n\n" + plan_outcome.block).strip() if mem_block else plan_outcome.block
+            system, prompt = agent_chat.build_unified_prompt(
+                agent_id=conv.agent_id,
+                stage=prompt_stage,
+                user_message=message,
+                state=state,
+                context_ref=context_ref,
+                memory_block=mem_block,
+                material=material,
+            )
+            if message.strip():
+                agent_crud.add_message(db, conversation_id=conv.id, role="user", content=message.strip())
+            if tool_names:
+                yield _frame({"tools_live": _tool_trace(plan_outcome)})
             with _llm_ctx.use_llm(resolved):
                 yield from _run_stream()
         except Exception as e:  # noqa: BLE001
@@ -718,8 +765,8 @@ def conversation_chat(
                     kind, payload = box.get(timeout=15)
                 except queue.Empty:
                     elapsed = int(_time.monotonic() - t0)
-                    if elapsed > 600:
-                        yield _frame({"error": "AI 生成超时（超过 10 分钟无结果），请缩短问题或稍后重试"})
+                    if elapsed > 900:
+                        yield _frame({"error": "AI 生成超时（超过 15 分钟无结果），请缩短问题或稍后重试"})
                         return
                     # 存活心跳：仍在等模型，前端看门狗据此续命，并展示已用时长
                     yield _frame({"phase": {"key": "stream", "label": f"持续生成中（已用 {elapsed} 秒）"}})
