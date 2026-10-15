@@ -61,7 +61,10 @@ def _skill_inventory(db, user) -> str:
             if not s.enabled:
                 continue
             files = [str(f) for f in (s.files or [])]
-            scripts = [f for f in files if f.lower().endswith((".py", ".js", ".sh"))]
+            scripts = sorted(
+                (f for f in files if f.lower().endswith((".py", ".js", ".sh"))),
+                key=lambda f: (0 if "/scripts/" in f.lower() else 1, f),
+            )
             if scripts:
                 doc = next((f for f in files if f.lower().endswith("skill.md")), "")
                 seg = f"- {s.name}：{(s.description or '')[:60]}；"

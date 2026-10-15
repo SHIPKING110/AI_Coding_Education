@@ -60,20 +60,36 @@ def run_script(owner_id, skill_id, rel: str, args: list) -> dict:
 # 管控面：POST https://{workspace}.cn-beijing.maas.aliyuncs.com/api/v1/agentstudio/sandbox/sandboxes
 # Header: Authorization: Bearer {百炼API Key}，Body: {"templateID": template_code}
 # 数据面：connect 返回 domain+token，后续命令/文件/代码执行直连沙箱运行时。
-REMOTE_MAX_FILES = 100
-REMOTE_MAX_TOTAL = 200 * 1024
+REMOTE_MAX_FILES = 300
+REMOTE_MAX_TOTAL = 1024 * 1024
 REMOTE_TEXT_SUFFIX = {".py", ".txt", ".md", ".json", ".yaml", ".yml", ".sh", ".js", ".cfg", ".ini", ".toml"}
 
 
 def collect_exec_files(owner_id, skill_id) -> dict:
-    """打包技能目录内文本文件（含同级 import 依赖），供远程沙箱写入后执行。"""
+    """打包技能目录内文本文件（含同级 import 依赖），供远程沙箱写入后执行。
+
+    优先级收录：入口/SKILL.md/requirements/scripts 先行，保证配额内关键文件不被海量参考资料挤掉。
+    """
     from app.services import skill_bundle as _bundle
 
     dest = _bundle.skill_dir(owner_id, skill_id).resolve()
-    files: dict[str, str] = {}
-    total = 0
+
+    def _priority(rel: str) -> tuple[int, str]:
+        low = rel.lower()
+        base = low.rsplit("/", 1)[-1]
+        if base == "skill.md" or base.startswith("requirements"):
+            return (0, rel)
+        if base in ("attribution_guard.py",) or low.endswith("/attribution_guard.py"):
+            return (1, rel)
+        if "/scripts/" in low and low.endswith((".py", ".js", ".sh")):
+            return (2, rel)
+        if low.endswith((".py", ".js", ".sh")):
+            return (3, rel)
+        return (4, rel)
+
+    cands: list[str] = []
     for p in sorted(dest.rglob("*")):
-        if not p.is_file() or len(files) >= REMOTE_MAX_FILES:
+        if not p.is_file():
             continue
         try:
             rel = str(p.relative_to(dest)).replace("\\", "/")
@@ -81,12 +97,19 @@ def collect_exec_files(owner_id, skill_id) -> dict:
             continue
         if pathlib.PurePosixPath(rel).suffix.lower() not in REMOTE_TEXT_SUFFIX:
             continue
+        cands.append(rel)
+    cands.sort(key=_priority)
+    files: dict[str, str] = {}
+    total = 0
+    for rel in cands:
+        if len(files) >= REMOTE_MAX_FILES:
+            break
         try:
-            text = p.read_text(encoding="utf-8", errors="ignore")
+            text = (dest / rel).read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         if total + len(text) > REMOTE_MAX_TOTAL:
-            break
+            continue
         files[rel] = text
         total += len(text)
     return files
@@ -154,7 +177,10 @@ def run_remote(owner_id, skill_id, rel: str, args: list, *, endpoint: str, token
     )
     files = collect_exec_files(owner_id, skill_id)
     if entry not in files:
-        raise ValueError(f"入口脚本 {entry} 不在可发送文件内")
+        base = entry.rsplit("/", 1)[-1].lower()
+        same = [f for f in files if f.rsplit("/", 1)[-1].lower() == base][:3]
+        hint = f"（可发送的同名文件：{'、'.join(same)}）" if same else "（注意用包内完整相对路径，参考 Skill 清单里的脚本路径）"
+        raise ValueError(f"入口脚本 {entry} 不在可发送文件内{hint}")
     # 约定：包内 requirements*.txt 即依赖清单，运行时自动 pip 安装（后续 Skill 同理，无需额外配置）
     req_files = sorted(
         frel for frel in files
