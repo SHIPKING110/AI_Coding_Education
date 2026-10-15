@@ -542,17 +542,24 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
                         result = _call(rel, list(args or [])[:8])
     except (ValueError, TimeoutError) as e:
         return {"错误": str(e)}
-    out: dict = {"skill": target.name, "脚本": rel, "成功": result.get("ok", False),
-                 "退出码": result.get("code"), "stdout": str(result.get("stdout", ""))[:2000],
-                 "stderr": str(result.get("stderr", ""))[:2000]}
-    if fixed is not None:
-        out["自动前置"] = {"脚本": fixed, "成功": fixed.get("ok", False)}
-    if result.get("deps"):
-        out["依赖"] = result["deps"]
+    # 键顺序刻意把「生成文件」放最前：前端摘要/模型观察都会按字符截断，
+    # 下载链接必须在截断线之内，否则模型看不到链接、用户拿不到文件。
+    out: dict = {"skill": target.name, "成功": result.get("ok", False),
+                 "退出码": result.get("code")}
     fnames = result.get("files") or []
     if fnames:
         out["生成文件"] = [{"名": f["name"], "下载": f["url"], "字节": f["bytes"]} for f in fnames]
         out["提示"] = "生成的文件已有下载链接，请把链接直接给用户，不要只描述内容"
+    if fixed is not None:
+        out["自动前置"] = {
+            "成功": fixed.get("ok", False),
+            "退出码": fixed.get("code"),
+        }
+    out["脚本"] = rel
+    out["stdout"] = str(result.get("stdout", ""))[:1200]
+    out["stderr"] = str(result.get("stderr", ""))[:1200]
+    if result.get("deps"):
+        out["依赖"] = result["deps"]
     return out
 
 
