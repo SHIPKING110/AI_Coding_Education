@@ -465,6 +465,33 @@ def _tool_sql_query(db: Session, user: User, *, sql: str = "") -> dict:
 # 注册表
 # ---------------------------------------------------------------------------
 
+def _parse_run_hint(stderr: str) -> tuple[str, list[str]] | None:
+    """从脚本 stderr 提取 "Run: python3 <脚本> <参数>" 形式的自修复提示。"""
+    import re
+    import shlex
+
+    m = re.search(r"Run:\s*python3\s+(\S+)\s*([^\n]*)", stderr or "")
+    if not m:
+        return None
+    script = m.group(1).strip().strip("\"'")
+    try:
+        rest = shlex.split(m.group(2).strip())
+    except ValueError:
+        rest = m.group(2).split()
+    return script, rest
+
+
+def _locate_script(target, hint_path: str) -> str | None:
+    """把提示里的脚本路径匹配到包内真实路径（前缀可能不同，如 ppt-master-main/）。"""
+    files = [str(f) for f in (target.files or [])]
+    hint = hint_path.replace("\\", "/").lstrip("./")
+    for f in files:
+        if f.endswith(hint) or f.endswith("/" + hint):
+            return f
+    base = hint.rsplit("/", 1)[-1]
+    return next((f for f in files if f.rsplit("/", 1)[-1] == base), None)
+
+
 def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: str = "", args: list | None = None) -> dict:
     """执行用户 Skill 包内脚本（走用户沙箱配置：本地/百炼；产物自动取回给下载链接）。"""
     from app.crud import agent_ext as _ext
@@ -489,20 +516,37 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
     if pathlib.PurePosixPath(rel).suffix.lower() not in (".py", ".js", ".sh"):
         return {"错误": f"仅支持运行 .py/.js/.sh 脚本：{rel}"}
     sb = _ext.get_sandbox_setting(db, owner_id=user.id)
-    try:
-        result = _exec.dispatch(
-            user.id, target.id, rel, list(args or [])[:8],
+
+    def _call(r: str, a: list) -> dict:
+        return _exec.dispatch(
+            user.id, target.id, r, a,
             provider=sb.provider if sb and sb.enabled else "local",
             endpoint=sb.endpoint if sb else "", token=sb.token if sb else "",
             timeout_s=sb.timeout_s if sb else 30,
             workspace_id=sb.workspace_id if sb else "", region=sb.region if sb else "cn-beijing",
             template_code=sb.template_code if sb else "",
         )
+
+    try:
+        result = _call(rel, list(args or [])[:8])
+        fixed: dict | None = None
+        # 自愈：脚本多以 stderr 里 "Run: python3 <脚本> <参数>" 给出前置修复命令
+        # （如 svg_to_pptx 要求先跑质量检查器）。失败时按其提示补跑前置步骤，再重试一次。
+        if not result.get("ok"):
+            hint = _parse_run_hint(str(result.get("stderr") or ""))
+            if hint:
+                hint_rel = _locate_script(target, hint[0])
+                if hint_rel and hint_rel != rel:
+                    fixed = _call(hint_rel, hint[1][:8])
+                    if fixed.get("ok"):
+                        result = _call(rel, list(args or [])[:8])
     except (ValueError, TimeoutError) as e:
         return {"错误": str(e)}
     out: dict = {"skill": target.name, "脚本": rel, "成功": result.get("ok", False),
                  "退出码": result.get("code"), "stdout": str(result.get("stdout", ""))[:2000],
                  "stderr": str(result.get("stderr", ""))[:2000]}
+    if fixed is not None:
+        out["自动前置"] = {"脚本": fixed, "成功": fixed.get("ok", False)}
     if result.get("deps"):
         out["依赖"] = result["deps"]
     fnames = result.get("files") or []

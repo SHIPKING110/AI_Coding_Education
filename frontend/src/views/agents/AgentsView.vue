@@ -1791,10 +1791,10 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                         <span class="tool-args">{{ toolArgsText(t.args) }}</span>
                       </div>
                       <p v-if="t.ok" class="tool-summary">{{ t.summary }}</p>
-                      <div v-if="toolFiles(t.summary).length" class="tool-files">
+                      <div v-if="t.ok && toolFiles(t.summary).length" class="tool-files">
                         <a v-for="(f, fi) in toolFiles(t.summary)" :key="fi" class="file-dl" :href="f['下载'] ?? f.url" download target="_blank" rel="noopener">⬇ {{ f['名'] ?? f.name }}</a>
                       </div>
-                      <p v-else class="tool-error">查询失败：{{ t.error }}（已跳过该项，其余数据不受影响）</p>
+                      <p v-if="!t.ok" class="tool-error">查询失败：{{ t.error }}（已跳过该项，其余数据不受影响）</p>
                     </div>
                   </details>
                   <details v-if="mcpTraceOf(m).length" class="cite-drop tool-drop">

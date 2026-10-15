@@ -672,7 +672,7 @@ def conversation_chat(
                     if skill_mode:
                         # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
                         out = agent_planner.plan_and_run(
-                            sdb, suser, _msg, max_rounds=8, max_calls=20, time_budget_ms=300000,
+                            sdb, suser, _msg, max_rounds=16, max_calls=30, time_budget_ms=600000,
                         )
                     else:
                         out = agent_planner.plan_and_run(sdb, suser, _msg)
