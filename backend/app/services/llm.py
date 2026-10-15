@@ -89,19 +89,19 @@ def _build_chat(base_url: str, api_key: str, model: str, temperature: float, tim
 def _chat_model():
     resolved = _active_resolved()
     if resolved is not None:
-        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.6, 60, 2)
+        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.6, 600, 2)
     settings = get_settings()
     base_url = _normalized_base_url(settings.LLM_BASE_URL)
-    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.6, 60, 2)
+    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.6, 600, 2)
 
 
 def _plan_model():
     resolved = _active_resolved()
     if resolved is not None:
-        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.0, 30, 0)
+        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.0, 120, 0)
     settings = get_settings()
     base_url = _normalized_base_url(settings.LLM_BASE_URL)
-    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.0, 30, 0)
+    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.0, 120, 0)
 
 
 def ping(resolved=None) -> str:

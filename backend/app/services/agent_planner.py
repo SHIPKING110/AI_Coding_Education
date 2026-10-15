@@ -154,6 +154,15 @@ def plan_and_run(
             steps = _heuristic_run(db, user, message, calls_cap)
             block = _format_block(steps, block_chars, result_chars=result_chars)
             return PlanOutcome(steps=steps, block=block, degraded=True)
+        # Skill 任务兜底：业务启发式无命中，但用户有可执行 Skill 且问题像在让 Skill 干活 →
+        # 强制先读 SKILL.md，保证执行链路非空、模型拿到入口说明后再决策，绝不"零工具纯描述"。
+        if _skill_inventory(db, user) and agent_tools.looks_like_skill_task(message):
+            skill_calls = agent_tools.heuristic_skill_calls(db, user)[:calls_cap]
+            if skill_calls:
+                logger.info("Skill 兜底：规划零工具，强制读 SKILL.md")
+                steps = _heuristic_run(db, user, message, calls_cap, calls=skill_calls)
+                block = _format_block(steps, block_chars, result_chars=result_chars)
+                return PlanOutcome(steps=steps, block=block, degraded=True)
         return PlanOutcome()
 
     block = _format_block(steps, block_chars, result_chars=result_chars)
@@ -167,9 +176,9 @@ def _exec(db: Session, user: User, name: str, args: dict) -> tuple[bool, Any]:
         return False, {"错误": str(e)}
 
 
-def _heuristic_run(db: Session, user: User, message: str, calls_cap: int) -> list[Step]:
+def _heuristic_run(db: Session, user: User, message: str, calls_cap: int, calls: list | None = None) -> list[Step]:
     steps: list[Step] = []
-    for c in agent_tools._heuristic_calls(message)[:calls_cap]:
+    for c in (calls if calls is not None else agent_tools._heuristic_calls(message))[:calls_cap]:
         name = str(c.get("name") or "")
         args = c.get("arguments") or {}
         ok, payload = _exec(db, user, name, args)

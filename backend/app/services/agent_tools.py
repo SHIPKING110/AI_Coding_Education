@@ -779,6 +779,28 @@ def looks_like_skill_task(message: str) -> bool:
     return any(k in t for k in _SKILL_KEYWORDS)
 
 
+def heuristic_skill_calls(db, user) -> list[dict]:
+    """Skill 兜底：规划器零工具调用时，强制先读第一个可执行 Skill 的 SKILL.md。
+
+    保证执行链路非空（用户能看到读了什么），模型也能拿到入口脚本与参数说明再决策。
+    """
+    try:
+        from app.crud import agent_ext as _ext
+
+        for s in _ext.list_skills(db, owner_id=user.id):
+            if not s.enabled:
+                continue
+            files = [str(f) for f in (s.files or [])]
+            if not any(f.lower().endswith((".py", ".js", ".sh")) for f in files):
+                continue
+            doc = next((f for f in files if f.lower().endswith("skill.md")), None)
+            if doc:
+                return [{"name": "read_skill_file", "arguments": {"skill": s.name, "path": doc}}]
+    except Exception:
+        pass
+    return []
+
+
 def _heuristic_calls(message: str) -> list[dict]:
     """无 LLM 规划时的关键词直连路由。"""
     t = message

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from app.services import agent_chat, agent_memory, agent_planner, agent_registry
 from app.services import rag as rag_service
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationCreate(BaseModel):
@@ -672,7 +675,10 @@ def conversation_chat(
                 else:
                     out = agent_planner.plan_and_run(sdb, suser, _msg)
                 plan_box["outcome"] = out
+                logger.info("plan done agent=%s skill_mode=%s steps=%s",
+                            conv.agent_id, skill_mode, [s.tool for s in out.steps])
             except Exception as e:  # noqa: BLE001 —— 规划失败静默降级，不拖垮对话
+                logger.exception("plan failed agent=%s skill_mode=%s", conv.agent_id, skill_mode)
                 plan_box["error"] = e
             finally:
                 sdb.close()
@@ -755,6 +761,7 @@ def conversation_chat(
                             box.put(("delta", chunk))
                         box.put(("end", None))
                     except Exception as e:  # noqa: BLE001
+                        logger.exception("chat stream failed conv=%s", conv.id)
                         box.put(("error", e))
 
             t0 = _time.monotonic()
