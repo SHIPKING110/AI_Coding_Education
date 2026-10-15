@@ -512,6 +512,55 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
     return out
 
 
+def _tool_write_skill_file(db: Session, user: User, *, skill: str = "", path: str = "", content: str = "") -> dict:
+    """把文本写入 Skill 包内（如手写 SVG/JSON 工程文件），供后续脚本（svg_to_pptx 等）消费。
+
+    用途：ppt-master 这类 Skill 需要 agent 先产出 SVG 源文件，再跑转换脚本；
+    本工具就是"手"——写进包内并登记到 files，之后 run_skill_script 才能读到/执行。
+    """
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    ref = (skill or "").strip()
+    rel = (path or "").strip().replace("\\", "/")
+    if not ref or not rel:
+        return {"错误": "需提供 skill（Skill 名或 id）与 path（包内相对路径）"}
+    pp = pathlib.PurePosixPath(rel)
+    if pp.is_absolute() or ".." in pp.parts:
+        return {"错误": f"非法路径：{rel}"}
+    allow = {".svg", ".json", ".md", ".txt", ".xml", ".html", ".yaml", ".yml", ".csv", ".css"}
+    if pp.suffix.lower() not in allow:
+        return {"错误": f"仅支持写入文本文件（{'、'.join(sorted(allow))}）：{rel}"}
+    body = content if isinstance(content, str) else str(content)
+    if not body:
+        return {"错误": "content 不能为空"}
+    if len(body.encode("utf-8")) > 512 * 1024:
+        return {"错误": "单文件上限 512KB"}
+    target = None
+    for s in _ext.list_skills(db, owner_id=user.id):
+        sid = str(s.id)
+        if ref == sid or ref == sid[:8] or ref in (s.name or ""):
+            target = s
+            break
+    if target is None:
+        return {"错误": f"找不到 Skill：{ref}"}
+    dest = _bundle.skill_dir(user.id, target.id)
+    fp = (dest / rel).resolve()
+    if dest.resolve() not in fp.parents:
+        return {"错误": f"非法路径：{rel}"}
+    try:
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(body, encoding="utf-8")
+    except OSError as e:
+        return {"错误": f"写入失败：{e}"}
+    files = list(target.files or [])
+    if rel not in files:
+        files.append(rel)
+        _ext.update_skill(db, target, files=files)
+    return {"skill": target.name, "已写入": rel, "字节": len(body.encode("utf-8")),
+            "提示": "文件已就位，可继续写其余页面，然后用 run_skill_script 跑该 Skill 的转换脚本生成 PPTX"}
+
+
 def _tool_read_skill_file(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
     """读用户 Skill 包内文本文件（先读 SKILL.md/入口脚本/参考资料，再决定跑哪个脚本、传什么参）。"""
     from app.crud import agent_ext as _ext
@@ -553,6 +602,7 @@ _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "sql_describe_table": _tool_sql_describe_table,
     "sql_query": _tool_sql_query,
     "run_skill_script": _tool_run_skill_script,
+    "write_skill_file": _tool_write_skill_file,
     "read_skill_file": _tool_read_skill_file,
 }
 
@@ -737,6 +787,27 @@ TOOLS_SCHEMA: list[dict] = [
                     "path": {"type": "string", "description": "包内文件路径，如 SKILL.md"},
                 },
                 "required": ["skill", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_skill_file",
+            "description": (
+                "把文本写入某个 Skill 包内（如手写 SVG/JSON 工程文件）。"
+                "当 Skill 需要 agent 先产出源文件再跑转换脚本时（例如 ppt-master 手写 SVG 后用 svg_to_pptx 导出），"
+                "用它逐页写入；每页一次调用，之后再用 run_skill_script 执行转换脚本。"
+                "只支持文本文件（.svg/.json/.md/.txt/.xml/.html/.yaml/.yml/.csv/.css），单文件≤512KB。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "包内相对路径，如 projects/demo/svg_output/01_cover.svg"},
+                    "content": {"type": "string", "description": "文件文本内容"},
+                },
+                "required": ["skill", "path", "content"],
             },
         },
     },

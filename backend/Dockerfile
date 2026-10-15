@@ -30,6 +30,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # 构建期冒烟：AI 关键依赖缺失直接失败，不流到运行时才暴露
 RUN .venv/bin/python -c "import langchain_openai, chromadb; print('ai deps ok')"
 
+# Skill 运行时依赖（广场共享 Skill 内置能力，随镜像固化，避免每教师重复安装）
+# 与业务依赖隔离在独立文件：加/改 Skill 依赖时只重建这一层
+COPY requirements-skills.txt ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python .venv/bin/python -r requirements-skills.txt \
+    && .venv/bin/python -c "import pptx, yaml, PIL, fitz; print('skill deps ok')"
+
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
