@@ -66,7 +66,7 @@ const agents = ref<AgentInfo[]>([])
 const conversations = ref<ConversationOut[]>([])
 const selectedAgent = ref('')
 const activeConv = ref<ConversationOut | null>(null)
-const messages = ref<{ role: string; content: string; citations?: Record<string, unknown> | null; options?: ChatOption[] | null; spec?: ChatMessage['spec'] }[]>([])
+const messages = ref<{ role: string; content: string; raw?: string; citations?: Record<string, unknown> | null; options?: ChatOption[] | null; spec?: ChatMessage['spec'] }[]>([])
 const streamBuf = ref('')
 const liveTools = ref<{ seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[]>([])
 const streaming = ref(false)
@@ -199,7 +199,7 @@ async function openConversation(id: string) {
   if (seq !== openSeq) return // 已切到别的会话：丢弃过期响应，避免串话与错误吸底
   if (res.conversation?.stage) conv.stage = res.conversation.stage
   messages.value = res.items.map((m) => ({
-    role: m.role, content: stripJsonBlocks(m.content), citations: m.citations,
+    role: m.role, content: stripJsonBlocks(m.content), raw: m.content, citations: m.citations,
     options: m.options ?? null, spec: m.spec ?? null,
   }))
   // 工作区同步：素材 + 大纲草稿（如用户没在编辑则跟随最新规格）
@@ -246,6 +246,42 @@ const usedCitations = computed(() => {
   return [...seen.values()].slice(0, 20)
 })
 
+/* —— 对话驱动大纲：从 assistant 消息里的结构化载荷识别 PPT 大纲 —— */
+function parseOutlinePayload(raw?: string): { id?: string; title: string; kind?: string; note?: string }[] {
+  if (!raw) return []
+  const blocks = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1])
+  for (const b of blocks) {
+    let obj: unknown
+    try {
+      obj = JSON.parse(b)
+    } catch {
+      continue
+    }
+    const rec = (obj ?? {}) as Record<string, unknown>
+    const arr = (rec.outline ?? rec.slides ?? rec.pages) as unknown
+    if (!Array.isArray(arr) || !arr.length) continue
+    const items = arr.map((it, i) => {
+      if (typeof it === 'string') return { id: `p${i + 1}`, title: it, note: '' }
+      const o = (it ?? {}) as Record<string, unknown>
+      const title = String(o.title ?? o.name ?? o.role ?? o.heading ?? `第 ${i + 1} 页`)
+      const note = String(o.note ?? o.summary ?? o.body ?? o.file ?? o.content ?? '')
+      return { id: String(o.id ?? `p${i + 1}`), title, note }
+    })
+    // 至少要有标题信息才有意义（全空标题视为无效载荷）
+    if (items.some((x) => x.title && !/^第 \d+ 页$/.test(x.title))) return items
+  }
+  return []
+}
+
+function deriveOutlineFromMessages(msgs: { role?: string; raw?: string }[]): { id?: string; title: string; kind?: string; note?: string }[] {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role !== 'assistant') continue
+    const ol = parseOutlinePayload(msgs[i].raw)
+    if (ol.length) return ol
+  }
+  return []
+}
+
 function syncOutlineDraft() {
   if (outlineDirty.value) return
   const ol = latestSpec.value?.outline ?? []
@@ -255,6 +291,10 @@ function syncOutlineDraft() {
       id: String(o.id ?? `p${i + 1}`), title: String(o.title ?? `第 ${i + 1} 页`),
       kind: String(o.kind ?? 'bullets'), note: String(o.note ?? ''),
     }))
+  } else {
+    // 对话驱动：从最新的 assistant 消息里识别结构化大纲（Skill 生成 PPT 大纲也能实时同步）
+    const derived = deriveOutlineFromMessages(messages.value)
+    if (derived.length) outlineDraft.value = derived
   }
   const secs = latestSpec.value?.sections ?? []
   if (secs.length && !sectionDirty.value) {
@@ -824,6 +864,7 @@ async function send(preset?: { text: string; stage?: string }) {
     messages.value.push({
       role: 'assistant',
       content: stripJsonBlocks(full),
+      raw: full,
       options: doneOptions ?? null,
       spec: null,
       citations: (doneToolTrace?.length || doneMcpTrace?.length)
@@ -838,7 +879,7 @@ async function send(preset?: { text: string; stage?: string }) {
       try {
         const res = await getConversationMessages(activeConv.value.id)
         messages.value = res.items.map((m) => ({
-          role: m.role, content: stripJsonBlocks(m.content), citations: m.citations,
+          role: m.role, content: stripJsonBlocks(m.content), raw: m.content, citations: m.citations,
           options: m.options ?? null, spec: m.spec ?? null,
         }))
       } catch {
@@ -851,7 +892,7 @@ async function send(preset?: { text: string; stage?: string }) {
       // 用户手动暂停：保留已输出的片段，不报错
       if (full.trim()) {
         messages.value.push({
-          role: 'assistant', content: stripJsonBlocks(full), options: doneOptions ?? null,
+          role: 'assistant', content: stripJsonBlocks(full), raw: full, options: doneOptions ?? null,
           citations: (doneToolTrace?.length || doneMcpTrace?.length) ? { tools: doneToolTrace, rounds: doneToolRounds, mcp_trace: doneMcpTrace } : undefined,
         })
       }
