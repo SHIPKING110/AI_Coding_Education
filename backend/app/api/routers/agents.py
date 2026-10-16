@@ -196,6 +196,72 @@ def _report_ids_from_ref(ref: dict) -> list[str]:
     return [x for x in ids if not (x in seen or seen.add(x))]
 
 
+def _class_eval_block(db: Session, user: User, context_ref: dict, max_chars: int = 3000) -> str:
+    """绑定班级 → 学员评估正文自动注入对话上下文。
+
+    素材 tab 绑定班级后，每条对话自动携带该班学员最新评估摘要/评语，
+    Agent 无需再调工具就能直接引用；超长按学员整条裁剪。
+    """
+    class_id = (context_ref or {}).get("class_id") or (context_ref or {}).get("id")
+    if not class_id:
+        return ""
+    try:
+        from sqlalchemy.orm import selectinload
+
+        from app.models.enrollment import Class
+        from app.models.evaluation import Evaluation
+        from app.models.user import Role
+
+        cls = db.get(Class, uuid.UUID(str(class_id)), options=[selectinload(Class.students)])
+    except (ValueError, AttributeError):
+        return ""
+    if cls is None:
+        return ""
+    if getattr(user, "role", None) == getattr(__import__("app.models.user", fromlist=["Role"]), "Role").TEACHER:
+        if str(getattr(cls, "teacher_id", "") or "") != str(user.id):
+            return ""
+    try:
+        from sqlalchemy import select
+
+        from app.models.evaluation import EvaluationStatus
+
+        ev_stmt = select(Evaluation).order_by(Evaluation.updated_at.desc())
+        if str(getattr(user, "role", "")) == "teacher":
+            ev_stmt = ev_stmt.where(Evaluation.teacher_id == user.id)
+        latest: dict = {}
+        for ev in db.scalars(ev_stmt).unique().all():
+            latest.setdefault(ev.student_id, ev)
+    except Exception:
+        return ""
+    lines: list[str] = []
+    for s in sorted(getattr(cls, "students", []) or [], key=lambda x: x.name):
+        ev = latest.get(s.id)
+        if ev is None:
+            lines.append(f"- {s.name}：暂无评估")
+            continue
+        c = ev.content or {}
+        summary = str(c.get("summary") or c.get("comment") or "")[:160]
+        to_improve = str(c.get("to_improve") or "")[:80]
+        seg = f"- {s.name}（{ev.period_start}~{ev.period_end}）：{summary}"
+        if to_improve:
+            seg += f"；待改进：{to_improve}"
+        lines.append(seg)
+    if not lines:
+        return ""
+    head = f"【绑定班级·学员评估】班级《{cls.name}》（共 {len(lines)} 人，最新评估摘要如下，回答班级/学员问题时直接引用）"
+    body = head + "\n" + "\n".join(lines)
+    if len(body) > max_chars:
+        # 按学员整条裁剪
+        kept = [head]
+        for ln in lines:
+            if len("\n".join(kept) + "\n" + ln) > max_chars:
+                break
+            kept.append(ln)
+        kept.append(f"…另有 {len(lines) - (len(kept) - 1)} 人未列出")
+        body = "\n".join(kept)
+    return body
+
+
 def _load_reports(db: Session, ref: dict) -> list:
     out = []
     for rid in _report_ids_from_ref(ref):
@@ -270,18 +336,45 @@ def conversation_material(
         class_id = ref.get("class_id") or ref.get("id")
         if class_id:
             try:
-                from app.models.enrollment import Class
+                from sqlalchemy.orm import selectinload
 
-                cls = db.get(Class, uuid.UUID(str(class_id)))
+                from app.models.enrollment import Class
+                from app.models.evaluation import Evaluation
+                from app.models.user import Role
+
+                cls = db.get(Class, uuid.UUID(str(class_id)), options=[selectinload(Class.students)])
             except ValueError:
                 cls = None
+            if cls is not None and getattr(user, "role", None) == Role.TEACHER:
+                if str(getattr(cls, "teacher_id", "") or "") != str(user.id):
+                    cls = None
             if cls is not None:
                 ref_period = str(ref.get("period") or "")
                 if not ref_period and (ref.get("period_start") or ref.get("period_end")):
                     ref_period = _fmt_period(ref.get("period_start"), ref.get("period_end"))
+                students = sorted(getattr(cls, "students", []) or [], key=lambda x: x.name)
+                done = 0
+                try:
+                    from sqlalchemy import select
+
+                    from app.models.evaluation import EvaluationStatus
+
+                    ev_stmt = select(Evaluation.student_id, Evaluation.status)
+                    if str(getattr(user, "role", "")) == "teacher":
+                        ev_stmt = ev_stmt.where(Evaluation.teacher_id == user.id)
+                    seen: dict = {}
+                    for sid, st in db.execute(ev_stmt).all():
+                        if sid not in seen or st == EvaluationStatus.PUBLISHED.value:
+                            seen[sid] = st
+                    done = sum(1 for s in students if seen.get(s.id) == EvaluationStatus.PUBLISHED.value)
+                except Exception:
+                    pass
                 out["items"].append({
                     "kind": "class", "id": str(cls.id), "title": cls.name,
                     "period": ref_period or str(ref.get("title") or ""),
+                    "student_count": len(students),
+                    "eval_done": done,
+                    "students": [s.name for s in students[:30]],
                 })
     if not out["items"] and ref:
         out["items"].append({"kind": "context", "title": str(ref.get("title") or "业务上下文"), "id": ""})
@@ -594,6 +687,13 @@ def conversation_chat(
 
     mem_ctx = agent_memory.build_memory_context(db, owner_id=user.id, agent_id=conv.agent_id, conversation_id=conv.id)
     mem_block = agent_memory.memory_prompt_block(mem_ctx)
+    # 绑定班级 → 学员评估正文自动回传进对话（任何 Agent 都生效，无需再调工具）
+    try:
+        class_block = _class_eval_block(db, user, context_ref)
+        if class_block:
+            mem_block = (mem_block + "\n\n" + class_block).strip() if mem_block else class_block
+    except Exception:
+        pass
     # 自定义 Agent 的 system_prompt 覆盖 + Skill/MCP 生效（per-agent ∪ 全局）：
     # Skill 以追加指令块注入；MCP 名单注入 + 运行时真实调用（规划→POST→回灌）。
     caps = agent_registry.effective_capabilities(db, user.id, conv.agent_id)
@@ -623,11 +723,16 @@ def conversation_chat(
     except Exception:
         mcp_tool_names = []
         mcp_trace = []
-    # RAG：会话开关默认关；单条消息可临时切换；关闭时不检索不注入
+    # RAG：会话开关默认关；单条消息可临时切换。
+    # 自动引用：开关关闭时，若本条消息确需知识库（非寒暄）且用户确有文档，
+    # 自动为本条检索一次并注入，不改会话开关（前端会提示"本次已自动引用"）。
     agent_info = agent_def or {}
     want_rag = body.use_rag if body.use_rag is not None else bool(conv.rag_enabled)
+    rag_auto = False
     citations: dict | None = None
-    if want_rag and agent_info.get("supports_rag") and message.strip():
+    if agent_info.get("supports_rag") and message.strip() and (
+        want_rag or (body.use_rag is None and not conv.rag_enabled)
+    ):
         try:
             # 寒暄类消息跳过检索：省一次向量化，首字更快
             if rag_service.needs_retrieval(message.strip()):
@@ -638,7 +743,9 @@ def conversation_chat(
                         message.strip(), db=db, owner_id=user.id, collected_ids=collected
                     )
             if hits:
-                citations = {"hits": hits}
+                if not want_rag:
+                    rag_auto = True
+                citations = {"hits": hits, "rag_auto": rag_auto} if rag_auto else {"hits": hits}
                 lines = [
                     f"- 《{h['title']}》（相似度 {h['similarity']}）：{h['text'][:200]}"
                     for h in hits
@@ -850,6 +957,7 @@ def conversation_chat(
             "tool_rounds": plan_outcome.rounds,
             "tool_degraded": plan_outcome.degraded,
             "mcp_trace": mcp_trace,
+            "rag_auto": rag_auto,
         })
 
     return StreamingResponse(

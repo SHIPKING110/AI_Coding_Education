@@ -76,6 +76,7 @@ const useRagOnce = ref(false)
 const error = ref('')
 const memories = ref<{ id: string; key: string; value: string }[]>([])
 const showMemory = ref(false)
+const memoryOpen = ref(false)
 const chatEl = ref<HTMLDivElement | null>(null)
 const myDocs = ref<KnowledgeDoc[]>([])
 const plazaDocs = ref<KnowledgeDoc[]>([])
@@ -247,9 +248,14 @@ const usedCitations = computed(() => {
 })
 
 /* —— 对话驱动大纲：从 assistant 消息里的结构化载荷识别 PPT 大纲 —— */
+const ROLE_CN: Record<string, string> = {
+  cover: '封面', content: '内容页', closing: '封底', end: '封底',
+  agenda: '目录', section: '章节', stats: '数据页', table: '表格页', chart: '图表页',
+}
+
 function parseOutlinePayload(raw?: string): { id?: string; title: string; kind?: string; note?: string }[] {
   if (!raw) return []
-  const blocks = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1])
+  const blocks = [...raw.matchAll(/```(?:json|jsonc)?\s*([\s\S]*?)```/g)].map((m) => m[1])
   for (const b of blocks) {
     let obj: unknown
     try {
@@ -263,9 +269,19 @@ function parseOutlinePayload(raw?: string): { id?: string; title: string; kind?:
     const items = arr.map((it, i) => {
       if (typeof it === 'string') return { id: `p${i + 1}`, title: it, note: '' }
       const o = (it ?? {}) as Record<string, unknown>
-      const title = String(o.title ?? o.name ?? o.role ?? o.heading ?? `第 ${i + 1} 页`)
-      const note = String(o.note ?? o.summary ?? o.body ?? o.file ?? o.content ?? '')
-      return { id: String(o.id ?? `p${i + 1}`), title, note }
+      const role = String(o.role ?? o.kind ?? '').toLowerCase()
+      const rawTitle = o.title ?? o.name ?? o.heading
+      const file = String(o.file ?? '')
+      // 标题优先级：显式标题 > role 中文名 > 文件名 > 占位
+      const title = rawTitle
+        ? String(rawTitle)
+        : role && ROLE_CN[role]
+          ? ROLE_CN[role]
+          : file
+            ? file.split('/').pop()!.replace(/\.[a-z0-9]+$/i, '')
+            : `第 ${i + 1} 页`
+      const note = String(o.note ?? o.summary ?? o.desc ?? o.body ?? o.content ?? o.file ?? '')
+      return { id: String(o.id ?? o.index ?? `p${i + 1}`), title, note }
     })
     // 至少要有标题信息才有意义（全空标题视为无效载荷）
     if (items.some((x) => x.title && !/^第 \d+ 页$/.test(x.title))) return items
@@ -805,6 +821,7 @@ async function send(preset?: { text: string; stage?: string }) {
   let doneOptions: ChatOption[] | undefined
   let doneStage: string | undefined
   let doneHasSpec = false
+  let doneRagAuto = false
   let doneTitle: string | undefined
   let doneToolTrace: { seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[] | undefined
   let doneToolRounds = 0
@@ -833,6 +850,7 @@ async function send(preset?: { text: string; stage?: string }) {
         doneOptions = info.options
         doneStage = info.stage
         doneHasSpec = !!info.has_spec
+        doneRagAuto = !!info.rag_auto
         doneTitle = info.title
         doneToolTrace = info.tool_trace
         doneToolRounds = info.tool_rounds ?? 0
@@ -867,8 +885,11 @@ async function send(preset?: { text: string; stage?: string }) {
       raw: full,
       options: doneOptions ?? null,
       spec: null,
-      citations: (doneToolTrace?.length || doneMcpTrace?.length)
-        ? { tools: doneToolTrace, rounds: doneToolRounds, degraded: doneToolDegraded, mcp_trace: doneMcpTrace }
+      citations: (doneToolTrace?.length || doneMcpTrace?.length || doneRagAuto)
+        ? {
+          tools: doneToolTrace, rounds: doneToolRounds, degraded: doneToolDegraded,
+          mcp_trace: doneMcpTrace, ...(doneRagAuto ? { rag_auto: true } : {}),
+        }
         : undefined,
     })
     if (timedOut) {
@@ -893,7 +914,12 @@ async function send(preset?: { text: string; stage?: string }) {
       if (full.trim()) {
         messages.value.push({
           role: 'assistant', content: stripJsonBlocks(full), raw: full, options: doneOptions ?? null,
-          citations: (doneToolTrace?.length || doneMcpTrace?.length) ? { tools: doneToolTrace, rounds: doneToolRounds, mcp_trace: doneMcpTrace } : undefined,
+          citations: (doneToolTrace?.length || doneMcpTrace?.length || doneRagAuto)
+            ? {
+              tools: doneToolTrace, rounds: doneToolRounds, mcp_trace: doneMcpTrace,
+              ...(doneRagAuto ? { rag_auto: true } : {}),
+            }
+            : undefined,
         })
       }
     } else {
@@ -1082,6 +1108,11 @@ function onFileChange(e: Event) {
 function citationsOf(m: { citations?: Record<string, unknown> | null }): { title: string; text: string; similarity?: number }[] {
   const hits = (m.citations as { hits?: { title: string; text: string; similarity?: number }[] } | null)?.hits
   return Array.isArray(hits) ? hits : []
+}
+
+/* —— 本条是否触发了"自动引用知识库"（开关关闭时按需检索了一次） —— */
+function ragAutoOf(m: { citations?: Record<string, unknown> | null }): boolean {
+  return (m.citations as { rag_auto?: boolean } | null)?.rag_auto === true
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -1804,18 +1835,20 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
           </button>
         </div>
 
-        <div v-if="showMemory && tab === 'chat'" class="memory-panel">
-          <div class="memory-head">
-            <span>长期记忆 · {{ currentAgent?.name }}</span>
-            <span class="memory-hint">默认按 Agent 隔离，仅你可见</span>
-          </div>
-          <ul v-if="memories.length">
+        <div v-if="showMemory && tab === 'chat'" class="memory-bar" :class="{ open: memoryOpen }">
+          <button class="memory-bar-head" @click="memoryOpen = !memoryOpen" :title="memoryOpen ? '收起' : '展开'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
+            <b>长期记忆</b>
+            <span class="memory-count">{{ memories.length ? `${memories.length} 条` : '暂无' }}</span>
+            <span class="memory-chev">{{ memoryOpen ? '收起' : '展开' }}</span>
+          </button>
+          <ul v-if="memoryOpen && memories.length">
             <li v-for="m in memories" :key="m.id">
               <b>{{ m.key }}</b><span>{{ m.value }}</span>
               <button class="chip-del" @click="removeMemory(m.id)">×</button>
             </li>
           </ul>
-          <p v-else class="empty">暂无长期记忆，对话结束后会自动提炼偏好与事实</p>
+          <p v-else-if="memoryOpen" class="memory-empty">暂无长期记忆，对话结束后会自动提炼偏好与事实</p>
         </div>
 
         <!-- 对话 -->
@@ -1905,6 +1938,10 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                       </a>
                     </div>
                   </div>
+                  <p v-if="ragAutoOf(m)" class="rag-auto-note">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
+                    本次已自动引用知识库（开关仍为关闭，下次可手动开启）
+                  </p>
                   <div v-if="(m.options ?? []).length" class="opt-row">
                     <button
                       v-for="o in (m.options ?? [])"
@@ -2361,6 +2398,11 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
             <b>{{ m.title }}</b>
             <span>{{ m.kind === 'report' ? '报告' : m.kind === 'class' ? '班级' : '上下文' }}{{ m.type ? ` · ${m.type}` : '' }}{{ m.period ? ` · ${m.period}` : '' }}</span>
             <span v-if="m.stat_count" class="kb-file">统计指标 {{ m.stat_count }} 项</span>
+            <span v-if="m.kind === 'class' && m.student_count != null" class="kb-file">
+              {{ m.student_count }} 人 · 评估已完成 {{ m.eval_done ?? 0 }} 人
+            </span>
+            <span v-if="m.kind === 'class' && m.students?.length" class="mat-students">{{ m.students.join('、') }}</span>
+            <span v-if="m.kind === 'class'" class="mat-auto">✓ 学员评估正文已自动带入对话，无需再报名字</span>
           </div>
           <div class="ws-label">对话中引用的知识库片段（{{ usedCitations.length }}）</div>
           <p v-if="!usedCitations.length" class="empty">暂无引用。打开「引用知识库」后再提问会自动检索。</p>
@@ -2779,15 +2821,25 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .seg button svg { width: 15px; height: 15px; }
 .seg button.on { background: var(--surface); color: var(--brand-strong); box-shadow: var(--shadow-xs); }
 
-.memory-panel { border: 1px solid var(--brand); background: var(--brand-soft); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; font-size: 13px; }
-.memory-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-weight: 700; color: var(--brand-strong); }
-.memory-hint { font-size: 11px; font-weight: 500; color: var(--ink-3); }
-.memory-panel ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
-.memory-panel li { display: flex; align-items: baseline; gap: 8px; background: var(--surface); border-radius: var(--radius-sm); padding: 6px 10px; }
-.memory-panel li b { color: var(--ink); flex-shrink: 0; }
-.memory-panel li span { color: var(--ink-2); flex: 1; }
+.memory-bar { border: 1px solid var(--line); background: var(--surface); border-radius: 9px; margin-bottom: 8px; font-size: 12px; }
+.memory-bar-head { width: 100%; display: flex; align-items: center; gap: 7px; border: none; background: transparent; cursor: pointer; padding: 6px 10px; color: var(--ink-2); }
+.memory-bar-head svg { width: 13px; height: 13px; color: var(--brand-strong); }
+.memory-bar-head b { font-size: 12px; color: var(--ink-1); }
+.memory-count { font-size: 11px; color: var(--ink-3); background: var(--bg-soft); border-radius: 999px; padding: 0 8px; }
+.memory-chev { margin-left: auto; font-size: 11px; color: var(--brand-strong); }
+.memory-bar ul { margin: 0; padding: 0 10px 8px; list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
+.memory-bar li { display: flex; align-items: baseline; gap: 8px; background: var(--bg-soft); border-radius: 7px; padding: 4px 8px; font-size: 12px; }
+.memory-bar li b { color: var(--ink); flex-shrink: 0; }
+.memory-bar li span { color: var(--ink-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-empty { margin: 0; padding: 0 10px 8px; font-size: 11.5px; color: var(--ink-3); }
+.mat-students { font-size: 11.5px; color: var(--ink-2); line-height: 1.6; }
+.mat-auto { font-size: 11.5px; color: var(--brand-strong); }
 .chip-del { border: none; background: transparent; color: var(--ink-light); cursor: pointer; font-size: 15px; }
 .chip-del:hover { color: var(--danger); }
+
+/* —— 自动引用知识库提示 —— */
+.rag-auto-note { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--brand-strong); background: var(--brand-soft); border-radius: 7px; padding: 4px 9px; margin: 6px 0 2px; }
+.rag-auto-note svg { width: 13px; height: 13px; flex-shrink: 0; }
 
 .empty, .empty-hero { color: var(--ink-3); font-size: 13px; }
 .empty { text-align: center; padding: 8px 0; }
