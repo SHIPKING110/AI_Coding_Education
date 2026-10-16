@@ -47,6 +47,8 @@ export function renderMarkdown(input: string): string {
   // 特殊围栏渲染
   const uid = () => `c${Math.random().toString(36).slice(2, 8)}`
   const copyBtn = (id: string) => `<button class="md-copy" data-copy="${id}" onclick="(function(b){var t=document.getElementById(b.dataset.copy);var s=t?t.innerText:'';if(navigator.clipboard)navigator.clipboard.writeText(s).then(function(){b.textContent='已复制';setTimeout(function(){b.textContent='复制'},1200)});})(this)">复制</button>`
+  const dlBtn = (id: string, name: string) => `<button class="md-dl" data-src="${id}" data-name="${name}" title="下载到本地" onclick="(function(b){var t=document.getElementById(b.dataset.src);var s=t?t.innerText:'';var blob=new Blob([s],{type:'text/plain;charset=utf-8'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=b.dataset.name||'snippet.txt';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(a.href)},1500);})(this)">下载</button>`
+  const runBtn = (id: string, lang: string) => `<button class="md-run" data-src="${id}" data-lang="${lang}" title="预览渲染效果" onclick="(function(b){var t=document.getElementById(b.dataset.src);if(window.__codeRun)window.__codeRun(t?t.innerText:'',b.dataset.lang||'');})(this)">运行</button>`
   const fenceBlock = (lang: string, code: string): string => {
     const l = (lang || '').toLowerCase()
     const esc = escapeHtml(code)
@@ -112,7 +114,15 @@ export function renderMarkdown(input: string): string {
       return `<pre class="md-terminal">${esc}</pre>`
     }
     const gid = uid()
-    return `<div class="md-code-wrap"><div class="md-code-head"><span>${escapeHtml(lang || 'code')}</span>${copyBtn(gid)}</div><pre class="md-code" id="${gid}"><code data-lang="${escapeHtml(lang)}">${esc}</code></pre></div>`
+    // 可渲染预览的类型：在「复制」之外补「下载」「运行」（运行 = 新窗口内联渲染）
+    const renderable = ['svg', 'html', 'htm', 'xml'].includes(l)
+    const ext = l === 'html' || l === 'htm' ? 'html' : l === 'svg' ? 'svg' : l === 'xml' ? 'xml' : 'txt'
+    const ops = [
+      copyBtn(gid),
+      dlBtn(gid, `snippet.${ext}`),
+      renderable ? runBtn(gid, l) : '',
+    ].filter(Boolean).join('')
+    return `<div class="md-code-wrap"><div class="md-code-head"><span>${escapeHtml(lang || 'code')}</span><span class="md-code-ops">${ops}</span></div><pre class="md-code" id="${gid}"><code data-lang="${escapeHtml(lang)}">${esc}</code></pre></div>`
   }
 
   const lines = input.replace(/\r\n/g, '\n').split('\n')

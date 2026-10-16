@@ -129,6 +129,7 @@ const readyDocs = computed(() => myDocs.value.filter((d) => d.status === 'ready'
 
 onMounted(async () => {
   document.addEventListener('click', onDocClickForMenu)
+  ;(window as unknown as Record<string, unknown>).__codeRun = openCodePreview
   try {
     agents.value = await listAgents()
     conversations.value = await listConversations()
@@ -162,6 +163,7 @@ onMounted(async () => {
 onUnmounted(() => {
   stopKbPoll()
   document.removeEventListener('click', onDocClickForMenu)
+  delete (window as unknown as Record<string, unknown>).__codeRun
 })
 
 watch(selectedAgent, () => void loadMemories())
@@ -1094,7 +1096,7 @@ function toolArgsText(args: Record<string, unknown>): string {
 /* —— 工具结果里的生成文件（run_skill_script 回传的下载链接）渲染为可点按钮 —— */
 function parseFiles(step: {
   files?: { 名?: string; name?: string; 下载?: string; url?: string }[]; summary?: string
-}): { 名?: string; name?: string; 下载?: string; url?: string }[] {
+}): { 名?: string; name?: string; 下载?: string; url?: string; 字节?: number }[] {
   // 优先用结构化 files 字段（后端已单独下发，不受摘要截断影响）
   if (Array.isArray(step?.files) && step.files.length) return step.files
   // 兜底：从 summary 里解析（摘要可能被追加“…（已截断）”，故用非严格提取）
@@ -1107,6 +1109,85 @@ function parseFiles(step: {
   } catch {
     return []
   }
+}
+
+/* —— 单条消息里所有工具产出的文件（去重）：顶部醒目下载区用 —— */
+function msgFiles(m: { citations?: Record<string, unknown> | null }): {
+  名?: string; name?: string; 下载?: string; url?: string; 字节?: number
+}[] {
+  const seen = new Set<string>()
+  const out: { 名?: string; name?: string; 下载?: string; url?: string; 字节?: number }[] = []
+  for (const t of toolsOf(m)) {
+    for (const f of parseFiles(t)) {
+      const url = f['下载'] ?? f.url ?? ''
+      if (!url || seen.has(url)) continue
+      seen.add(url)
+      out.push(f)
+    }
+  }
+  return out
+}
+
+/* —— 整个会话的全部产出文件（成果 tab 用）：按时间倒序、跨消息去重 —— */
+function convFiles(messages: { citations?: Record<string, unknown> | null }[]): {
+  名?: string; name?: string; 下载?: string; url?: string; 字节?: number
+}[] {
+  const seen = new Set<string>()
+  const out: { 名?: string; name?: string; 下载?: string; url?: string; 字节?: number }[] = []
+  for (const m of messages) {
+    for (const f of msgFiles(m)) {
+      const url = f['下载'] ?? f.url ?? ''
+      if (!url || seen.has(url)) continue
+      seen.add(url)
+      out.push(f)
+    }
+  }
+  return out.reverse()
+}
+
+function fmtBytes(n?: number): string {
+  if (!n || n < 0) return ''
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+function fileIcon(name?: string): string {
+  const ext = String(name ?? '').split('.').pop()?.toLowerCase() ?? ''
+  if (ext === 'pptx' || ext === 'ppt') return 'ppt'
+  if (ext === 'pdf') return 'pdf'
+  if (ext === 'docx' || ext === 'doc') return 'doc'
+  if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') return 'xls'
+  if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'svg') return 'img'
+  if (ext === 'json') return 'json'
+  return 'file'
+}
+
+function extLabel(name?: string): string {
+  return (String(name ?? '').split('.').pop() ?? '?').toUpperCase().slice(0, 4)
+}
+
+/* —— 代码块「运行」预览：iframe 内联渲染 svg/html/xml —— */
+const preview = ref<{ code: string; lang: string } | null>(null)
+function openCodePreview(code: string, lang: string) {
+  preview.value = { code, lang }
+}
+function openTabPreview() {
+  if (!preview.value) return
+  const w = window.open('', '_blank')
+  if (w) {
+    w.document.write(previewSrc())
+    w.document.close()
+  }
+}
+function previewSrc(): string {
+  if (!preview.value) return ''
+  const { code, lang } = preview.value
+  const l = (lang || '').toLowerCase()
+  if (['svg', 'xml'].includes(l) || /^\s*<svg[\s>]/i.test(code)) {
+    return `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;height:100%;display:flex;align-items:center;justify-content:center;background:#0b1220}svg{max-width:96%;max-height:96%;height:auto;box-shadow:0 8px 40px rgba(0,0,0,.5);border-radius:8px;background:#fff}</style></head><body>${code}</body></html>`
+  }
+  return code
 }
 
 function statusText(d: KnowledgeDoc): string {
@@ -1759,6 +1840,30 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 </div>
                 <div class="bubble">
                   <div v-html="renderMarkdown(m.content)" />
+                  <div v-if="msgFiles(m).length" class="dl-banner">
+                    <div class="dl-banner-title">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
+                      本次生成 {{ msgFiles(m).length }} 个文件
+                    </div>
+                    <div class="dl-banner-list">
+                      <a
+                        v-for="(f, fi) in msgFiles(m)"
+                        :key="fi"
+                        class="dl-card"
+                        :href="f['下载'] ?? f.url"
+                        download
+                        target="_blank"
+                        rel="noopener"
+                      >
+                        <span class="dl-ext" :data-ext="fileIcon(f['名'] ?? f.name)">{{ extLabel(f['名'] ?? f.name) }}</span>
+                        <span class="dl-meta">
+                          <b>{{ f['名'] ?? f.name }}</b>
+                          <span v-if="fmtBytes(f.字节)">{{ fmtBytes(f.字节) }}</span>
+                        </span>
+                        <span class="dl-go">下载</span>
+                      </a>
+                    </div>
+                  </div>
                   <div v-if="(m.options ?? []).length" class="opt-row">
                     <button
                       v-for="o in (m.options ?? [])"
@@ -2225,28 +2330,47 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
         </div>
 
         <div v-if="wsTab === 'result'" class="ws-body">
-          <div class="ws-label">人工审核后生成（可反复修改大纲再生成）</div>
-          <input v-model="pptTitle" class="kb-input" placeholder="PPT 标题" maxlength="80" />
-          <div class="theme-row">
-            <button
-              v-for="t in [{ id: 'brand', label: '品牌紫' }, { id: 'cyan', label: '天青' }, { id: 'deep', label: '深邃' }]"
-              :key="t.id"
-              class="mini-btn"
-              :class="{ on: pptTheme === t.id }"
-              @click="pptTheme = t.id"
-            >{{ t.label }}</button>
+          <div class="ws-label-row">
+            <span class="ws-label">本次会话产出文件</span>
+            <span class="mat-count">{{ convFiles(messages).length }} 个</span>
           </div>
-          <button class="btn primary" :disabled="building || !outlineDraft.length" @click="doBuildPpt()">
-            {{ building ? '生成中…' : `生成 PPT${outlineDraft.length ? `（${outlineDraft.length} 页）` : ''}` }}
-          </button>
-          <p v-if="wsError" class="error">{{ wsError }}</p>
-          <div v-if="pptResult" class="ppt-done">
-            <b>已生成 · 共 {{ pptResult.pages }} 页（含封面结尾）</b>
-            <a class="result-download" :href="pptResult.download" target="_blank" download>下载 .pptx</a>
-          </div>
-          <p v-if="!outlineDraft.length" class="empty">还没有可用大纲，无法生成。</p>
+          <p v-if="!convFiles(messages).length" class="empty">
+            还没有产出文件。让 Agent 用 Skill 生成内容（如 PPT）后，产物会自动汇总到这里，可直接下载。
+          </p>
+          <a
+            v-for="(f, i) in convFiles(messages)"
+            :key="i"
+            class="dl-card"
+            :href="f['下载'] ?? f.url"
+            download
+            target="_blank"
+            rel="noopener"
+          >
+            <span class="dl-ext" :data-ext="fileIcon(f['名'] ?? f.name)">{{ extLabel(f['名'] ?? f.name) }}</span>
+            <span class="dl-meta">
+              <b>{{ f['名'] ?? f.name }}</b>
+              <span v-if="fmtBytes(f.字节)">{{ fmtBytes(f.字节) }}</span>
+            </span>
+            <span class="dl-go">下载</span>
+          </a>
         </div>
       </aside>
+    </div>
+
+    <!-- 代码运行预览（svg/html 内联渲染） -->
+    <div v-if="preview" class="overlay code-preview" @click.self="preview = null">
+      <div class="cp-panel">
+        <div class="cp-head">
+          <b>运行预览 · {{ (preview.lang || 'code').toUpperCase() }}</b>
+          <div class="cp-head-ops">
+            <button class="mini-btn" @click="openTabPreview">在新窗口打开</button>
+            <button class="icon-btn" title="关闭" @click="preview = null">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+            </button>
+          </div>
+        </div>
+        <iframe class="cp-frame" :srcdoc="previewSrc()" sandbox="allow-scripts allow-popups" />
+      </div>
     </div>
 
     <!-- 自定义 Agent 表单 -->
@@ -2997,6 +3121,40 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .bubble :deep(.md-code.yaml-hl) { color: #bae6fd; }
 .bubble :deep(.md-tasks) { list-style: none; padding-left: 4px; }
 .bubble :deep(.md-footnotes) { font-size: 11.5px; color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 8px; }
+
+/* —— 消息级下载区：一眼可见，无需展开执行链路 —— */
+.dl-banner { margin: 10px 0 4px; border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(180deg, var(--brand-soft), transparent); padding: 10px 12px; }
+.dl-banner-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--brand-strong); margin-bottom: 8px; }
+.dl-banner-title svg { width: 15px; height: 15px; }
+.dl-banner-list { display: flex; flex-direction: column; gap: 6px; }
+.dl-card { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); text-decoration: none; color: var(--ink-1); transition: transform .15s, box-shadow .15s, border-color .15s; }
+.dl-card:hover { border-color: var(--brand); box-shadow: 0 2px 12px rgba(99, 102, 241, .14); transform: translateY(-1px); }
+.dl-ext { flex-shrink: 0; width: 38px; height: 38px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; color: #fff; letter-spacing: .5px; background: var(--brand-gradient); }
+.dl-ext[data-ext="ppt"] { background: linear-gradient(135deg, #f97316, #ea580c); }
+.dl-ext[data-ext="pdf"] { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+.dl-ext[data-ext="doc"] { background: linear-gradient(135deg, #3b82f6, #1d4ed8); }
+.dl-ext[data-ext="xls"] { background: linear-gradient(135deg, #10b981, #047857); }
+.dl-ext[data-ext="img"] { background: linear-gradient(135deg, #a855f7, #7c3aed); }
+.dl-ext[data-ext="json"] { background: linear-gradient(135deg, #64748b, #334155); }
+.dl-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dl-meta b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-meta span { font-size: 11px; color: var(--ink-3); }
+.dl-go { flex-shrink: 0; font-size: 12px; font-weight: 700; color: var(--brand-strong); border: 1px solid var(--brand); border-radius: 7px; padding: 4px 12px; }
+
+/* —— 代码块 复制 / 下载 / 运行 —— */
+.bubble :deep(.md-code-ops) { display: inline-flex; gap: 6px; }
+.bubble :deep(.md-dl), .bubble :deep(.md-run) { font-size: 11px; border: 1px solid #475569; border-radius: 6px; background: transparent; color: #e2e8f0; cursor: pointer; padding: 1px 8px; }
+.bubble :deep(.md-run) { color: #86efac; border-color: #166534; }
+.bubble :deep(.md-dl:hover) { border-color: #94a3b8; }
+.bubble :deep(.md-run:hover) { border-color: #22c55e; }
+
+/* —— 代码运行预览弹窗 —— */
+.overlay.code-preview { z-index: 60; }
+.cp-panel { width: min(1100px, 94vw); height: min(760px, 90vh); display: flex; flex-direction: column; background: var(--surface); border-radius: 14px; overflow: hidden; box-shadow: 0 20px 60px rgba(0, 0, 0, .4); }
+.cp-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.cp-head b { font-size: 13px; color: var(--brand-strong); }
+.cp-head-ops { display: flex; align-items: center; gap: 8px; }
+.cp-frame { flex: 1; width: 100%; border: 0; background: #0b1220; }
 .overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: flex; align-items: center; justify-content: center; z-index: 200; }
 .modal { width: 440px; max-width: calc(100vw - 40px); max-height: 86vh; overflow: auto; background: var(--surface); border-radius: 16px; padding: 24px; display: flex; flex-direction: column; gap: 10px; }
 .modal.wide { width: 560px; }
