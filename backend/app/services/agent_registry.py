@@ -99,21 +99,36 @@ def effective_capabilities(db, owner_id, agent_id: str) -> dict:
         want_mcp = [str(x) for x in (per_mcp + list((glob.default_mcp_ids if glob else []) or []))]
         want_skill = [str(x) for x in (per_skill + list((glob.default_skill_ids if glob else []) or []))]
         seen: set[str] = set()
+        # MCP 仅用本人名下（收录的广场 MCP 已复制成本人私有副本，含本人填写的 endpoint/凭据）
         for m in _ext.list_mcps(db, owner_id=owner_id):
             sid = str(m.id)
             if m.enabled and sid in want_mcp and sid not in seen:
                 seen.add(sid)
                 mcp_ids.append(m.name or sid)
-        for s in _ext.list_skills(db, owner_id=owner_id):
-            sid = str(s.id)
-            if s.enabled and sid in want_skill and (((s.content or "").strip()) or (s.files or [])):
-                # 文件包注入：SKILL.md 摘要 + 文件清单（脚本默认不执行、仅引用）
-                try:
-                    from app.services import skill_bundle as _bundle
+        # 自有 Skill ∪ 广场 Skill（后者含自己发布的与收录引用的，支持跨 owner 绑定）：
+        # 生效条件 = 在绑定名单里 + 启用中 + 有实质内容 +（非自有则必须仍在广场上架）
+        own = {str(s.id): s for s in _ext.list_skills(db, owner_id=owner_id)}
+        plaza = {str(s.id): s for s in _ext.list_plaza_skills(db)}
+        for sid in want_skill:
+            if sid in seen:
+                continue
+            s = own.get(sid) or plaza.get(sid)
+            if s is None or not s.enabled:
+                continue
+            if sid not in own and getattr(s, "visibility", "private") != "plaza":
+                continue
+            if not (((s.content or "").strip()) or (s.files or [])):
+                continue
+            seen.add(sid)
+            # 文件包注入：SKILL.md 摘要 + 文件清单（脚本默认不执行、仅引用）；
+            # 广场 Skill 的文件读作者目录（取 s.owner_id），引用不复制
+            try:
+                from app.services import skill_bundle as _bundle
 
-                    skill_blocks.append(_bundle.skill_context_block(owner_id, sid, s.name, s.content or "", list(s.files or [])))
-                except Exception:
-                    skill_blocks.append(f"【Skill·{s.name}】\n{(s.content or '').strip()}")
+                skill_blocks.append(_bundle.skill_context_block(
+                    s.owner_id, sid, s.name, s.content or "", list(s.files or [])))
+            except Exception:
+                skill_blocks.append(f"【Skill·{s.name}】\n{(s.content or '').strip()}")
     except Exception:
         pass
     return {"mcp_names": mcp_ids, "skill_blocks": skill_blocks}

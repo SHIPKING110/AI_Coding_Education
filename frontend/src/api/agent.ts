@@ -61,6 +61,27 @@ export interface MaterialItem {
   student_count?: number
   eval_done?: number
   students?: string[]
+  snippet?: string
+}
+
+export interface ChatAttachment {
+  id: string
+  name: string
+  kind: 'image' | 'doc' | string
+  url: string
+  size: number
+  text?: string | null
+}
+
+/** 上传对话附件（图片/文档）：暂存后返回可预览 URL 与文档正文（供本轮对话引用） */
+export async function uploadChatAttachment(convId: string, file: File): Promise<ChatAttachment> {
+  const fd = new FormData()
+  fd.append('file', file)
+  const { data } = await http.post<ChatAttachment>(
+    `/agents/conversations/${convId}/attachments`, fd,
+    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000 },
+  )
+  return data
 }
 
 export async function getConversationMaterial(id: string): Promise<{
@@ -171,7 +192,7 @@ export interface ToolTraceStep {
 /** 统一流式对话：SSE，回调 delta；onPhase 回调阶段；onDone 回调完成帧（含 stage/options/工具轨迹） */
 export async function agentChatStream(
   convId: string,
-  payload: { stage: string; message: string; state: Record<string, unknown>; use_rag?: boolean; config_id?: string | null },
+  payload: { stage: string; message: string; state: Record<string, unknown>; use_rag?: boolean; config_id?: string | null; attachments?: ChatAttachment[] },
   onDelta: (text: string) => void,
   signal?: AbortSignal,
   onPhase?: (phase: AgentPhase) => void,

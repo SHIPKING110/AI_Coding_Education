@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -274,6 +275,87 @@ def _load_reports(db: Session, ref: dict) -> list:
     return out
 
 
+_REPORT_TYPE_CN = {
+    "daily": "日报", "weekly": "周报", "monthly": "月报",
+    "quarterly": "季度总结", "yearly": "年度总结",
+}
+
+
+def _report_snippet(rep) -> str:
+    """报告正文摘要（供素材卡片与对话注入的共用短文本）。"""
+    c = rep.content or {}
+    parts: list[str] = []
+    for key, label in (
+        ("summary", "总结"), ("work", "工作"), ("highlights", "亮点"),
+        ("problems", "问题"), ("plan", "计划"), ("next_plan", "下阶段"),
+    ):
+        val = str(c.get(key) or "").strip()
+        if val:
+            parts.append(f"{label}：{val}")
+    return "；".join(parts)
+
+
+def _report_block(db: Session, ref: dict, max_chars: int = 4000) -> str:
+    """绑定报告 → 报告正文自动注入对话上下文。
+
+    素材 tab 绑定「报告总结」的报告后，每条对话自动携带该报告已保存的正文摘要，
+    Agent 无需再调工具即可直接引用；超长按报告整条裁剪。
+    """
+    reps = _load_reports(db, ref)
+    if not reps:
+        return ""
+    lines: list[str] = []
+    for rep in reps:
+        type_cn = _REPORT_TYPE_CN.get(str(rep.type), str(rep.type))
+        period = _fmt_period(rep.period_start, rep.period_end)
+        snippet = _report_snippet(rep)
+        seg = f"- 《{rep.title or '未命名报告'}》（{type_cn}·{period}）：{snippet or '（无正文）'}"
+        lines.append(seg)
+    head = f"【绑定报告·正文摘要】已绑定 {len(reps)} 份报告，回答相关问题直接引用："
+    body = head + "\n" + "\n".join(lines)
+    if len(body) > max_chars:
+        kept = [head]
+        for ln in lines:
+            if len("\n".join(kept) + "\n" + ln) > max_chars:
+                break
+            kept.append(ln)
+        kept.append(f"…另有 {len(lines) - (len(kept) - 1)} 份报告未列出")
+        body = "\n".join(kept)
+    return body
+
+
+_IMG_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+_DOC_SUFFIXES = {".txt", ".md", ".markdown", ".pdf", ".docx"}
+
+
+def _attachment_block(attachments: list[dict]) -> str:
+    """随消息上传的附件 → 注入对话上下文。
+
+    文档抽取正文（节选）供模型直接参考；图片仅登记（当前模型为文本模型，图片以文件名/链接标注）。
+    """
+    if not attachments:
+        return ""
+    lines: list[str] = []
+    for a in attachments:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name") or "未命名附件")
+        if str(a.get("kind")) == "doc":
+            text = str(a.get("text") or "").strip()
+            if text:
+                lines.append(f"【附件·文档《{name}》内容节选】\n{text[:6000]}")
+            else:
+                lines.append(f"- 用户上传了文档《{name}》（未能解析出文本，请按文件名理解用途）")
+        else:
+            lines.append(f"- 用户上传了图片《{name}》")
+    if not lines:
+        return ""
+    return (
+        "【用户随消息上传的附件】\n" + "\n".join(lines)
+        + "\n请优先结合上述附件内容完成用户的请求；附件内容优先于历史对话。"
+    )
+
+
 def _tool_trace(plan_outcome) -> list[dict]:
     """规划层调用轨迹 → 可持久化/可展示的精简结构（整条裁剪，避免截断成半行）。"""
     trace: list[dict] = []
@@ -324,61 +406,127 @@ def conversation_material(
         raise HTTPException(status_code=404, detail="会话不存在")
     ref = conv.context_ref or {}
     out: dict = {"agent_id": conv.agent_id, "context_ref": ref, "items": []}
-    if conv.agent_id == "report_ppt":
-        for rep in _load_reports(db, ref):
-            stats = rep.stats or {}
-            out["items"].append({
-                "kind": "report", "id": str(rep.id), "title": rep.title, "type": rep.type,
-                "period": _fmt_period(rep.period_start, rep.period_end),
-                "stat_keys": sorted(stats.keys())[:12], "stat_count": len(stats),
-            })
-    else:
-        class_id = ref.get("class_id") or ref.get("id")
-        if class_id:
-            try:
-                from sqlalchemy.orm import selectinload
+    # 素材按引用内容判定（不再按 Agent 写死）：报告总结的报告与班级评估可同时绑定，任何 Agent 都能用
+    for rep in _load_reports(db, ref):
+        stats = rep.stats or {}
+        out["items"].append({
+            "kind": "report", "id": str(rep.id), "title": rep.title or "未命名报告", "type": rep.type,
+            "period": _fmt_period(rep.period_start, rep.period_end),
+            "stat_keys": sorted(stats.keys())[:12], "stat_count": len(stats),
+            "snippet": _report_snippet(rep),
+        })
+    class_id = ref.get("class_id")
+    if not class_id and not _report_ids_from_ref(ref):
+        # 兼容旧班级引用：无报告 id 时把顶层 id 视为班级 id
+        class_id = ref.get("id")
+    if class_id:
+        try:
+            from sqlalchemy.orm import selectinload
 
-                from app.models.enrollment import Class
-                from app.models.evaluation import Evaluation
-                from app.models.user import Role
+            from app.models.enrollment import Class
+            from app.models.evaluation import Evaluation
+            from app.models.user import Role
 
-                cls = db.get(Class, uuid.UUID(str(class_id)), options=[selectinload(Class.students)])
-            except ValueError:
+            cls = db.get(Class, uuid.UUID(str(class_id)), options=[selectinload(Class.students)])
+        except (ValueError, TypeError):
+            cls = None
+        if cls is not None and getattr(user, "role", None) == Role.TEACHER:
+            if str(getattr(cls, "teacher_id", "") or "") != str(user.id):
                 cls = None
-            if cls is not None and getattr(user, "role", None) == Role.TEACHER:
-                if str(getattr(cls, "teacher_id", "") or "") != str(user.id):
-                    cls = None
-            if cls is not None:
-                ref_period = str(ref.get("period") or "")
-                if not ref_period and (ref.get("period_start") or ref.get("period_end")):
-                    ref_period = _fmt_period(ref.get("period_start"), ref.get("period_end"))
-                students = sorted(getattr(cls, "students", []) or [], key=lambda x: x.name)
-                done = 0
-                try:
-                    from sqlalchemy import select
+        if cls is not None:
+            ref_period = str(ref.get("period") or "")
+            if not ref_period and (ref.get("period_start") or ref.get("period_end")):
+                ref_period = _fmt_period(ref.get("period_start"), ref.get("period_end"))
+            students = sorted(getattr(cls, "students", []) or [], key=lambda x: x.name)
+            done = 0
+            try:
+                from sqlalchemy import select
 
-                    from app.models.evaluation import EvaluationStatus
+                from app.models.evaluation import EvaluationStatus
 
-                    ev_stmt = select(Evaluation.student_id, Evaluation.status)
-                    if str(getattr(user, "role", "")) == "teacher":
-                        ev_stmt = ev_stmt.where(Evaluation.teacher_id == user.id)
-                    seen: dict = {}
-                    for sid, st in db.execute(ev_stmt).all():
-                        if sid not in seen or st == EvaluationStatus.PUBLISHED.value:
-                            seen[sid] = st
-                    done = sum(1 for s in students if seen.get(s.id) == EvaluationStatus.PUBLISHED.value)
-                except Exception:
-                    pass
-                out["items"].append({
-                    "kind": "class", "id": str(cls.id), "title": cls.name,
-                    "period": ref_period or str(ref.get("title") or ""),
-                    "student_count": len(students),
-                    "eval_done": done,
-                    "students": [s.name for s in students[:30]],
-                })
+                ev_stmt = select(Evaluation.student_id, Evaluation.status)
+                if str(getattr(user, "role", "")) == "teacher":
+                    ev_stmt = ev_stmt.where(Evaluation.teacher_id == user.id)
+                seen: dict = {}
+                for sid, st in db.execute(ev_stmt).all():
+                    if sid not in seen or st == EvaluationStatus.PUBLISHED.value:
+                        seen[sid] = st
+                done = sum(1 for s in students if seen.get(s.id) == EvaluationStatus.PUBLISHED.value)
+            except Exception:
+                pass
+            out["items"].append({
+                "kind": "class", "id": str(cls.id), "title": cls.name,
+                "period": ref_period or str(ref.get("title") or ""),
+                "student_count": len(students),
+                "eval_done": done,
+                "students": [s.name for s in students[:30]],
+            })
     if not out["items"] and ref:
         out["items"].append({"kind": "context", "title": str(ref.get("title") or "业务上下文"), "id": ""})
     return out
+
+
+@router.post("/conversations/{conv_id}/attachments")
+def upload_conversation_attachment(
+    conv_id: uuid.UUID,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """对话附件上传：图片/文档暂存到 uploads/chat/<会话>/，文档解析出正文供本轮对话引用。
+
+    返回的结构（id/name/kind/url/size/text）由前端在发送消息时原样回传，
+    后端据此把附件内容注入对话上下文；URL 经 /uploads 静态服务可直接预览。
+    """
+    from app.core.config import get_settings
+    from app.services import rag as _rag
+
+    conv = agent_crud.get_conversation(db, conv_id=conv_id, owner_id=user.id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix in _IMG_SUFFIXES:
+        kind = "image"
+    elif suffix in _DOC_SUFFIXES:
+        kind = "doc"
+    else:
+        raise HTTPException(status_code=400, detail=f"暂不支持的文件类型：{suffix or '未知'}（支持图片与 txt/md/pdf/docx）")
+
+    settings = get_settings()
+    dest_dir = Path(settings.UPLOAD_DIR) / "chat" / str(conv.id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    stored = f"{uuid.uuid4().hex}{suffix}"
+    dest = dest_dir / stored
+    max_bytes = max(1, settings.MAX_UPLOAD_SIZE_MB) * 1024 * 1024
+    size = 0
+    try:
+        with dest.open("wb") as f:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(status_code=413, detail=f"文件超过 {settings.MAX_UPLOAD_SIZE_MB}MB 上限")
+                f.write(chunk)
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
+
+    text: str | None = None
+    if kind == "doc":
+        try:
+            text = (_rag.extract_text(str(dest), file.filename or stored) or "")[:20000]
+        except Exception:
+            text = None
+    return {
+        "id": stored.split(".")[0],
+        "name": file.filename or stored,
+        "kind": kind,
+        "url": f"/uploads/chat/{conv.id}/{stored}",
+        "size": size,
+        "text": text,
+    }
 
 
 @router.post("/conversations/{conv_id}/build-ppt")
@@ -414,12 +562,12 @@ def conversation_build_ppt(
     by_title = {str(s.get("title")): s for s in sections if isinstance(s, dict)}
     valid_kinds = ("cover", "stats", "table", "bar", "bullets", "prose", "end")
 
-    # 报告真实数据（统计快照 + 逐月明细）：先取数，后面数据类版式直接用数画图
+    # 报告真实数据（统计快照 + 逐月明细）：绑定报告就取数，数据类版式直接用数画图
     stats: dict = {}
     period_label = ""
     monthly: list[dict] = []
     breakdown: list[dict] | None = None
-    if conv.agent_id == "report_ppt":
+    if conv.agent_id == "report_ppt" or _report_ids_from_ref(conv.context_ref or {}):
         ref = conv.context_ref or {}
         reps = _load_reports(db, ref)
         if reps:
@@ -639,6 +787,7 @@ class ConversationChatIn(BaseModel):
     state: dict = {}
     use_rag: bool | None = Field(default=None, description="单条消息临时切换 RAG；缺省跟随会话开关")
     config_id: str | None = Field(default=None, description="Agent工作台切换模型：指定配置ID")
+    attachments: list[dict] = Field(default=[], description="随消息上传的附件：{id,name,kind,url,size,text}")
 
 
 @router.post("/conversations/{conv_id}/chat")
@@ -694,6 +843,17 @@ def conversation_chat(
             mem_block = (mem_block + "\n\n" + class_block).strip() if mem_block else class_block
     except Exception:
         pass
+    # 绑定报告 → 报告正文摘要自动回传（素材 tab 绑定「报告总结」后直接引用）
+    try:
+        report_block = _report_block(db, context_ref)
+        if report_block:
+            mem_block = (mem_block + "\n\n" + report_block).strip() if mem_block else report_block
+    except Exception:
+        pass
+    # 随消息上传的附件（文档正文/图片登记）注入本轮上下文
+    attachment_block = _attachment_block(body.attachments or [])
+    if attachment_block:
+        mem_block = (mem_block + "\n\n" + attachment_block).strip() if mem_block else attachment_block
     # 自定义 Agent 的 system_prompt 覆盖 + Skill/MCP 生效（per-agent ∪ 全局）：
     # Skill 以追加指令块注入；MCP 名单注入 + 运行时真实调用（规划→POST→回灌）。
     caps = agent_registry.effective_capabilities(db, user.id, conv.agent_id)
@@ -842,7 +1002,14 @@ def conversation_chat(
                 material=material,
             )
             if message.strip():
-                agent_crud.add_message(db, conversation_id=conv.id, role="user", content=message.strip())
+                att_meta = [
+                    {k: a.get(k) for k in ("id", "name", "kind", "url", "size")}
+                    for a in (body.attachments or []) if isinstance(a, dict)
+                ]
+                agent_crud.add_message(
+                    db, conversation_id=conv.id, role="user", content=message.strip(),
+                    citations=({"attachments": att_meta} if att_meta else None),
+                )
             if tool_names:
                 yield _frame({"tools_live": _tool_trace(plan_outcome)})
             with _llm_ctx.use_llm(resolved):

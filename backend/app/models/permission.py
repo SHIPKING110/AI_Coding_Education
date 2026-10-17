@@ -58,6 +58,7 @@ PERMISSION_KEYS: dict[str, str] = {
     "package_off": "课时包-下架",
     "assignment_ai": "AI习题-AI出题",
     "assignment_create": "AI习题-新建作业",
+    "agent_skill_import": "Agent工作台-导入ZIP技能包",
     "settings_manage": "设置-全部设置管理",
     "settings_tab_personalize": "设置-个性化设置（可见与操作）",
     "settings_tab_model": "设置-模型配置（可见与操作）",
@@ -108,6 +109,7 @@ KEY_DEFAULTS: dict[str, bool] = {
     "package_off": False,
     "assignment_ai": True,
     "assignment_create": True,
+    "agent_skill_import": True,
     "settings_manage": False,
     "settings_tab_personalize": False,
     "settings_tab_model": False,
@@ -163,6 +165,7 @@ class TeacherPermission(Base):
     package_off: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     assignment_ai: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     assignment_create: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    agent_skill_import: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     settings_manage: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     settings_tab_personalize: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     settings_tab_model: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")

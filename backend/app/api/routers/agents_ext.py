@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_teacher_permission
 from app.core.database import get_db
 from app.crud import agent_ext as ext_crud
 from app.models.user import User
@@ -28,17 +28,29 @@ def _agent_out(c) -> dict:
     }
 
 
-def _mcp_out(m) -> dict:
-    return {
+def _mcp_out(m, *, collected: bool = False, mine: bool = False) -> dict:
+    out = {
         "id": str(m.id), "name": m.name, "kind": m.kind, "endpoint": m.endpoint,
         "description": m.description, "config": m.config or {}, "enabled": m.enabled,
+        "visibility": getattr(m, "visibility", "private") or "private",
+        "collected": collected, "mine": mine,
+        "collected_from_plaza": bool(getattr(m, "source_mcp_id", None)),
     }
+    # 隐私保护：非发布者一律不下发 endpoint / config（广场上别人只能收录为模板，接入地址与密钥由收录者自己填）
+    if not mine:
+        has_ep = bool((m.endpoint or "").strip())
+        out["endpoint"] = ""
+        out["config"] = {}
+        out["endpoint_hidden"] = has_ep
+    return out
 
 
-def _skill_out(s) -> dict:
+def _skill_out(s, *, collected: bool = False, mine: bool = False) -> dict:
     return {
         "id": str(s.id), "name": s.name, "description": s.description,
         "content": s.content, "files": list(s.files or []), "enabled": s.enabled,
+        "visibility": getattr(s, "visibility", "private") or "private",
+        "collected": collected, "mine": mine,
     }
 
 
@@ -110,7 +122,7 @@ class McpIn(BaseModel):
 
 @router.get("/mcps")
 def list_mcps(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return {"items": [_mcp_out(m) for m in ext_crud.list_mcps(db, owner_id=user.id)]}
+    return {"items": [_mcp_out(m, mine=True) for m in ext_crud.list_mcps(db, owner_id=user.id)]}
 
 
 @router.post("/mcps", status_code=status.HTTP_201_CREATED)
@@ -135,6 +147,53 @@ def delete_mcp(mcp_id: uuid.UUID, db: Session = Depends(get_db), user: User = De
     return {"ok": True}
 
 
+@router.post("/mcps/{mcp_id}/publish")
+def publish_mcp(mcp_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """发布 MCP 到广场：其他教师可收录引用（直接用同一 endpoint/config）。"""
+    m = ext_crud.get_mcp(db, owner_id=user.id, mcp_id=mcp_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="MCP 不存在")
+    if not (m.endpoint or "").strip():
+        raise HTTPException(status_code=400, detail="MCP 未填写 endpoint，暂不能发布")
+    return _mcp_out(ext_crud.set_mcp_visibility(db, m, "plaza"), mine=True)
+
+
+@router.post("/mcps/{mcp_id}/unpublish")
+def unpublish_mcp(mcp_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    m = ext_crud.get_mcp(db, owner_id=user.id, mcp_id=mcp_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="MCP 不存在")
+    return _mcp_out(ext_crud.set_mcp_visibility(db, m, "private"), mine=True)
+
+
+@router.get("/mcps/plaza")
+def list_plaza_mcps(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """广场 MCP 模板列表：已发布 + 启用中；附「是否已收录」与是否自己发布。"""
+    return {"items": [
+        _mcp_out(m, collected=ext_crud.has_adopted_mcp(db, user_id=user.id, source_mcp_id=m.id), mine=(m.owner_id == user.id))
+        for m in ext_crud.list_plaza_mcps(db)
+    ]}
+
+
+@router.post("/mcps/plaza/{mcp_id}/collect")
+def collect_plaza_mcp(mcp_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """收录广场 MCP：复制为本人私有 MCP（不含作者的 endpoint/config，需本人自行填写）。"""
+    m = ext_crud.get_mcp_any(db, mcp_id=mcp_id)
+    if m is None or getattr(m, "visibility", "private") != "plaza" or not m.enabled:
+        raise HTTPException(status_code=404, detail="广场 MCP 不存在或已下架")
+    if m.owner_id == user.id:
+        return {"ok": True, "mine": True}
+    copy = ext_crud.adopt_plaza_mcp(db, user_id=user.id, source=m)
+    return {"ok": True, "item": _mcp_out(copy, mine=True)}
+
+
+@router.delete("/mcps/plaza/{mcp_id}/collect")
+def uncollect_plaza_mcp(mcp_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """取消收录：删除由该广场 MCP 复制而来的副本（含本人填写的配置）。"""
+    ext_crud.remove_adopted_mcp(db, user_id=user.id, source_mcp_id=mcp_id)
+    return {"ok": True}
+
+
 # ---------------- Skill ----------------
 
 class SkillIn(BaseModel):
@@ -146,7 +205,11 @@ class SkillIn(BaseModel):
 
 @router.get("/skills")
 def list_skills(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return {"items": [_skill_out(s) for s in ext_crud.list_skills(db, owner_id=user.id)]}
+    collected = set(str(x) for x in ext_crud.collected_skill_ids(db, user_id=user.id))
+    return {"items": [
+        _skill_out(s, collected=(str(s.id) in collected), mine=True)
+        for s in ext_crud.list_skills(db, owner_id=user.id)
+    ]}
 
 
 @router.post("/skills", status_code=status.HTTP_201_CREATED)
@@ -172,6 +235,62 @@ def delete_skill(skill_id: uuid.UUID, db: Session = Depends(get_db), user: User 
         from app.services import skill_bundle as _bundle
 
         _bundle.remove_bundle(user.id, skill_id)
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@router.post("/skills/{skill_id}/publish")
+def publish_skill(skill_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """发布 Skill 到广场：其他教师可收录引用（指令 + 文件清单，文件仍读作者目录）。"""
+    s = ext_crud.get_skill(db, owner_id=user.id, skill_id=skill_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Skill 不存在")
+    if not ((s.content or "").strip() or (s.files or [])):
+        raise HTTPException(status_code=400, detail="Skill 暂无可用内容（指令与文件包均为空），暂不能发布")
+    return _skill_out(ext_crud.set_skill_visibility(db, s, "plaza"), mine=True)
+
+
+@router.post("/skills/{skill_id}/unpublish")
+def unpublish_skill(skill_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    s = ext_crud.get_skill(db, owner_id=user.id, skill_id=skill_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="Skill 不存在")
+    return _skill_out(ext_crud.set_skill_visibility(db, s, "private"), mine=True)
+
+
+@router.get("/skills/plaza")
+def list_plaza_skills(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """广场 Skill 列表：已发布 + 启用中；附收录态与是否自己发布。"""
+    collected = set(str(x) for x in ext_crud.collected_skill_ids(db, user_id=user.id))
+    return {"items": [
+        _skill_out(s, collected=(str(s.id) in collected), mine=(s.owner_id == user.id))
+        for s in ext_crud.list_plaza_skills(db)
+    ]}
+
+
+@router.post("/skills/plaza/{skill_id}/collect")
+def collect_plaza_skill(skill_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    s = ext_crud.get_skill_any(db, skill_id=skill_id)
+    if s is None or getattr(s, "visibility", "private") != "plaza" or not s.enabled:
+        raise HTTPException(status_code=404, detail="广场 Skill 不存在或已下架")
+    if s.owner_id == user.id:
+        return {"ok": True, "mine": True}
+    ext_crud.collect_skill(db, user_id=user.id, skill_id=s.id)
+    return {"ok": True}
+
+
+@router.delete("/skills/plaza/{skill_id}/collect")
+def uncollect_plaza_skill(skill_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    ext_crud.uncollect_skill(db, user_id=user.id, skill_id=skill_id)
+    # 取消收录顺带从全局默认里摘掉，避免悬空 id 常驻
+    try:
+        g = ext_crud.get_global_setting(db, owner_id=user.id)
+        if g is not None and str(skill_id) in list(g.default_skill_ids or []):
+            ext_crud.upsert_global_setting(
+                db, owner_id=user.id,
+                default_skill_ids=[x for x in (g.default_skill_ids or []) if str(x) != str(skill_id)],
+            )
     except Exception:
         pass
     return {"ok": True}
@@ -256,7 +375,8 @@ def put_global(body: GlobalIn, db: Session = Depends(get_db), user: User = Depen
 
 @router.post("/skills/import", status_code=status.HTTP_201_CREATED)
 def import_skill_bundle(
-    file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(get_current_user),
+    file: UploadFile = File(...), db: Session = Depends(get_db),
+    user: User = Depends(require_teacher_permission("agent_skill_import")),
 ):
     """直接上传 zip 建 Skill（免预建）：校验→建记录→解压落盘→SKILL.md 回填 content。"""
     from app.services import skill_bundle as _bundle

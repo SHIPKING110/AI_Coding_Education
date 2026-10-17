@@ -50,6 +50,23 @@ class AgentMCP(Base):
     description: Mapped[str] = mapped_column(String(256), default="")
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 可见性：private（仅自己）/ plaza（发布到广场，其他教师可收录引用）
+    visibility: Mapped[str] = mapped_column(String(16), default="private", index=True)
+    # 收录来源：本行若由「广场收录」复制而来，记录模板来源 id（endpoint/config 由收录者自己填）
+    source_mcp_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentMCPCollection(Base):
+    """收录：教师 ↔ 广场 MCP 的引用关系（不复制配置，作者下架即失效）。"""
+
+    __tablename__ = "agent_mcp_collections"
+
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    mcp_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_mcps.id", ondelete="CASCADE"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -63,7 +80,23 @@ class AgentSkill(Base):
     content: Mapped[str] = mapped_column(Text, default="")
     files: Mapped[list] = mapped_column(JSON, default=list)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 可见性：private（仅自己）/ plaza（发布到广场，其他教师可收录引用）
+    visibility: Mapped[str] = mapped_column(String(16), default="private", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentSkillCollection(Base):
+    """收录：教师 ↔ 广场 Skill 的引用关系（不复制文件，作者下架即失效）。"""
+
+    __tablename__ = "agent_skill_collections"
+
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    skill_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_skills.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
 
 
 class AgentGlobalSetting(Base):
@@ -78,7 +111,7 @@ class AgentGlobalSetting(Base):
     )
 
 
-__all__ = ["CustomAgent", "AgentMCP", "AgentSkill", "AgentGlobalSetting", "SandboxSetting"]
+__all__ = ["CustomAgent", "AgentMCP", "AgentMCPCollection", "AgentSkill", "AgentSkillCollection", "AgentGlobalSetting", "SandboxSetting"]
 
 
 class SandboxSetting(Base):

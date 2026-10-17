@@ -4,7 +4,7 @@ from app.models.agent import (
     AgentMemory,
     AgentMessage,
 )
-from app.models.agent_ext import AgentGlobalSetting, AgentMCP, AgentSkill, CustomAgent
+from app.models.agent_ext import AgentGlobalSetting, AgentMCP, AgentMCPCollection, AgentSkill, AgentSkillCollection, CustomAgent
 from app.models.assignment import (
     Assignment,
     AssignmentFolder,
@@ -53,7 +53,9 @@ __all__ = [
     "AgentMessage",
     "AgentGlobalSetting",
     "AgentMCP",
+    "AgentMCPCollection",
     "AgentSkill",
+    "AgentSkillCollection",
     "CustomAgent",
     "Assignment",
     "AssignmentFolder",
