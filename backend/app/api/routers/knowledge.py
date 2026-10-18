@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_teacher_permission
 from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
 from app.crud import knowledge as kb_crud
@@ -76,7 +76,7 @@ def upload_document(
     title: str = Form(...),
     description: str = Form(default=""),
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_teacher_permission("agent_doc_upload")),
 ) -> dict:
     """上传文档（标题必填，描述必填-广场工整性要求）：解析与向量化在后台进行。"""
     if not (title or "").strip():

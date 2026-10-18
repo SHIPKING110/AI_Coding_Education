@@ -47,6 +47,7 @@ class PermissionUpdate(BaseModel):
     assignment_ai: bool | None = None
     assignment_create: bool | None = None
     agent_skill_import: bool | None = None
+    agent_doc_upload: bool | None = None
     order_visible: bool | None = None
     settings_manage: bool | None = None
     settings_tab_personalize: bool | None = None

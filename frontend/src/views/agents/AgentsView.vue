@@ -63,6 +63,11 @@ const canImportSkill = computed(() => {
   if (auth.user?.role !== 'teacher') return true
   return myPerms.value.agent_skill_import !== false
 })
+// 上传并入库（我的知识库）权限：agent_doc_upload
+const canUploadDoc = computed(() => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value.agent_doc_upload !== false
+})
 const showNoPerm = ref(false)
 const noPermText = ref('')
 function showNoPermDialog(text: string) {
@@ -1208,6 +1213,10 @@ async function doToggleSearch(d: KnowledgeDoc) {
 }
 
 async function doUpload() {
+  if (!canUploadDoc.value) {
+    showNoPermDialog('暂无「上传知识库文档」权限，请联系管理员在「权限管理」中开通。')
+    return
+  }
   if (!upFile.value || !upTitle.value.trim() || !upDesc.value.trim() || uploading.value) return
   uploading.value = true
   kbError.value = ''
@@ -1219,7 +1228,12 @@ async function doUpload() {
     await loadKb()
     startKbPoll()
   } catch (e: unknown) {
-    kbError.value = e instanceof Error ? e.message : '上传失败'
+    const status = (e as { response?: { status?: number } })?.response?.status
+    if (status === 403) {
+      showNoPermDialog('暂无「上传知识库文档」权限，请联系管理员在「权限管理」中开通。')
+    } else {
+      kbError.value = e instanceof Error ? e.message : '上传失败'
+    }
   } finally {
     uploading.value = false
   }
@@ -2401,6 +2415,7 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
               <button class="btn primary" :disabled="uploading || !upFile || !upTitle.trim() || !upDesc.trim()" @click="doUpload">
                 {{ uploading ? '上传中…' : '上传并入库' }}
               </button>
+              <p v-if="!canUploadDoc" class="pick-hint">当前账号暂无「上传知识库文档」权限，点击上传会提示并需管理员开通。</p>
             </div>
           </div>
           <p v-if="kbError" class="error">{{ kbError }}</p>
