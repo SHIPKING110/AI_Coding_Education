@@ -834,7 +834,9 @@ def conversation_chat(
         if reps:
             material = ppt_chat.combined_report_material(db, reps)
 
-    mem_ctx = agent_memory.build_memory_context(db, owner_id=user.id, agent_id=conv.agent_id, conversation_id=conv.id)
+    mem_ctx = agent_memory.build_memory_context(
+        db, owner_id=user.id, agent_id=conv.agent_id, conversation_id=conv.id, query=message
+    )
     mem_block = agent_memory.memory_prompt_block(mem_ctx)
     # 绑定班级 → 学员评估正文自动回传进对话（任何 Agent 都生效，无需再调工具）
     try:
@@ -1110,6 +1112,19 @@ def conversation_chat(
                 agent_crud.update_conversation(db, conv, **updates)
             else:
                 agent_crud.touch_conversation(db, conv)
+        except Exception:
+            pass
+        try:
+            agent_memory.record_working_turn(
+                db,
+                owner_id=user.id,
+                agent_id=conv.agent_id,
+                conversation_id=conv.id,
+                user_text=message,
+                assistant_text=full,
+                stage=final_stage,
+                tools=tool_trace or [],
+            )
         except Exception:
             pass
         try:
