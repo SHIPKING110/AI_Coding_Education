@@ -42,7 +42,6 @@ const form = ref<LLMConfigIn & { showKey?: boolean }>({
   base_url: '',
   api_key: '',
   model: '',
-  embed_model: '',
   make_default: false,
 })
 const saving = ref(false)
@@ -70,13 +69,13 @@ async function load() {
 
 function openCreate() {
   editing.value = null
-  form.value = { name: '', base_url: '', api_key: '', model: '', embed_model: '', make_default: items.value.length === 0 }
+  form.value = { name: '', base_url: '', api_key: '', model: '', make_default: items.value.length === 0 }
   showForm.value = true
 }
 
 function openEdit(c: LLMConfigOut) {
   editing.value = c
-  form.value = { name: c.name, base_url: c.base_url, api_key: '', model: c.model, embed_model: c.embed_model || '', make_default: c.is_default }
+  form.value = { name: c.name, base_url: c.base_url, api_key: '', model: c.model, make_default: c.is_default }
   showForm.value = true
 }
 
@@ -96,7 +95,6 @@ async function save() {
         name: form.value.name,
         base_url: form.value.base_url,
         model: form.value.model,
-        embed_model: form.value.embed_model || null,
         make_default: form.value.make_default,
       }
       if (form.value.api_key.trim()) payload.api_key = form.value.api_key
@@ -325,7 +323,7 @@ onMounted(() => {
       <div class="card-head">
         <div>
           <h2>我的模型配置</h2>
-          <p class="muted">每人可配多个（接口地址 + API Key + 模型名）。Key 落库加密、只显示掩码；下方按模块选用。</p>
+          <p class="muted">每人可配多个（接口地址 + API Key + 对话模型名）。Key 落库加密、只显示掩码；下方按模块选用。知识库向量化（Embedding）统一由下面「检索 · Embedding」板块配置，此处不再重复填写。</p>
         </div>
         <button class="btn primary sm" @click="openCreate">＋ 添加配置</button>
       </div>
@@ -338,7 +336,7 @@ onMounted(() => {
               <strong>{{ c.name }}</strong>
               <span v-if="c.is_default" class="def-tag">默认</span>
             </div>
-            <div class="cfg-meta">{{ c.base_url }} · 模型 {{ c.model }}<span v-if="c.embed_model"> · embedding {{ c.embed_model }}</span></div>
+            <div class="cfg-meta">{{ c.base_url }} · 模型 {{ c.model }}</div>
             <div v-if="testResult && testResult.id === c.id" class="test-line" :class="{ ok: testResult.ok, bad: !testResult.ok }">
               {{ testResult.ok ? '✓' : '✗' }} {{ testResult.text }}
             </div>
@@ -431,9 +429,6 @@ onMounted(() => {
           <label>接口地址（OpenAI 兼容）<input v-model="form.base_url" placeholder="https://api.deepseek.com" /></label>
           <label>API Key<input v-model="form.api_key" :type="form.showKey ? 'text' : 'password'" :placeholder="editing ? '留空则不修改' : 'sk-…'" /></label>
           <label>模型名称<input v-model="form.model" placeholder="如：deepseek-chat" /></label>
-          <label class="span2">Embedding 模型（可选，用于知识库检索；DeepSeek 无 embedding 接口，需另配如硅基流动/Zhipu）
-            <input v-model="form.embed_model" placeholder="如千问 text-embedding-v3；留空则知识库检索不可用" />
-          </label>
           <label class="check"><input v-model="form.make_default" type="checkbox" /> 设为默认配置</label>
           <label class="check"><input v-model="form.showKey" type="checkbox" /> 显示 Key 明文</label>
         </div>

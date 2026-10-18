@@ -88,7 +88,12 @@ def memory_prompt_block(ctx: dict) -> str:
         if wm.get("summary"):
             lines.append(f"更早：{wm['summary'][:200]}")
         for i, s in enumerate(wm.get("steps") or [], 1):
-            tools = "、".join(s.get("tools") or [])
+            raw_tools = s.get("tools") or []
+            tool_names = [
+                str(t.get("tool") or t.get("name") or "") if isinstance(t, dict) else str(t)
+                for t in raw_tools
+            ]
+            tools = "、".join(n for n in tool_names if n)
             tail = f"（工具 {tools}）" if tools else ""
             result = (s.get("result") or "")[:80]
             lines.append(f"{i}. {s.get('ask', '')[:80]}{tail}" + (f" → {result}" if result else ""))
@@ -214,7 +219,19 @@ def record_working_turn(
     reply = (assistant_text or "").strip()
     if len(text) < 4 or not reply:
         return
-    tools = [t for t in (tools or []) if t][:6]
+    flat: list[str] = []
+    for t in (tools or []):
+        if isinstance(t, str):
+            flat.append(t)
+        elif isinstance(t, dict):
+            name = str(t.get("tool") or t.get("name") or "").strip()
+            if name:
+                flat.append(("✅ " if t.get("ok") else "❌ ") + name + ("" if t.get("ok") else f"（{t.get('error') or '失败'}）"))
+        else:
+            s = str(t).strip()
+            if s:
+                flat.append(s)
+    tools = flat[:6]
     step = {
         "ask": text[:160],
         "stage": stage or "",

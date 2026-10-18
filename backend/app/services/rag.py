@@ -207,8 +207,12 @@ def _api_embeddings(resolved):
     return client
 
 
-# —— 向量化并发/批量/退避（应对 API 限流） ——
-EMBED_BATCH = 32
+# —— 向量化并发/批量/退避（应对 API 限流与各家 batch size 限制） ——
+# EMBED_BATCH 只是「首轮尝试」的上限；若厂商拒绝（batch size is invalid），
+# _embed_batch_remote 会自适应二分拆批，故这里无需按厂商写死。
+EMBED_BATCH = 16
+# 单批字符总量上限：多数 embedding 接口对单请求总 token 也有上限，超了同样报 invalid
+EMBED_MAX_CHARS_PER_BATCH = 8000
 EMBED_CONCURRENCY = 4
 EMBED_MAX_RETRY = 3
 EMBED_BACKOFF_BASE = 0.8
@@ -219,8 +223,26 @@ def _is_retryable(exc: Exception) -> bool:
     return any(k in s for k in ("429", "rate", "timeout", "timed out", "overload", "500", "502", "503", "504", "connection", "temporar"))
 
 
-def _embed_batch_remote(batch: list[str], client) -> list[list[float]]:
-    """一批文本的 embedding，失败按指数退避重试。"""
+def _is_batch_size_error(exc: Exception) -> bool:
+    """识别「单批条数/总长度超限」类参数错误（各厂商限制不同，需自适应拆批）。
+
+    例：通义/百炼 InternalError.Algo.InvalidParameter: Value error, batch size is invalid
+        部分 embedding 接口单批最多 N 条，或单批总字符/token 超上限。
+    """
+    s = str(exc).lower()
+    batchish = ("batch" in s) or ("invalidparameter" in s) or ("invalid parameter" in s) or ("invalid_parameter" in s)
+    sizeish = ("batch size" in s) or ("too large" in s) or ("too long" in s) or ("exceed" in s) \
+        or ("invalid" in s) or ("batch" in s and ("size" in s or "number" in s or "count" in s))
+    return batchish and sizeish
+
+
+def _embed_batch_remote(batch: list[str], client, _depth: int = 0) -> list[list[float]]:
+    """一批文本的 embedding。
+
+    - 批大小/参数非法 → **二分拆批重试**（自适应各厂商限制，不写死条数）；
+    - 限流/超时 → 指数退避重试；
+    - 单条仍失败 → 上抛（交由上层 LLMConfigError 友好报错）。
+    """
     delay = EMBED_BACKOFF_BASE
     last: Exception | None = None
     for attempt in range(EMBED_MAX_RETRY):
@@ -229,6 +251,13 @@ def _embed_batch_remote(batch: list[str], client) -> list[list[float]]:
             return [[float(x) for x in v] for v in vecs]
         except Exception as e:  # noqa: BLE001
             last = e
+            # 批过大：二分后分别重试（递归），直到能通过
+            if _is_batch_size_error(e) and len(batch) > 1 and _depth < 8:
+                mid = len(batch) // 2
+                return (
+                    _embed_batch_remote(batch[:mid], client, _depth + 1)
+                    + _embed_batch_remote(batch[mid:], client, _depth + 1)
+                )
             if attempt == EMBED_MAX_RETRY - 1 or not _is_retryable(e):
                 raise
             # 指数退避 + 抖动，避免并发重试打爆限流
@@ -236,9 +265,26 @@ def _embed_batch_remote(batch: list[str], client) -> list[list[float]]:
     raise last  # type: ignore[misc]
 
 
+def _make_batches(texts: list[str]) -> list[list[str]]:
+    """按「条数上限 + 单批字符总量」切批，避免触发厂商的 batch size / 长度限制。"""
+    batches: list[list[str]] = []
+    cur: list[str] = []
+    cur_chars = 0
+    for t in texts:
+        n = len(t or "")
+        if cur and (len(cur) >= EMBED_BATCH or cur_chars + n > EMBED_MAX_CHARS_PER_BATCH):
+            batches.append(cur)
+            cur, cur_chars = [], 0
+        cur.append(t)
+        cur_chars += n
+    if cur:
+        batches.append(cur)
+    return batches
+
+
 def _embed_remote_concurrent(texts: list[str], resolved) -> list[list[float]]:
-    """分批 + 多线程并发 embedding（限流友好）。"""
-    batches = [texts[i : i + EMBED_BATCH] for i in range(0, len(texts), EMBED_BATCH)]
+    """分批 + 多线程并发 embedding（限流友好；批大小由 _make_batches 与自适应拆批兜底）。"""
+    batches = _make_batches(list(texts))
     client = _api_embeddings(resolved)
     out: list[list[float]] = []
     if len(batches) == 1:
