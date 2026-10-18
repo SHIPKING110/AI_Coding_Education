@@ -757,6 +757,56 @@ def _rerank_on_success() -> None:
         _RERANK_CIRCUIT_UNTIL = 0.0
 
 
+def _rerank_url_candidates(base: str) -> list[str]:
+    """生成候选 rerank 端点，按「最可能通」排序。
+
+    阿里百炼的坑（实测 2026）：
+    - 对话模型网关 `.../compatible-mode/v1` **不提供 rerank**（/rerank、/reranks 都 404）；
+    - rerank 在 **`.../compatible-api/v1/reranks`**（compatible-**api** 且路径复数 /reranks）；
+    - 或 DashScope 原生 `.../api/v1/services/rerank/text-rerank/text-rerank`。
+    用户通常只填 compatible-mode 的 base，故这里自动做网关/路径变换，无需填两遍。
+    其他厂商（硅基流动/智谱）用 /rerank，反之。
+    """
+    low = (base or "").lower()
+    is_bailian = ("aliyuncs.com" in low) or ("dashscope" in low) or ("maas." in low)
+    cands: list[str] = []
+    if is_bailian:
+        # compatible-mode → compatible-api 网关（rerank 真正所在）
+        if "compatible-mode" in base:
+            cands.append(base.replace("compatible-mode", "compatible-api") + "/reranks")
+        if "compatible-api" in base:
+            cands.append(base + "/reranks")
+        # 用户可能已填对，原样再试
+        cands.append(base + "/reranks")
+        cands.append(base + "/rerank")
+        # DashScope 原生兜底（host 根 + 固定服务路径）
+        host = base.split("/compatible")[0].split("/api/v1")[0].rstrip("/")
+        cands.append(host + "/api/v1/services/rerank/text-rerank/text-rerank")
+    else:
+        cands.append(base + "/rerank")
+        cands.append(base + "/reranks")
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in cands:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _parse_rerank_results(data: dict) -> list:
+    """兼容三种 rerank 响应格式，统一取 results 列表。"""
+    if not isinstance(data, dict):
+        return []
+    res = data.get("results") or data.get("data")  # OpenAI 兼容
+    if res:
+        return res
+    out = data.get("output")  # DashScope 原生 {"output":{"results":[...]}}
+    if isinstance(out, dict) and out.get("results"):
+        return out["results"]
+    return []
+
+
 def rerank_documents(query: str, documents: list[str], resolved) -> list[int]:
     """调 rerank 模型，返回按相关度降序的原文下标。失败抛异常由上层降级。"""
     if not documents:
@@ -771,7 +821,6 @@ def rerank_documents(query: str, documents: list[str], resolved) -> list[int]:
     import httpx
 
     base = (resolved.base_url or "").rstrip("/")
-    url = f"{base}/rerank"
     payload = {
         "model": resolved.model,
         "query": query,
@@ -780,11 +829,28 @@ def rerank_documents(query: str, documents: list[str], resolved) -> list[int]:
         "return_documents": False,
     }
     headers = {"Authorization": f"Bearer {resolved.api_key}"}
+    tried: list[str] = []
+    last: Exception | None = None
+    data: dict | None = None
     with httpx.Client(timeout=RERANK_TIMEOUT_S) as client:
-        r = client.post(url, json=payload, headers=headers)
-        r.raise_for_status()
-        data = r.json()
-    results = data.get("results") or data.get("data") or []
+        for url in _rerank_url_candidates(base):
+            tried.append(url)
+            try:
+                r = client.post(url, json=payload, headers=headers)
+                if r.status_code == 404:
+                    last = Exception("404")
+                    continue  # 路径/网关不对，试下一个
+                r.raise_for_status()
+                data = r.json()
+                break
+            except httpx.HTTPStatusError as e:
+                if e.response is not None and e.response.status_code == 404:
+                    last = e
+                    continue
+                raise
+        else:
+            raise last or Exception("rerank 端点未找到，已尝试：" + "；".join(tried))
+    results = _parse_rerank_results(data or {})
     order = [int(x.get("index", i)) for i, x in enumerate(results)]
     # 兼容只返回 top_n 子集：补齐剩余，保持稳定
     for i in range(len(documents)):

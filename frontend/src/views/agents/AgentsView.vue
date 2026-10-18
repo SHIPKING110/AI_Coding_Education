@@ -972,6 +972,7 @@ async function send(preset?: { text: string; stage?: string }) {
   let doneHasSpec = false
   let doneRagAuto = false
   let doneTitle: string | undefined
+  let doneHits: { title: string; text: string; similarity?: number }[] | undefined
   let doneToolTrace: { seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[] | undefined
   let doneToolRounds = 0
   let doneToolDegraded = false
@@ -1001,6 +1002,7 @@ async function send(preset?: { text: string; stage?: string }) {
         doneHasSpec = !!info.has_spec
         doneRagAuto = !!info.rag_auto
         doneTitle = info.title
+        doneHits = info.hits?.length ? info.hits : undefined
         doneToolTrace = info.tool_trace
         doneToolRounds = info.tool_rounds ?? 0
         doneToolDegraded = !!info.tool_degraded
@@ -1034,10 +1036,11 @@ async function send(preset?: { text: string; stage?: string }) {
       raw: full,
       options: doneOptions ?? null,
       spec: null,
-      citations: (doneToolTrace?.length || doneMcpTrace?.length || doneRagAuto)
+      citations: (doneToolTrace?.length || doneMcpTrace?.length || doneRagAuto || doneHits?.length)
         ? {
           tools: doneToolTrace, rounds: doneToolRounds, degraded: doneToolDegraded,
           mcp_trace: doneMcpTrace, ...(doneRagAuto ? { rag_auto: true } : {}),
+          ...(doneHits?.length ? { hits: doneHits } : {}),
         }
         : undefined,
     })
@@ -1063,10 +1066,11 @@ async function send(preset?: { text: string; stage?: string }) {
       if (full.trim()) {
         messages.value.push({
           role: 'assistant', content: stripJsonBlocks(full), raw: full, options: doneOptions ?? null,
-          citations: (doneToolTrace?.length || doneMcpTrace?.length || doneRagAuto)
+          citations: (doneToolTrace?.length || doneMcpTrace?.length || doneRagAuto || doneHits?.length)
             ? {
               tools: doneToolTrace, rounds: doneToolRounds, mcp_trace: doneMcpTrace,
               ...(doneRagAuto ? { rag_auto: true } : {}),
+              ...(doneHits?.length ? { hits: doneHits } : {}),
             }
             : undefined,
         })

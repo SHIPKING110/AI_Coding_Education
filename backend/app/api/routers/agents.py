@@ -1140,6 +1140,12 @@ def conversation_chat(
             "tool_degraded": plan_outcome.degraded,
             "mcp_trace": mcp_trace,
             "rag_auto": rag_auto,
+            # 本次检索命中：随 done 帧发给前端即时渲染（免刷新）
+            "hits": [
+                {"title": h.get("title", ""), "text": (h.get("text") or "")[:400],
+                 "similarity": h.get("similarity", 0)}
+                for h in (citations or {}).get("hits", [])
+            ] if citations and (citations or {}).get("hits") else [],
         })
 
     return StreamingResponse(
