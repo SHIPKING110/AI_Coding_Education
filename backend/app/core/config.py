@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = ""
     # RAG 知识库 embedding：留空则沿用各教师自配 embedding；两者都无时 RAG 不可用
     LLM_EMBED_MODEL: str = ""
+    # 知识库增量同步：后台轮询间隔（秒，0=关闭）。检测源文件新增/变更 → 自动重索引；
+    # 未变更文档按内容哈希跳过，不重复消耗 Token。
+    KNOWLEDGE_SYNC_INTERVAL: int = 900
 
     # 智能助手业务工具规划层预算（多轮工具调用的稳定性护栏）
     AGENT_TOOL_MAX_ROUNDS: int = 4       # 最多规划-执行轮数

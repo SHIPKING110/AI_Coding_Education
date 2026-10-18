@@ -82,6 +82,12 @@ def usable_doc_ids(db: Session, *, doc_ids: list[str]) -> set[str]:
     return uniq & ready
 
 
+def all_document_ids(db: Session) -> list[str]:
+    """数据库中仍存在的全部文档 id（含未就绪/停用）——用于僵尸向量清理比对。"""
+    rows = db.scalars(select(KnowledgeDocument.id)).all()
+    return [str(r) for r in rows]
+
+
 def mark_indexing(db: Session, doc: KnowledgeDocument) -> KnowledgeDocument:
     """重试索引：回到 pending，清空旧错误。"""
     doc.status = "pending"
@@ -118,6 +124,25 @@ def mark_indexed(db: Session, *, doc_id, chunk_count: int, error: str | None = N
 def delete_document(db: Session, doc: KnowledgeDocument) -> None:
     db.delete(doc)
     db.commit()
+
+
+def mark_failed(db: Session, doc: KnowledgeDocument, error: str) -> None:
+    """将文档标记为失败（用于增量同步时源文件丢失等场景）。"""
+    doc.status = "failed"
+    doc.error = error
+    doc.extra = {k: v for k, v in dict(doc.extra or {}).items() if k != "progress"}
+    db.commit()
+
+
+def list_all_documents(db: Session, *, limit: int = 1000) -> list[KnowledgeDocument]:
+    """全部文档（含未就绪/停用）——供增量同步扫描。按更新时间升序，优先处理旧的。"""
+    return list(
+        db.scalars(
+            select(KnowledgeDocument)
+            .order_by(KnowledgeDocument.updated_at.asc())
+            .limit(limit)
+        ).all()
+    )
 
 
 def collected_doc_ids(db: Session, *, user_id) -> list[uuid.UUID]:

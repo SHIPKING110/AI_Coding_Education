@@ -32,6 +32,32 @@ async def _order_expiry_sweeper() -> None:
             continue
 
 
+async def _knowledge_sync_sweeper() -> None:
+    """后台增量同步：定期检测知识库源文件新增/变更，自动触发重索引流水线。
+
+    未变更的文档按内容哈希跳过（省 Token）；源文件丢失则清理向量防僵尸污染。
+    间隔由 KNOWLEDGE_SYNC_INTERVAL 控制（秒，<=0 关闭）。
+    """
+    from asyncio import sleep as _sleep
+
+    from app.services import rag as rag_svc
+
+    interval = int(getattr(settings, "KNOWLEDGE_SYNC_INTERVAL", 0) or 0)
+    if interval <= 0:
+        return
+    # 启动后先等一轮，避开启动高峰
+    await _sleep(min(interval, 120))
+    while True:
+        try:
+            await asyncio.to_thread(rag_svc.sync_changed_documents)
+        except Exception:
+            pass
+        try:
+            await _sleep(interval)
+        except Exception:
+            continue
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     import asyncio
@@ -41,10 +67,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     ensure_business_schema(engine)
     task = asyncio.create_task(_order_expiry_sweeper())
+    sync_task = asyncio.create_task(_knowledge_sync_sweeper())
     try:
         yield
     finally:
         task.cancel()
+        sync_task.cancel()
 
 app = FastAPI(
     title=settings.APP_NAME,

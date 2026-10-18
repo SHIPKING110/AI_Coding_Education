@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import {
   createLLMConfig,
@@ -13,9 +13,24 @@ import {
   type LLMConfigIn,
   type LLMConfigOut,
 } from '@/api/llm'
+import {
+  deleteEmbeddingConfig,
+  deleteRerankConfig,
+  getEmbeddingConfig,
+  getRerankConfig,
+  saveEmbeddingConfig,
+  saveRerankConfig,
+  testEmbeddingConfig,
+  testRerankConfig,
+  type RetrievalConfigIn,
+  type RetrievalConfigOut,
+} from '@/api/retrievalConfig'
 import { toastApiError, useToastStore } from '@/stores/toast'
+import { useAuthStore } from '@/stores/auth'
 
 const toast = useToastStore()
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.user?.role === 'admin')
 const items = ref<LLMConfigOut[]>([])
 const loading = ref(false)
 
@@ -157,7 +172,151 @@ function configName(id: string | null): string {
   return items.value.find((c) => c.id === id)?.name || '（已删除，回退默认）'
 }
 
-onMounted(load)
+/* —— 检索模型：Embedding（系统级，管理员） + Rerank（教师级，可选） —— */
+const emb = ref<RetrievalConfigOut | null>(null)
+const rrk = ref<RetrievalConfigOut | null>(null)
+const embForm = ref<RetrievalConfigIn>({ provider: 'remote', base_url: '', api_key: '', model: '', model_path: '', enabled: true })
+const rrkForm = ref<RetrievalConfigIn>({ provider: 'remote', base_url: '', api_key: '', model: '', model_path: '', enabled: true })
+const showEmbForm = ref(false)
+const showRrkForm = ref(false)
+const savingEmb = ref(false)
+const savingRrk = ref(false)
+const testingEmb = ref(false)
+const testingRrk = ref(false)
+const embTestMsg = ref('')
+const rrkTestMsg = ref('')
+
+async function loadRetrieval() {
+  try {
+    if (isAdmin.value) {
+      emb.value = await getEmbeddingConfig()
+      embForm.value = emb.value
+        ? {
+            provider: emb.value.provider,
+            base_url: emb.value.base_url,
+            api_key: '',
+            model: emb.value.model,
+            model_path: emb.value.model_path || '',
+            enabled: emb.value.enabled,
+          }
+        : { provider: 'remote', base_url: '', api_key: '', model: '', model_path: '', enabled: true }
+    }
+    rrk.value = await getRerankConfig()
+    rrkForm.value = rrk.value
+      ? {
+          provider: rrk.value.provider,
+          base_url: rrk.value.base_url,
+          api_key: '',
+          model: rrk.value.model,
+          model_path: rrk.value.model_path || '',
+          enabled: rrk.value.enabled,
+        }
+      : { provider: 'remote', base_url: '', api_key: '', model: '', model_path: '', enabled: true }
+  } catch {
+    // 检索配置为可选增强，读取失败不阻塞模型配置页
+  }
+}
+
+async function saveEmb() {
+  if (embForm.value.provider === 'remote' && (!embForm.value.base_url.trim() || !embForm.value.model.trim())) {
+    toast.error('接口地址与模型名不能为空')
+    return
+  }
+  if (embForm.value.provider === 'remote' && !emb.value && !embForm.value.api_key.trim()) {
+    toast.error('API Key 不能为空')
+    return
+  }
+  savingEmb.value = true
+  try {
+    emb.value = await saveEmbeddingConfig(embForm.value)
+    toast.success('已保存系统级 Embedding 配置')
+    showEmbForm.value = false
+    await loadRetrieval()
+  } catch (e) {
+    toastApiError(e, '保存失败')
+  } finally {
+    savingEmb.value = false
+  }
+}
+
+async function saveRrk() {
+  if (rrkForm.value.provider === 'remote' && (!rrkForm.value.base_url.trim() || !rrkForm.value.model.trim())) {
+    toast.error('接口地址与模型名不能为空')
+    return
+  }
+  if (rrkForm.value.provider === 'remote' && !rrk.value && !rrkForm.value.api_key.trim()) {
+    toast.error('API Key 不能为空')
+    return
+  }
+  savingRrk.value = true
+  try {
+    rrk.value = await saveRerankConfig(rrkForm.value)
+    toast.success('已保存 Rerank 配置')
+    showRrkForm.value = false
+    await loadRetrieval()
+  } catch (e) {
+    toastApiError(e, '保存失败')
+  } finally {
+    savingRrk.value = false
+  }
+}
+
+async function removeEmb() {
+  if (!confirm('删除系统级 Embedding 配置？删除后知识库检索将回退到全局 env 或不可用。')) return
+  try {
+    await deleteEmbeddingConfig()
+    emb.value = null
+    toast.success('已删除')
+    await loadRetrieval()
+  } catch (e) {
+    toastApiError(e, '删除失败')
+  }
+}
+
+async function removeRrk() {
+  if (!confirm('删除 Rerank 配置？删除后检索将退化为单层向量召回。')) return
+  try {
+    await deleteRerankConfig()
+    rrk.value = null
+    toast.success('已删除')
+    await loadRetrieval()
+  } catch (e) {
+    toastApiError(e, '删除失败')
+  }
+}
+
+async function checkEmb() {
+  testingEmb.value = true
+  embTestMsg.value = ''
+  try {
+    const r = await testEmbeddingConfig()
+    embTestMsg.value = r.ok ? `连通正常（${r.latency_ms}ms · ${r.dim} 维）` : `✗ ${r.error || '连通失败'}`
+  } catch (e) {
+    embTestMsg.value = '✗ 请求失败，请稍后重试'
+    toastApiError(e, '检查失败')
+  } finally {
+    testingEmb.value = false
+  }
+}
+
+async function checkRrk() {
+  testingRrk.value = true
+  rrkTestMsg.value = ''
+  try {
+    const r = await testRerankConfig()
+    rrkTestMsg.value = r.ok ? `连通正常（${r.latency_ms}ms）` : `✗ ${r.error || '连通失败'}`
+  } catch (e) {
+    rrkTestMsg.value = '✗ 请求失败，请稍后重试'
+    toastApiError(e, '检查失败')
+  } finally {
+    testingRrk.value = false
+  }
+}
+
+onMounted(() => {
+  load()
+  void loadRetrieval()
+})
 </script>
 
 <template>
@@ -210,6 +369,60 @@ onMounted(load)
       <button class="btn primary sm" :disabled="savingMap" @click="saveMapping">{{ savingMap ? '保存中…' : '保存映射' }}</button>
     </section>
 
+    <!-- 检索 · Embedding（系统级，管理员） -->
+    <section v-if="isAdmin" class="card">
+      <div class="card-head">
+        <div>
+          <h2>检索 · Embedding（系统级）</h2>
+          <p class="muted">
+            知识库向量化的模型，<strong>全校共用一套</strong>：单一向量集合不能混存不同 embedding 的向量（会跨教师串味/维度冲突）。
+            更换模型会落到新的向量集合（旧数据不丢，可离线清理/重建）。
+          </p>
+        </div>
+        <div class="cfg-actions">
+          <button v-if="emb" class="link-btn" :disabled="testingEmb" @click="checkEmb">{{ testingEmb ? '检查中…' : '检查' }}</button>
+          <button v-if="emb" class="link-btn" @click="showEmbForm = true">编辑</button>
+          <button v-else class="btn primary sm" @click="showEmbForm = true">配置 Embedding</button>
+          <button v-if="emb" class="link-btn danger" @click="removeEmb">删除</button>
+        </div>
+      </div>
+      <div v-if="emb" class="cfg-row def">
+        <div class="cfg-main">
+          <div class="cfg-head"><strong>{{ emb.model || '（未填模型）' }}</strong></div>
+          <div class="cfg-meta">{{ emb.provider === 'local' ? `本地模型 · ${emb.model_path || '未设路径'}` : emb.base_url }} · {{ emb.enabled ? '启用' : '停用' }}</div>
+          <div v-if="embTestMsg" class="test-line">{{ embTestMsg }}</div>
+        </div>
+      </div>
+      <div v-else class="empty-tip">未配置系统级 Embedding，知识库检索将回退到全局 env 或本地模型（仅开发机可用）。</div>
+    </section>
+
+    <!-- 检索 · Rerank（教师级，可选） -->
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2>检索 · Rerank（可选）</h2>
+          <p class="muted">
+            两阶段检索的第二阶段：对向量召回的候选重排以提升精准率。<strong>未配置即退化为单层向量召回</strong>，
+            调用失败/超时也会静默降级，不影响正常对话。
+          </p>
+        </div>
+        <div class="cfg-actions">
+          <button v-if="rrk" class="link-btn" :disabled="testingRrk" @click="checkRrk">{{ testingRrk ? '检查中…' : '检查' }}</button>
+          <button v-if="rrk" class="link-btn" @click="showRrkForm = true">编辑</button>
+          <button v-else class="btn primary sm" @click="showRrkForm = true">配置 Rerank</button>
+          <button v-if="rrk" class="link-btn danger" @click="removeRrk">删除</button>
+        </div>
+      </div>
+      <div v-if="rrk" class="cfg-row def">
+        <div class="cfg-main">
+          <div class="cfg-head"><strong>{{ rrk.model || '（未填模型）' }}</strong></div>
+          <div class="cfg-meta">{{ rrk.provider === 'local' ? `本地模型 · ${rrk.model_path || '未设路径'}` : rrk.base_url }} · {{ rrk.enabled ? '启用' : '停用' }}</div>
+          <div v-if="rrkTestMsg" class="test-line">{{ rrkTestMsg }}</div>
+        </div>
+      </div>
+      <div v-else class="empty-tip">未配置 Rerank（可选项）：当前为单层向量检索，完全正常工作。</div>
+    </section>
+
     <div v-if="showForm" class="overlay" @click.self="showForm = false">
       <div class="modal">
         <h2>{{ editing ? '编辑模型配置' : '添加模型配置' }}</h2>
@@ -227,6 +440,56 @@ onMounted(load)
         <div class="modal-actions">
           <button class="btn ghost" @click="showForm = false">取消</button>
           <button class="btn primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Embedding 编辑（系统级） -->
+    <div v-if="showEmbForm" class="overlay" @click.self="showEmbForm = false">
+      <div class="modal">
+        <h2>系统级 Embedding 配置</h2>
+        <div class="form-grid">
+          <label class="check"><input v-model="embForm.provider" type="radio" value="remote" /> 云端 API（OpenAI 兼容）</label>
+          <label class="check"><input v-model="embForm.provider" type="radio" value="local" /> 本地模型（预留）</label>
+          <template v-if="embForm.provider === 'remote'">
+            <label class="span2">接口地址<input v-model="embForm.base_url" placeholder="https://api.siliconflow.cn" /></label>
+            <label class="span2">API Key<input v-model="embForm.api_key" :type="embForm.api_key ? 'text' : 'password'" :placeholder="emb ? '留空则不修改' : 'sk-…'" /></label>
+            <label class="span2">Embedding 模型名<input v-model="embForm.model" placeholder="如 BAAI/bge-m3" /></label>
+          </template>
+          <template v-else>
+            <label class="span2">本地模型路径<input v-model="embForm.model_path" placeholder="如 /srv/app/models/bge-m3" /></label>
+            <label class="span2">模型名（标识）<input v-model="embForm.model" placeholder="如 bge-m3-local" /></label>
+          </template>
+          <label class="check"><input v-model="embForm.enabled" type="checkbox" /> 启用</label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showEmbForm = false">取消</button>
+          <button class="btn primary" :disabled="savingEmb" @click="saveEmb">{{ savingEmb ? '保存中…' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Rerank 编辑（教师级，可选） -->
+    <div v-if="showRrkForm" class="overlay" @click.self="showRrkForm = false">
+      <div class="modal">
+        <h2>Rerank 配置（可选）</h2>
+        <div class="form-grid">
+          <label class="check"><input v-model="rrkForm.provider" type="radio" value="remote" /> 云端 API（/rerank 端点）</label>
+          <label class="check"><input v-model="rrkForm.provider" type="radio" value="local" /> 本地模型（预留）</label>
+          <template v-if="rrkForm.provider === 'remote'">
+            <label class="span2">接口地址<input v-model="rrkForm.base_url" placeholder="https://api.siliconflow.cn" /></label>
+            <label class="span2">API Key<input v-model="rrkForm.api_key" :type="rrkForm.api_key ? 'text' : 'password'" :placeholder="rrk ? '留空则不修改' : 'sk-…'" /></label>
+            <label class="span2">Rerank 模型名<input v-model="rrkForm.model" placeholder="如 BAAI/bge-reranker-v2-m3" /></label>
+          </template>
+          <template v-else>
+            <label class="span2">本地模型路径<input v-model="rrkForm.model_path" placeholder="如 /srv/app/models/bge-reranker-v2-m3" /></label>
+            <label class="span2">模型名（标识）<input v-model="rrkForm.model" placeholder="如 bge-reranker-local" /></label>
+          </template>
+          <label class="check"><input v-model="rrkForm.enabled" type="checkbox" /> 启用（停用即退化为单层向量检索）</label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showRrkForm = false">取消</button>
+          <button class="btn primary" :disabled="savingRrk" @click="saveRrk">{{ savingRrk ? '保存中…' : '保存' }}</button>
         </div>
       </div>
     </div>

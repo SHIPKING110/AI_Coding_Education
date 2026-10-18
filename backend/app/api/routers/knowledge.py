@@ -9,13 +9,13 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_teacher_permission
+from app.api.deps import get_current_user, require_roles, require_teacher_permission
 from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
 from app.crud import knowledge as kb_crud
 from app.crud import notification as notif_crud
 from app.models.notification import NotificationType
-from app.models.user import User
+from app.models.user import Role, User
 from app.services import rag
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
@@ -211,3 +211,50 @@ def collect(doc_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depen
 def uncollect(doc_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
     kb_crud.uncollect(db, user_id=user.id, doc_id=doc_id)
     return {"ok": True}
+
+
+# —— 运维：僵尸向量清理（管理员）——
+
+@router.post("/maintenance/sweep-orphans")
+def sweep_orphans(
+    dry_run: bool = False,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles(Role.ADMIN)),
+) -> dict:
+    """清理僵尸向量：源文档已删除但向量库残留的分片（过时信息会污染回答）。
+
+    dry_run=True 仅统计不删除。返回扫描分片数 / 僵尸文档数 / 已删除分片数。
+    """
+    from app.services import rag as rag_svc
+
+    return rag_svc.sweep_orphan_vectors(db, delete=not dry_run)
+
+
+@router.get("/maintenance/collections")
+def knowledge_collections(_: User = Depends(require_roles(Role.ADMIN))) -> dict:
+    """列出所有知识库向量集合（含历史 embedding 分片），便于运维查看。"""
+    from app.services import rag as rag_svc
+
+    return {"active": rag_svc._collection_name(), "collections": rag_svc.list_knowledge_collections()}
+
+
+@router.get("/maintenance/metrics")
+def knowledge_metrics(_: User = Depends(require_roles(Role.ADMIN))) -> dict:
+    """检索运行指标：命中率/零结果率/平均时延/降级与 rerank 次数。
+
+    零结果率上升、平均时延恶化 = 检索效果或链路出现滑坡的先行信号。
+    """
+    from app.services import rag as rag_svc
+
+    return rag_svc.get_metrics_snapshot()
+
+
+@router.post("/maintenance/sync")
+def trigger_sync(
+    limit: int = 50,
+    _: User = Depends(require_roles(Role.ADMIN)),
+) -> dict:
+    """手动触发一次增量同步（日常由后台定时任务执行，此处用于即时排障）。"""
+    from app.services import rag as rag_svc
+
+    return rag_svc.sync_changed_documents(limit=limit)
