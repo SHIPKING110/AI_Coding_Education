@@ -164,17 +164,6 @@ export async function getSharedConversation(token: string): Promise<SharedConver
   return data
 }
 
-export async function listMemories(agentId: string): Promise<{ id: string; key: string; value: string }[]> {
-  const { data } = await http.get<{ items: { id: string; key: string; value: string }[] }>('/agents/memories', {
-    params: { agent_id: agentId },
-  })
-  return data.items
-}
-
-export async function deleteMemory(id: string): Promise<void> {
-  await http.delete(`/agents/memories/${id}`)
-}
-
 export interface AgentPhase {
   key: string
   label: string
@@ -189,6 +178,23 @@ export interface ToolTraceStep {
   error?: string | null
 }
 
+/** RAG 命中的知识库片段：similarity=向量相似度，rerank_score=重排分（启用重排时才有）。 */
+export interface RagHit {
+  title: string
+  text: string
+  similarity?: number
+  rerank_score?: number | null
+}
+
+/** 检索诊断：向量/关键词/重排是否真的生效（用于「引用来源」标注与排障）。 */
+export interface RetrievalInfo {
+  vector: boolean
+  keyword: boolean
+  rerank: boolean
+  rerank_model?: string | null
+  summary: string
+}
+
 /** 统一流式对话：SSE，回调 delta；onPhase 回调阶段；onDone 回调完成帧（含 stage/options/工具轨迹） */
 export async function agentChatStream(
   convId: string,
@@ -201,7 +207,8 @@ export async function agentChatStream(
     tool_trace?: ToolTraceStep[]; tool_rounds?: number; tool_degraded?: boolean;
     mcp_trace?: { step: string; ok: boolean; ms: number; detail: string }[];
     rag_auto?: boolean;
-    hits?: { title: string; text: string; similarity?: number }[];
+    hits?: RagHit[];
+    retrieval?: RetrievalInfo;
   }) => void,
   opts?: { idleTimeoutMs?: number; onTimeout?: () => void; onToolsLive?: (steps: ToolTraceStep[]) => void },
 ): Promise<void> {
@@ -272,7 +279,8 @@ export async function agentChatStream(
           tool_degraded?: boolean
           mcp_trace?: { step: string; ok: boolean; ms: number; detail: string }[]
           rag_auto?: boolean
-          hits?: { title: string; text: string; similarity?: number }[]
+          hits?: RagHit[]
+          retrieval?: RetrievalInfo
         }
         try {
           data = JSON.parse(line.slice(5).trim())
@@ -288,7 +296,7 @@ export async function agentChatStream(
             onDone({
               stage: data.stage, options: data.options, has_spec: data.has_spec, title: data.title,
               tool_trace: data.tool_trace, tool_rounds: data.tool_rounds, tool_degraded: data.tool_degraded,
-              mcp_trace: data.mcp_trace, rag_auto: data.rag_auto, hits: data.hits,
+              mcp_trace: data.mcp_trace, rag_auto: data.rag_auto, hits: data.hits, retrieval: data.retrieval,
             })
           }
           return

@@ -1,0 +1,8 @@
+# Agent 任务评估种子集（示例，可逐步扩充）
+# 格式：每行一个 JSON；expect_tools=应调用，forbid_tools=不该调用
+# 工具名取自规划层可用工具（见 app/services/agent_tools.py）
+{"task": "我本周的排课和考勤情况怎么样？", "expect_tools": ["my_schedule_overview"], "forbid_tools": [], "notes": "排课考勤→my_schedule_overview"}
+{"task": "看看我有哪些班级", "expect_tools": ["list_my_classes"], "forbid_tools": [], "notes": "班级列表"}
+{"task": "帮我查一下学员张三的学习情况", "expect_tools": ["student_progress"], "forbid_tools": [], "notes": "指定学员→student_progress"}
+{"task": "有哪些学员课时不足需要催缴？", "expect_tools": ["find_students"], "forbid_tools": [], "notes": "低课时学员→find_students(low_balance_only)"}
+{"task": "今天天气怎么样？", "expect_tools": [], "forbid_tools": ["my_schedule_overview", "find_students"], "notes": "闲聊：不应调用任何业务工具"}

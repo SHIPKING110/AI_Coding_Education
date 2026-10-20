@@ -1,0 +1,9 @@
+# RAG 检索评估种子集（示例，可逐步扩充）
+# 格式：每行一个 JSON；relevant 用「文档标题」标注（与命中 title 对齐）
+# 注意：relevant 里的标题必须是你知识库中「已入库且已启用」的文档标题。
+{"query": "meta_agent 这篇论文讲的是什么？", "relevant": ["meta_agent"], "notes": "整篇主旨，应命中该文档多个片段"}
+{"query": "meta_agent 中多智能体是怎么协作的？", "relevant": ["meta_agent"], "notes": "考察共享消息池/通信协议相关片段的召回"}
+{"query": "可执行反馈驱动的迭代式编程是什么？", "relevant": ["meta_agent"], "notes": "考察技术细节片段召回"}
+{"query": "child_code 的规章制度有哪些？", "relevant": ["child_code规章制度"], "notes": "多文档区分：应命中规章制度而非 meta_agent"}
+{"query": "学员考勤是怎么规定的？", "relevant": ["child_code规章制度"], "notes": "细节召回"}
+{"query": "今天午餐吃什么？", "relevant": [], "notes": "反例：知识库无相关内容，relevant 留空；应检索不到（或低相关），用于暴露过度召回"}

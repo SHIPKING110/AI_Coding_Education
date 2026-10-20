@@ -41,6 +41,8 @@ COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY scripts ./scripts
+# 评估套件：RAG/Agent 离线评估脚本与数据集（只读，不参与运行时，便于容器内直接跑评估）
+COPY evals ./evals
 
 # 上传目录与本地数据目录（compose 中挂载命名卷持久化）
 RUN mkdir -p uploads data

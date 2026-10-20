@@ -807,17 +807,22 @@ def _parse_rerank_results(data: dict) -> list:
     return []
 
 
-def rerank_documents(query: str, documents: list[str], resolved) -> list[int]:
-    """调 rerank 模型，返回按相关度降序的原文下标。失败抛异常由上层降级。"""
+def rerank_documents(query: str, documents: list[str], resolved) -> tuple[list[int], list[float]]:
+    """调 rerank 模型，返回 (按相关度降序的原文下标, 对应相关度分数)。
+
+    分数为 rerank 模型的 relevance_score（不同厂商量纲不同，仅用于排序/展示）。
+    失败抛异常由上层降级。
+    """
     if not documents:
-        return []
+        return [], []
     if resolved.provider == "local":
         # 本地 rerank 预留：走 sentence-transformers CrossEncoder
         from sentence_transformers import CrossEncoder
 
         model = CrossEncoder(resolved.model_path)
-        scores = model.predict([(query, d) for d in documents])
-        return sorted(range(len(documents)), key=lambda i: float(scores[i]), reverse=True)
+        scores = [float(s) for s in model.predict([(query, d) for d in documents])]
+        order = sorted(range(len(documents)), key=lambda i: scores[i], reverse=True)
+        return order, [scores[i] for i in order]
     import httpx
 
     base = (resolved.base_url or "").rstrip("/")
@@ -852,35 +857,49 @@ def rerank_documents(query: str, documents: list[str], resolved) -> list[int]:
             raise last or Exception("rerank 端点未找到，已尝试：" + "；".join(tried))
     results = _parse_rerank_results(data or {})
     order = [int(x.get("index", i)) for i, x in enumerate(results)]
-    # 兼容只返回 top_n 子集：补齐剩余，保持稳定
+    scores = [float(x.get("relevance_score", x.get("score", 0.0)) or 0.0) for x in results]
+    # 兼容只返回 top_n 子集：补齐剩余，保持稳定（补位分数取该子集最低分之下）
+    tail_score = min(scores) - 1e-6 if scores else 0.0
     for i in range(len(documents)):
         if i not in order:
             order.append(i)
-    return order
+            scores.append(tail_score)
+    return order, scores
 
 
-def _apply_rerank(query: str, cands: list[dict], db, owner_id) -> list[dict]:
-    """对过召回候选做重排；任何失败/超时/熔断 → 原样返回向量序（静默降级）。"""
+def _apply_rerank(query: str, cands: list[dict], db, owner_id) -> tuple[list[dict], dict]:
+    """对过召回候选做重排；任何失败/超时/熔断 → 原样返回向量序（静默降级）。
+
+    返回 (重排后候选, 诊断)。诊断含是否真的重排成功、所用模型、候选数，
+    供上层观测「向量检索与重排到底有没有生效」。重排命中的分片会带上 rerank_score。
+    """
+    meta = {"rerank": False, "rerank_model": None, "rerank_in": len(cands)}
     if len(cands) <= 1 or _rerank_circuit_open():
-        return cands
+        return cands, meta
     try:
         from app.crud import retrieval_config as crud
 
         resolved = crud.resolve_rerank(db, owner_id)
         if resolved is None:
-            return cands
-        order = rerank_documents(query, [c["text"] for c in cands], resolved)
+            return cands, meta
+        order, scores = rerank_documents(query, [c["text"] for c in cands], resolved)
         _rerank_on_success()
-        return [cands[i] for i in order if 0 <= i < len(cands)]
+        ordered = [cands[i] for i in order if 0 <= i < len(cands)]
+        # 把重排分附着到分片（与向量相似度区分：rerank_score 为交叉编码器得分）
+        for i, c in enumerate(ordered):
+            if i < len(scores):
+                c["rerank_score"] = round(float(scores[i]), 4)
+        meta.update({"rerank": True, "rerank_model": resolved.model, "rerank_out": len(ordered)})
+        return ordered, meta
     except Exception:
         _rerank_on_fail()
-        return cands
+        return cands, meta
 
 
 def retrieve(
     query: str, *, db, owner_id: uuid.UUID, collected_ids: list[uuid.UUID] | None = None,
     top_k: int = TOP_K_DEFAULT, min_similarity: float = 0.15, per_doc_cap: int = 2,
-    rerank: bool = True,
+    rerank: bool = True, diag: dict | None = None,
 ) -> list[dict]:
     """两阶段检索：向量过召回（top_k*5）→（可选）rerank 精排 → 取 top_k。
 
@@ -889,9 +908,14 @@ def retrieve(
     - similarity < min_similarity 的弱相关分片丢弃；
     - 单文档最多 per_doc_cap 块，避免长文档霸榜；
     - rerank 未配置或失败时自动退化为单层向量召回（保证不回归）。
+
+    diag：若传入 dict，则回填本次检索的可观测诊断（向量/关键词/重排是否生效、
+    各阶段计数），用于前端「引用来源」标注与运维排查。
     """
     from app.crud import knowledge as _kb
 
+    d = diag if diag is not None else {}
+    d.update({"vector": False, "keyword": False, "rerank": False, "rerank_model": None})
     t0 = time.time()
     where: dict
     collected = [str(d) for d in (collected_ids or [])]
@@ -918,9 +942,12 @@ def retrieve(
                 "text": doc, "title": (meta or {}).get("title", ""),
                 "doc_id": (meta or {}).get("doc_id", ""), "similarity": sim,
             })
+        d["vector"] = True
+        d["vector_in"] = len(cands)
         _bump("vector_ok")
     except Exception:
         cands = []
+        d["vector"] = False
         _bump("vector_fail")
 
     # 文档级过滤：关闭检索 / 未就绪 / 已删除的文档，其分片一律不要
@@ -930,12 +957,16 @@ def retrieve(
         # —— 兜底：向量召回为空 → 关键词检索，保证有结果可用 ——
         _bump("keyword_fallback")
         out = _keyword_search(query, db=db, owner_id=owner_id, collected_ids=collected_ids, top_k=top_k)
+        d["keyword"] = bool(out)
+        d["final"] = len(out)
+        _sort_by_score(out)
         _record_query(out, t0)
         return out
 
     # 第二阶段：可选 rerank 重排（失败静默回落向量序）
     if rerank:
-        cands = _apply_rerank(query, cands, db, owner_id)
+        cands, rmeta = _apply_rerank(query, cands, db, owner_id)
+        d.update(rmeta)
     # per_doc_cap + top_k 截断
     per_doc: dict[str, int] = {}
     out: list[dict] = []
@@ -946,8 +977,40 @@ def retrieve(
         out.append(c)
         if len(out) >= top_k:
             break
+    # 统一按「有效分」显式排序：有重排分用重排分，否则用向量相似度，
+    # 避免出现「显示分与顺序不一致」（曾出现 0.468 排在 0.5334 之前）。
+    _sort_by_score(out)
+    d["final"] = len(out)
     _record_query(out, t0)
     return out
+
+
+def _effective_score(hit: dict) -> float:
+    """命中分片的排序依据分：重排分优先，否则向量相似度。"""
+    rs = hit.get("rerank_score")
+    if isinstance(rs, (int, float)):
+        return float(rs)
+    return float(hit.get("similarity") or 0.0)
+
+
+def _sort_by_score(hits: list[dict]) -> None:
+    """原地按有效分降序排序（稳定：分数相同保持原序）。"""
+    hits.sort(key=_effective_score, reverse=True)
+
+
+def retrieval_summary(diag: dict) -> str:
+    """把检索诊断压成一句人话，用于「引用来源」标注：向量/关键词/重排是否生效。"""
+    stages: list[str] = []
+    if diag.get("vector"):
+        stages.append(f"向量召回 {diag.get('vector_in', 0)} 条")
+    if diag.get("rerank"):
+        model = diag.get("rerank_model") or ""
+        stages.append(f"重排精排（{model}）" if model else "重排精排")
+    elif diag.get("vector"):
+        stages.append("未重排")
+    if diag.get("keyword"):
+        stages.append("关键词兜底")
+    return " → ".join(stages) if stages else "未检索"
 
 
 def _record_query(out: list[dict], t0: float) -> None:

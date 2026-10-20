@@ -900,14 +900,27 @@ def conversation_chat(
             if rag_service.needs_retrieval(message.strip()):
                 collected = knowledge_crud.collected_doc_ids(db, user_id=user.id)
                 # 压入教师个人配置：检索向量化走自配 embedding 模型
+                diag: dict = {}
                 with _llm_ctx.use_llm(resolved):
                     hits = rag_service.retrieve(
-                        message.strip(), db=db, owner_id=user.id, collected_ids=collected
+                        message.strip(), db=db, owner_id=user.id, collected_ids=collected, diag=diag
                     )
             if hits:
                 if not want_rag:
                     rag_auto = True
-                citations = {"hits": hits, "rag_auto": rag_auto} if rag_auto else {"hits": hits}
+                citations = {
+                    "hits": hits,
+                    # 检索诊断：向量/关键词/重排是否真的生效（前端展示 + 排障）
+                    "retrieval": {
+                        "vector": bool(diag.get("vector")),
+                        "keyword": bool(diag.get("keyword")),
+                        "rerank": bool(diag.get("rerank")),
+                        "rerank_model": diag.get("rerank_model"),
+                        "summary": rag_service.retrieval_summary(diag),
+                    },
+                }
+                if rag_auto:
+                    citations["rag_auto"] = True
                 lines = [
                     f"- 《{h['title']}》（相似度 {h['similarity']}）：{h['text'][:200]}"
                     for h in hits
@@ -1143,9 +1156,11 @@ def conversation_chat(
             # 本次检索命中：随 done 帧发给前端即时渲染（免刷新）
             "hits": [
                 {"title": h.get("title", ""), "text": (h.get("text") or "")[:400],
-                 "similarity": h.get("similarity", 0)}
+                 "similarity": h.get("similarity", 0),
+                 "rerank_score": h.get("rerank_score")}
                 for h in (citations or {}).get("hits", [])
             ] if citations and (citations or {}).get("hits") else [],
+            "retrieval": (citations or {}).get("retrieval"),
         })
 
     return StreamingResponse(

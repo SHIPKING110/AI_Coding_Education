@@ -7,12 +7,10 @@ import {
   buildConversationPpt,
   createConversation,
   deleteConversation,
-  deleteMemory,
   getConversationMaterial,
   getConversationMessages,
   listAgents,
   listConversations,
-  listMemories,
   patchConversation,
   shareConversation,
   uploadChatAttachment,
@@ -24,6 +22,8 @@ import {
   type ChatOption,
   type ConversationOut,
   type MaterialItem,
+  type RagHit,
+  type RetrievalInfo,
 } from '@/api/agent'
 import { listLLMConfigs, type LLMConfigOut } from '@/api/llm'
 import { toastApiError } from '@/stores/toast'
@@ -113,9 +113,6 @@ const fileImgInput = ref<HTMLInputElement | null>(null)
 const fileDocInput = ref<HTMLInputElement | null>(null)
 const useRagOnce = ref(false)
 const error = ref('')
-const memories = ref<{ id: string; key: string; value: string }[]>([])
-const showMemory = ref(false)
-const memoryOpen = ref(false)
 const chatEl = ref<HTMLDivElement | null>(null)
 const myDocs = ref<KnowledgeDoc[]>([])
 const plazaDocs = ref<KnowledgeDoc[]>([])
@@ -204,7 +201,6 @@ onMounted(async () => {
     // 清掉 query：否则每次刷新页面都会按残留参数再建一个空白对话
     void router.replace({ name: 'agents' })
   }
-  if (selectedAgent.value) void loadMemories()
 })
 
 onUnmounted(() => {
@@ -213,17 +209,6 @@ onUnmounted(() => {
   document.removeEventListener('click', onDocClickForPlus)
   delete (window as unknown as Record<string, unknown>).__codeRun
 })
-
-watch(selectedAgent, () => void loadMemories())
-
-async function loadMemories() {
-  if (!selectedAgent.value) return
-  try {
-    memories.value = await listMemories(selectedAgent.value)
-  } catch {
-    memories.value = []
-  }
-}
 
 let openSeq = 0
 
@@ -339,14 +324,15 @@ const latestSpec = computed(() => {
 })
 
 const usedCitations = computed(() => {
-  const seen = new Map<string, { title: string; text: string; similarity?: number }>()
+  const seen = new Map<string, RagHit>()
   for (const m of messages.value) {
     for (const c of citationsOf(m)) {
       const k = `${c.title}::${c.text.slice(0, 60)}`
       if (!seen.has(k)) seen.set(k, c)
     }
   }
-  return [...seen.values()].slice(0, 20)
+  // 按「有效分」降序：重排分优先，否则向量相似度（修复高分排在下方的错乱）
+  return [...seen.values()].sort((a, b) => hitScore(b) - hitScore(a)).slice(0, 20)
 })
 
 /* —— 对话驱动大纲：从 assistant 消息里的结构化载荷识别 PPT 大纲 —— */
@@ -863,11 +849,6 @@ async function batchDelete() {
   }
 }
 
-async function removeMemory(id: string) {
-  await deleteMemory(id)
-  memories.value = memories.value.filter((m) => m.id !== id)
-}
-
 const SPEC_KEYS = ['options', 'outline', 'sections', 'theme', 'slides']
 
 function isAgentPayloadBlock(body: string): boolean {
@@ -972,7 +953,8 @@ async function send(preset?: { text: string; stage?: string }) {
   let doneHasSpec = false
   let doneRagAuto = false
   let doneTitle: string | undefined
-  let doneHits: { title: string; text: string; similarity?: number }[] | undefined
+  let doneHits: RagHit[] | undefined
+  let doneRetrieval: RetrievalInfo | undefined
   let doneToolTrace: { seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[] | undefined
   let doneToolRounds = 0
   let doneToolDegraded = false
@@ -1003,6 +985,7 @@ async function send(preset?: { text: string; stage?: string }) {
         doneRagAuto = !!info.rag_auto
         doneTitle = info.title
         doneHits = info.hits?.length ? info.hits : undefined
+        doneRetrieval = info.retrieval ?? undefined
         doneToolTrace = info.tool_trace
         doneToolRounds = info.tool_rounds ?? 0
         doneToolDegraded = !!info.tool_degraded
@@ -1041,6 +1024,7 @@ async function send(preset?: { text: string; stage?: string }) {
           tools: doneToolTrace, rounds: doneToolRounds, degraded: doneToolDegraded,
           mcp_trace: doneMcpTrace, ...(doneRagAuto ? { rag_auto: true } : {}),
           ...(doneHits?.length ? { hits: doneHits } : {}),
+          ...(doneRetrieval ? { retrieval: doneRetrieval } : {}),
         }
         : undefined,
     })
@@ -1071,6 +1055,7 @@ async function send(preset?: { text: string; stage?: string }) {
               tools: doneToolTrace, rounds: doneToolRounds, mcp_trace: doneMcpTrace,
               ...(doneRagAuto ? { rag_auto: true } : {}),
               ...(doneHits?.length ? { hits: doneHits } : {}),
+              ...(doneRetrieval ? { retrieval: doneRetrieval } : {}),
             }
             : undefined,
         })
@@ -1307,9 +1292,31 @@ function onFileChange(e: Event) {
   }
 }
 
-function citationsOf(m: { citations?: Record<string, unknown> | null }): { title: string; text: string; similarity?: number }[] {
-  const hits = (m.citations as { hits?: { title: string; text: string; similarity?: number }[] } | null)?.hits
+function citationsOf(m: { citations?: Record<string, unknown> | null }): RagHit[] {
+  const hits = (m.citations as { hits?: RagHit[] } | null)?.hits
   return Array.isArray(hits) ? hits : []
+}
+
+/** 命中片段的展示/排序分：重排分优先，否则向量相似度。 */
+function hitScore(c: RagHit): number {
+  if (typeof c.rerank_score === 'number') return c.rerank_score
+  return typeof c.similarity === 'number' ? c.similarity : 0
+}
+
+/** 命中的分数标为主分：有重排分时标注为「重排」，否则为「相似度」。 */
+function hitScoreLabel(c: RagHit): string {
+  return typeof c.rerank_score === 'number' ? '重排' : '相似度'
+}
+
+/** 本次检索诊断（向量/关键词/重排是否生效）。 */
+function retrievalOf(m: { citations?: Record<string, unknown> | null }): RetrievalInfo | null {
+  const r = (m.citations as { retrieval?: RetrievalInfo } | null)?.retrieval
+  return r && typeof r === 'object' ? r : null
+}
+
+/** 按有效分降序返回命中（兼容历史消息：旧数据未排序也能正确展示）。 */
+function sortedCitationsOf(m: { citations?: Record<string, unknown> | null }): RagHit[] {
+  return [...citationsOf(m)].sort((a, b) => hitScore(b) - hitScore(a))
 }
 
 /* —— 对话附件（图片/文档）：读取、上传、移除、自动撑高 —— */
@@ -1953,11 +1960,9 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
       <h2>Agent 工作台</h2>
       <span class="hero-stats inline">
         <span class="stat-i"><b>{{ conversations.length }}</b>会话</span>
-        <span class="stat-i"><b>{{ memories.length }}</b>记忆</span>
         <span class="stat-i"><b>{{ readyDocs }}</b>文档</span>
       </span>
       <span class="hero-spacer" />
-      <button class="pill-btn sm" :class="{ on: showMemory }" @click="showMemory = !showMemory">长期记忆</button>
     </header>
 
     <div class="agents-layout">
@@ -2153,22 +2158,6 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
           </button>
         </div>
 
-        <div v-if="showMemory && tab === 'chat'" class="memory-bar" :class="{ open: memoryOpen }">
-          <button class="memory-bar-head" @click="memoryOpen = !memoryOpen" :title="memoryOpen ? '收起' : '展开'">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
-            <b>长期记忆</b>
-            <span class="memory-count">{{ memories.length ? `${memories.length} 条` : '暂无' }}</span>
-            <span class="memory-chev">{{ memoryOpen ? '收起' : '展开' }}</span>
-          </button>
-          <ul v-if="memoryOpen && memories.length">
-            <li v-for="m in memories" :key="m.id">
-              <b>{{ m.key }}</b><span>{{ m.value }}</span>
-              <button class="chip-del" @click="removeMemory(m.id)">×</button>
-            </li>
-          </ul>
-          <p v-else-if="memoryOpen" class="memory-empty">暂无长期记忆，对话结束后会自动提炼偏好与事实</p>
-        </div>
-
         <!-- 对话 -->
         <template v-if="tab === 'chat'">
           <div v-if="!activeConv" class="empty-hero">
@@ -2277,10 +2266,11 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
                       引用来源（{{ citationsOf(m).length }}）
                     </summary>
-                    <div v-for="(c, j) in citationsOf(m)" :key="j" class="cite">
+                    <p v-if="retrievalOf(m)" class="retrieval-line">检索：{{ retrievalOf(m)?.summary }}</p>
+                    <div v-for="(c, j) in sortedCitationsOf(m)" :key="j" class="cite">
                       <div class="cite-head">
                         《{{ c.title }}》
-                        <span v-if="c.similarity != null" class="sim">{{ c.similarity }}</span>
+                        <span class="sim">{{ hitScore(c).toFixed(4) }}<em>{{ hitScoreLabel(c) }}</em></span>
                       </div>
                       <p>{{ c.text.slice(0, 160) }}</p>
                     </div>
@@ -2926,7 +2916,7 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
           <div class="ws-label">对话中引用的知识库片段（{{ usedCitations.length }}）</div>
           <p v-if="!usedCitations.length" class="empty">暂无引用。打开「引用知识库」后再提问会自动检索。</p>
           <div v-for="(c, i) in usedCitations" :key="i" class="cite">
-            <div class="cite-head">《{{ c.title }}》<span v-if="c.similarity != null" class="sim">{{ c.similarity }}</span></div>
+            <div class="cite-head">《{{ c.title }}》<span class="sim">{{ hitScore(c).toFixed(4) }}<em>{{ hitScoreLabel(c) }}</em></span></div>
             <p>{{ c.text.slice(0, 120) }}</p>
           </div>
         </div>
@@ -3357,18 +3347,6 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 }
 .seg button svg { width: 15px; height: 15px; }
 .seg button.on { background: var(--surface); color: var(--brand-strong); box-shadow: var(--shadow-xs); }
-
-.memory-bar { border: 1px solid var(--line); background: var(--surface); border-radius: 9px; margin-bottom: 8px; font-size: 12px; }
-.memory-bar-head { width: 100%; display: flex; align-items: center; gap: 7px; border: none; background: transparent; cursor: pointer; padding: 6px 10px; color: var(--ink-2); }
-.memory-bar-head svg { width: 13px; height: 13px; color: var(--brand-strong); }
-.memory-bar-head b { font-size: 12px; color: var(--ink-1); }
-.memory-count { font-size: 11px; color: var(--ink-3); background: var(--bg-soft); border-radius: 999px; padding: 0 8px; }
-.memory-chev { margin-left: auto; font-size: 11px; color: var(--brand-strong); }
-.memory-bar ul { margin: 0; padding: 0 10px 8px; list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
-.memory-bar li { display: flex; align-items: baseline; gap: 8px; background: var(--bg-soft); border-radius: 7px; padding: 4px 8px; font-size: 12px; }
-.memory-bar li b { color: var(--ink); flex-shrink: 0; }
-.memory-bar li span { color: var(--ink-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.memory-empty { margin: 0; padding: 0 10px 8px; font-size: 11.5px; color: var(--ink-3); }
 .mat-students { font-size: 11.5px; color: var(--ink-2); line-height: 1.6; }
 .mat-auto { font-size: 11.5px; color: var(--brand-strong); }
 .chip-del { border: none; background: transparent; color: var(--ink-light); cursor: pointer; font-size: 15px; }
@@ -3491,6 +3469,8 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .cite-head { display: flex; align-items: center; gap: 5px; font-weight: 700; color: var(--brand-strong); }
 .cite-head svg { width: 13px; height: 13px; }
 .sim { margin-left: auto; font-size: 10.5px; font-weight: 600; color: var(--ink-3); background: var(--bg-soft); padding: 1px 6px; border-radius: 4px; }
+.sim em { font-style: normal; margin-left: 4px; opacity: .65; font-weight: 500; }
+.retrieval-line { margin: 5px 0 2px; font-size: 11px; color: var(--ink-3); }
 .cite p { margin: 3px 0 0; color: var(--ink-2); line-height: 1.55; }
 /* 业务工具调用轨迹：默认收起，点击展开 */
 .tool-drop summary { color: var(--ink-2); }
