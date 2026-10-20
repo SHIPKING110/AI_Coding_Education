@@ -69,6 +69,7 @@ PERMISSION_KEYS: dict[str, str] = {
     "finance_records": "财务管理-课时流水",
     "finance_salary": "财务管理-薪资核算（仅看自己）",
     "finance_salary_all": "财务管理-薪资核算（看全员）",
+    "service_reply": "教学服务-查看与回复家长会话",
     "nav_students": "导航可见-学员管理",
     "nav_invitations": "导航可见-招生邀约",
     "nav_classes": "导航可见-班级管理",
@@ -82,6 +83,7 @@ PERMISSION_KEYS: dict[str, str] = {
     "nav_assignments": "导航可见-AI习题",
     "nav_finance": "导航可见-财务管理",
     "nav_settings": "导航可见-设置",
+    "nav_service": "导航可见-教学服务",
 }
 
 # 各键默认值（无记录时生效；默认 = 现有行为，避免升级后权限放大）
@@ -121,6 +123,7 @@ KEY_DEFAULTS: dict[str, bool] = {
     "finance_records": False,
     "finance_salary": False,
     "finance_salary_all": False,
+    "service_reply": True,
     "nav_students": True,
     "nav_invitations": True,
     "nav_classes": True,
@@ -134,6 +137,7 @@ KEY_DEFAULTS: dict[str, bool] = {
     "nav_assignments": True,
     "nav_finance": True,
     "nav_settings": False,
+    "nav_service": True,
 }
 
 
@@ -191,6 +195,8 @@ class TeacherPermission(Base):
     nav_invitations: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     nav_finance: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     nav_settings: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    nav_service: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    service_reply: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

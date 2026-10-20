@@ -67,6 +67,14 @@ def set_enabled(db: Session, doc: KnowledgeDocument, enabled: bool) -> Knowledge
     return doc
 
 
+def set_parent_visible(db: Session, doc: KnowledgeDocument, visible: bool) -> KnowledgeDocument:
+    """家长版开关：仅 visible_to_parents=true 的文档参与家长端 RAG（白名单制）。"""
+    doc.visible_to_parents = visible
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+
 def usable_doc_ids(db: Session, *, doc_ids: list[str]) -> set[str]:
     """候选 doc_id 中可参与检索的：存在 + 已就绪 + 开关打开。"""
     uniq = {str(d) for d in doc_ids if d}

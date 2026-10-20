@@ -26,6 +26,7 @@ const clientNavItems = computed(() => {
     { to: '/client/assignments', label: '作业', icon: 'M9 11h6M9 15h4M7 3h10a2 2 0 0 1 2 2v16H5V5a2 2 0 0 1 2-2z', roles: ['parent', 'student'] },
     { to: '/client/feedbacks', label: '反馈', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 12h5', roles: ['parent', 'student'] },
     { to: '/client/evaluations', label: '成长', icon: 'M12 2 15 8.6 22 9.3 17 14 18.2 21 12 17.6 5.8 21 7 14 2 9.3 9 8.6z', roles: ['parent', 'student'] },
+    { to: '/client/service', label: '客服', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 12h5', roles: ['parent', 'student'] },
     { to: '/client/packages', label: '续费', icon: 'M20 12l-8-5-8 5 8 5 8-5zM4 12v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6', roles: ['parent'] },
     { to: '/client/orders', label: '订单', icon: 'M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9 2 2 4-4', roles: ['parent'] },
   ]

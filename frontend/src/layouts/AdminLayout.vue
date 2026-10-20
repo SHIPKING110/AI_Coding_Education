@@ -266,6 +266,7 @@ const ADMIN_NAV = [
   { to: '/reports', label: '报告·总结', navKey: 'nav_reports', icon: 'M8 2v4M16 2v4M3 10h18M6 6h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zM8 14h8M8 18h5' },
   { to: '/evaluations', label: '学员评估', navKey: 'nav_evaluations', icon: 'M7 3h10a2 2 0 0 1 2 2v16H5V5a2 2 0 0 1 2-2zM8 8h8M8 12h8M8 16h5' },
   { to: '/agents', label: 'Agent 工作台', navKey: 'nav_agents', icon: 'M13 2 3 14h7l-1 8 10-12h-7l1-8z' },
+  { to: '/service', label: '教学服务', navKey: 'nav_service', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 13h5' },
   { to: '/assignments', label: 'AI 习题', navKey: 'nav_assignments', icon: 'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11M15 3h6v6' },
   { to: '/finance', label: '财务管理', icon: 'M3 3v18h18M7 14l4-4 4 4 5-6', perm: 'finance_view', navKey: 'nav_finance' },
 ]

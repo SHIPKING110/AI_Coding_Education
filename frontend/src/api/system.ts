@@ -12,6 +12,10 @@ export interface SystemSettings {
   sidebar_sub: string
   sidebar_theme: string
   nav_order: string[]
+  parent_anon_daily_limit?: number
+  parent_daily_limit?: number
+  parent_risk_words?: string[]
+  parent_quick_replies?: string[]
 }
 
 export async function getSystemSettings(): Promise<SystemSettings> {

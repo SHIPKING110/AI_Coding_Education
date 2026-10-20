@@ -4,6 +4,7 @@ import { computed, onMounted, ref } from 'vue'
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { myPermissions } from '@/api/permissions'
+import { getSystemSettings, updateSystemSettings } from '@/api/system'
 import { useAuthStore } from '@/stores/auth'
 import PersonalizeView from '@/views/settings/PersonalizeView.vue'
 import LLMConfigTab from '@/views/settings/LLMConfigTab.vue'
@@ -48,6 +49,39 @@ const visibleTabs = computed(() => ({
   llm: canSet('settings_tab_model'),
   business: canSet('settings_tab_business'),
 }))
+
+// ---- 家长客服（配额/高风险词表，落库单例行） ----
+const parentAnonLimit = ref('3')
+const parentDailyLimit = ref('50')
+const parentRiskWords = ref('')
+const parentQuickReplies = ref('')
+
+async function loadParentService() {
+  try {
+    const s = await getSystemSettings()
+    parentAnonLimit.value = String(s.parent_anon_daily_limit ?? 3)
+    parentDailyLimit.value = String(s.parent_daily_limit ?? 50)
+    parentRiskWords.value = (s.parent_risk_words ?? []).join('\n')
+    parentQuickReplies.value = (s.parent_quick_replies ?? []).join('\n')
+  } catch {
+    // 旧库无列时保持默认，不打断业务设置加载
+  }
+}
+
+async function saveParentService() {
+  try {
+    const toList = (t: string): string[] => t.split('\n').map((s) => s.trim()).filter(Boolean)
+    await updateSystemSettings({
+      parent_anon_daily_limit: Math.max(0, Math.min(1000, Number(parentAnonLimit.value) || 0)),
+      parent_daily_limit: Math.max(0, Math.min(1000, Number(parentDailyLimit.value) || 0)),
+      parent_risk_words: toList(parentRiskWords.value),
+      parent_quick_replies: toList(parentQuickReplies.value),
+    })
+    flash('家长客服设置已保存')
+  } catch (e: any) {
+    alert(e?.response?.data?.detail || '保存失败')
+  }
+}
 
 // ---- 校区 ----
 const campuses = ref<CampusOut[]>([])
@@ -115,6 +149,7 @@ async function loadAll() {
     levels.value = lv
     posts.value = ps
     rules.value = rl
+    await loadParentService()
   } catch {
     error.value = '加载业务设置失败'
   }
@@ -389,6 +424,29 @@ onMounted(async () => {
     <LLMConfigTab v-else-if="activeTab === 'llm' && visibleTabs.llm" />
 
     <div v-else-if="visibleTabs.business" class="biz">
+      <!-- 家长客服 -->
+      <section class="card">
+        <h2>家长客服</h2>
+        <p class="muted">家长端 AI 客服的每日轮次配额（0=不限制该类）与高风险词表（命中强制转人工）；快捷回复供教师端一键插入。</p>
+        <div class="add-row">
+          <label class="field-inline">匿名日限额
+            <input v-model="parentAnonLimit" type="number" min="0" max="1000" step="1" class="inline-input num" />
+          </label>
+          <label class="field-inline">家长日限额
+            <input v-model="parentDailyLimit" type="number" min="0" max="1000" step="1" class="inline-input num" />
+          </label>
+          <button class="btn primary sm" @click="saveParentService">保存家长客服设置</button>
+        </div>
+        <div class="add-row">
+          <label class="field-inline grow">高风险词（每行一个，命中转人工）
+            <textarea v-model="parentRiskWords" rows="4" class="inline-input grow" placeholder="退费&#10;安全&#10;投诉" />
+          </label>
+          <label class="field-inline grow">快捷回复（每行一条）
+            <textarea v-model="parentQuickReplies" rows="4" class="inline-input grow" placeholder="您好，已收到您的问题…&#10;退费流程说明…" />
+          </label>
+        </div>
+      </section>
+
       <!-- 校区 -->
       <section class="card">
         <h2>校区名称</h2>

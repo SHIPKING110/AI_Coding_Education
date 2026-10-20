@@ -116,6 +116,12 @@ const router = createRouter({
           component: () => import('@/views/agents/AgentsView.vue'),
         },
         {
+          path: 'service',
+          name: 'service',
+          component: () => import('@/views/service/ServiceView.vue'),
+          meta: { perm: 'service_reply' },
+        },
+        {
           path: 'students/:id/evaluations',
           name: 'student-evaluations',
           component: () => import('@/views/evaluations/EvaluationsView.vue'),
@@ -171,6 +177,11 @@ const router = createRouter({
           path: 'evaluations',
           name: 'client-evaluations',
           component: () => import('@/views/client/ClientEvaluationsView.vue'),
+        },
+        {
+          path: 'service',
+          name: 'client-service',
+          component: () => import('@/views/client/ClientServiceView.vue'),
         },
         {
           path: 'assignments',

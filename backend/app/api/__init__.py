@@ -17,6 +17,7 @@ from app.api.routers import (
     notifications,
     orders,
     packages,
+    parent_service,
     permissions,
     prompts,
     reports,
@@ -37,6 +38,8 @@ api_router.include_router(users.router)
 api_router.include_router(students.router)
 api_router.include_router(classes.router)
 api_router.include_router(packages.router)
+api_router.include_router(parent_service.parent_router)
+api_router.include_router(parent_service.teacher_router)
 api_router.include_router(lessons.router)
 api_router.include_router(schedules.router)
 api_router.include_router(feedbacks.router)

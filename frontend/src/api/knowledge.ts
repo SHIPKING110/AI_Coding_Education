@@ -16,6 +16,7 @@ export interface KnowledgeDoc {
   error: string | null
   chunk_count: number
   enabled?: boolean
+  visible_to_parents?: boolean
   progress?: KnowledgeProgress | null
   collected?: boolean
   mine?: boolean
@@ -59,6 +60,11 @@ export async function retryDoc(id: string): Promise<KnowledgeDoc> {
 
 export async function toggleDocSearch(id: string): Promise<KnowledgeDoc> {
   const { data } = await http.post(`/knowledge/documents/${id}/toggle-search`)
+  return data
+}
+
+export async function toggleDocParentVisible(id: string): Promise<KnowledgeDoc> {
+  const { data } = await http.post(`/knowledge/documents/${id}/toggle-parent`)
   return data
 }
 

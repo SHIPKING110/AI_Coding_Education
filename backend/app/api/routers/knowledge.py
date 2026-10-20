@@ -31,6 +31,7 @@ def _doc_out(doc, *, collected: bool = False) -> dict:
         "visibility": doc.visibility, "file_name": doc.file_name,
         "status": doc.status, "error": doc.error, "chunk_count": doc.chunk_count,
         "enabled": bool(getattr(doc, "enabled", True)),
+        "visible_to_parents": bool(getattr(doc, "visible_to_parents", False)),
         "progress": extra.get("progress"),
         "collected": collected,
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
@@ -167,6 +168,17 @@ def toggle_searchable(
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
     return _doc_out(kb_crud.set_enabled(db, doc, not bool(getattr(doc, "enabled", True))))
+
+
+@router.post("/documents/{doc_id}/toggle-parent")
+def toggle_parent_visible(
+    doc_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> dict:
+    """家长版可见开关：开=该文档参与家长客服 RAG；关=对家长隐藏（默认隐藏）。"""
+    doc = kb_crud.get_document(db, doc_id=doc_id, owner_id=user.id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    return _doc_out(kb_crud.set_parent_visible(db, doc, not bool(getattr(doc, "visible_to_parents", False))))
 
 
 @router.delete("/documents/{doc_id}")

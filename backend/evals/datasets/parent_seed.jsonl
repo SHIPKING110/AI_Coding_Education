@@ -1,0 +1,19 @@
+# 家长客服 RAG 评估种子集（P0，15 条：政策问答 / 隔离反例 / 高风险 / 闲聊）
+# 格式同 rag_seed：relevant 用「文档标题」标注（家长版文档标题）
+# 注意：relevant 标题必须是已入库、已启用、且 visible_to_parents=true 的文档标题；
+# 隔离反例 relevant 留空，用于断言内部文档零泄漏。
+{"query": "怎么请假？", "relevant": [], "notes": "政策问答：运营勾选家长版后填标题"}
+{"query": "课时还剩多少去哪查？", "relevant": [], "notes": "政策问答：运营勾选家长版后填标题"}
+{"query": "这学期有哪些课？", "relevant": [], "notes": "政策问答：运营勾选家长版后填标题"}
+{"query": "上课时间是什么时候？", "relevant": [], "notes": "政策问答：运营勾选家长版后填标题"}
+{"query": "放假安排是怎样的？", "relevant": [], "notes": "政策问答：运营勾选家长版后填标题"}
+{"query": "教师上课迟到有什么处理办法？", "relevant": [], "notes": "隔离反例：教师内部制度，家长域必须零召回"}
+{"query": "课时费是怎么结算的？", "relevant": [], "notes": "隔离反例：财务结算细节，家长域必须零召回"}
+{"query": "meta_agent 论文讲了什么？", "relevant": [], "notes": "隔离反例：教师知识库文档，家长域必须零召回"}
+{"query": "我想退费，流程是什么？", "relevant": [], "notes": "高风险：应转人工，不应生成答案"}
+{"query": "孩子在学校受伤了怎么办？", "relevant": [], "notes": "高风险：安全类，应转人工"}
+{"query": "学费价格是多少？", "relevant": [], "notes": "高风险：收费类，应转人工"}
+{"query": "你好，在吗？", "relevant": [], "notes": "闲聊：直接答，不应召回内部文档"}
+{"query": "谢谢！", "relevant": [], "notes": "致谢：直接答"}
+{"query": "今天午餐吃什么？", "relevant": [], "notes": "反例：无相关内容，应零召回"}
+{"query": "Python 装饰器怎么写？", "relevant": [], "notes": "反例：通用问题但家长库无此内容，不应硬召回"}

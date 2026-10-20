@@ -41,6 +41,7 @@ from app.models.feedback import Feedback, FeedbackStatus
 from app.models.knowledge import KnowledgeCollection, KnowledgeDocument
 from app.models.llm_config import TeacherLLMConfig, TeacherModuleModel
 from app.models.notification import Notification, NotificationType
+from app.models.parent_service import ParentServiceMessage, ParentServiceThread
 from app.models.prompt import PromptScope, PromptTemplate
 from app.models.report import Report, ReportStatus, ReportType
 from app.models.retrieval_config import (
@@ -85,6 +86,8 @@ __all__ = [
     "LessonRecordType",
     "Notification",
     "NotificationType",
+    "ParentServiceMessage",
+    "ParentServiceThread",
     "Order",
     "OrderStatus",
     "PackageStatus",

@@ -20,9 +20,16 @@ jobs:
         run: pip install pytest
       - name: Eval metrics unit tests
         run: python -m pytest tests/test_eval_metrics.py -q
+      - name: Parent service pure-function tests (risk words, no DB)
+        run: python -m pytest tests/test_parent_service.py -q -k "risk_word or default_when_empty"
       - name: Compile check (syntax gate for eval + retrieval + planner)
         run: >-
           python -m py_compile
           app/services/rag.py app/services/llm.py app/services/rag_judge.py
           app/services/agent_planner.py app/services/agent_tools.py
+          app/crud/parent_service.py app/crud/knowledge.py
+          app/api/routers/parent_service.py app/api/routers/knowledge.py
+          app/api/routers/system_settings.py
+          app/models/parent_service.py app/models/user.py app/models/knowledge.py
+          app/models/system_setting.py app/models/permission.py
           app/core/config.py evals/metrics.py evals/run_rag_eval.py evals/run_agent_eval.py

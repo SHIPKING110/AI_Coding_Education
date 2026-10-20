@@ -39,6 +39,16 @@ class SystemSetting(Base):
     sidebar_theme: Mapped[str] = mapped_column(String(16), default="navy")
     # 侧边栏模块排序：navKey 数组 JSON，空表示默认顺序
     nav_order: Mapped[str] = mapped_column(Text, default="[]")
+    # 家长客服配额与高风险词表（设置页可改；沿用单例行模式）
+    parent_anon_daily_limit: Mapped[int] = mapped_column(Integer, default=3)
+    parent_daily_limit: Mapped[int] = mapped_column(Integer, default=50)
+    # 高风险词表 JSON 数组字符串（退费/收费/安全类，命中强制转人工）
+    parent_risk_words: Mapped[str] = mapped_column(
+        Text,
+        default='["退费", "收费", "价格", "安全", "受伤", "事故", "投诉", "报警", "律师", "骨折", "过敏"]',
+    )
+    # 教师快捷回复 JSON 数组字符串（F8 低优，默认空）
+    parent_quick_replies: Mapped[str] = mapped_column(Text, default="[]")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

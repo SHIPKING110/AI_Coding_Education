@@ -49,6 +49,11 @@ class SystemSettingUpdate(BaseModel):
     sidebar_sub: str | None = None
     sidebar_theme: str | None = None
     nav_order: list[str] | None = None
+    # 家长客服配额与词表（落库可配，设置页可改）
+    parent_anon_daily_limit: int | None = None
+    parent_daily_limit: int | None = None
+    parent_risk_words: list[str] | str | None = None
+    parent_quick_replies: list[str] | str | None = None
 
 
 def _ensure_columns(db: Session) -> None:
@@ -73,6 +78,10 @@ def _ensure_columns(db: Session) -> None:
         "sidebar_sub": "ALTER TABLE system_settings ADD COLUMN sidebar_sub VARCHAR(64)",
         "sidebar_theme": "ALTER TABLE system_settings ADD COLUMN sidebar_theme VARCHAR(16)",
         "nav_order": "ALTER TABLE system_settings ADD COLUMN nav_order TEXT DEFAULT '[]'",
+        "parent_anon_daily_limit": "ALTER TABLE system_settings ADD COLUMN parent_anon_daily_limit INTEGER DEFAULT 3",
+        "parent_daily_limit": "ALTER TABLE system_settings ADD COLUMN parent_daily_limit INTEGER DEFAULT 50",
+        "parent_risk_words": "ALTER TABLE system_settings ADD COLUMN parent_risk_words TEXT DEFAULT '[]'",
+        "parent_quick_replies": "ALTER TABLE system_settings ADD COLUMN parent_quick_replies TEXT DEFAULT '[]'",
     }
     for col, sql in ddl.items():
         if col not in cols:
@@ -89,6 +98,14 @@ def _get_or_create(db: Session) -> SystemSetting:
         db.commit()
         db.refresh(row)
     return row
+
+
+def _parse_str_list(raw: str | None) -> list[str]:
+    try:
+        arr = json.loads(raw or "[]")
+        return [str(x) for x in arr] if isinstance(arr, list) else []
+    except (ValueError, TypeError):
+        return []
 
 
 def _out(row: SystemSetting) -> dict:
@@ -110,6 +127,10 @@ def _out(row: SystemSetting) -> dict:
         "sidebar_sub": row.sidebar_sub if row.sidebar_sub is not None else DEFAULTS["sidebar_sub"],
         "sidebar_theme": row.sidebar_theme or DEFAULTS["sidebar_theme"],
         "nav_order": nav_order,
+        "parent_anon_daily_limit": int(getattr(row, "parent_anon_daily_limit", 3) or 3),
+        "parent_daily_limit": int(getattr(row, "parent_daily_limit", 50) or 50),
+        "parent_risk_words": _parse_str_list(getattr(row, "parent_risk_words", None)),
+        "parent_quick_replies": _parse_str_list(getattr(row, "parent_quick_replies", None)),
     }
 
 
@@ -143,7 +164,17 @@ def update_settings(
             status_code=400, detail=f"sidebar_theme 可选：{ALLOWED_SIDEBAR_THEMES}"
         )
     for k, v in data.items():
-        if v is not None:
+        if v is None:
+            continue
+        if k in ("parent_anon_daily_limit", "parent_daily_limit"):
+            iv = int(v)
+            if iv < 0 or iv > 1000:
+                raise HTTPException(status_code=400, detail=f"{k} 需在 0~1000 之间")
+            setattr(row, k, iv)
+        elif k in ("parent_risk_words", "parent_quick_replies"):
+            arr = v if isinstance(v, list) else [s.strip() for s in str(v).split("\n") if s.strip()]
+            setattr(row, k, json.dumps(arr, ensure_ascii=False))
+        else:
             setattr(row, k, json.dumps(v) if k == "nav_order" else v)
     db.commit()
     db.refresh(row)

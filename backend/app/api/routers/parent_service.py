@@ -1,0 +1,348 @@
+"""家长客服 API（P0，无 Redis）：
+
+- POST /parent-service/auth/wechat   小程序 code → openid → 家长 JWT
+- POST /parent-service/chat          问答（配额→高风险→家长域 RAG→生成→落账本）
+- POST /parent-service/threads/{id}/escalate  家长主动转人工
+- GET  /parent-service/threads/{id}/messages  本人会话消息
+- GET  /teacher/service/threads      教师接待列表（escalated 置顶）
+- GET  /teacher/service/threads/{id}/messages
+- POST /teacher/service/threads/{id}/reply
+- POST /teacher/service/threads/{id}/close
+
+家长域检索隔离：retrieve() 的 collected_ids 只传家长版白名单文档，
+零命中不编造；高风险命中直接转人工，不调 LLM。
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_user, require_teacher_permission
+from app.core import security
+from app.core.config import get_settings
+from app.core.database import get_db
+from app.crud import parent_service as ps
+from app.models.parent_service import (
+    ROLE_ASSISTANT,
+    ROLE_STAFF,
+    ROLE_USER,
+    THREAD_ESCALATED,
+    ParentServiceThread,
+)
+from app.models.user import Role, User
+from app.services import rag
+from app.services.llm import LLMConfigError
+
+parent_router = APIRouter(prefix="/parent-service", tags=["parent-service"])
+teacher_router = APIRouter(prefix="/teacher/service", tags=["teacher-service"])
+
+settings = get_settings()
+_optional_bearer = HTTPBearer(auto_error=False)
+
+PARENT_SYS = (
+    "你是少儿编程培训机构的家长客服助手，亲切、简洁、有依据。"
+    "只根据给定的政策资料回答家长关于课程/课时/请假/活动的问题；"
+    "不知道就说不知道，并引导家长转人工咨询老师，绝不编造政策细节、费用与时间。"
+)
+
+
+class WechatLoginIn(BaseModel):
+    code: str = Field(min_length=1)
+    nickname: str = ""
+
+
+class ChatIn(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    thread_id: uuid.UUID | None = None
+    anon_key: str = Field(default="", max_length=64)
+
+
+class ReplyIn(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+
+
+def _optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """可选鉴权：有 token 取家长用户，无 token 返回 None（匿名）。"""
+    if credentials is None:
+        return None
+    try:
+        payload = security.decode_token(credentials.credentials, expected_type="access")
+        subject = payload.get("sub")
+    except Exception:
+        return None
+    if subject is None:
+        return None
+    from app.crud import user as user_crud
+
+    try:
+        return user_crud.get_by_id(db, uuid.UUID(str(subject)))
+    except Exception:
+        return None
+
+
+def _code2session(code: str) -> dict:
+    """微信 code 换 openid；AppID/Secret 只读环境变量，不入库。"""
+    appid = (os.environ.get("WECHAT_APPID") or getattr(settings, "WECHAT_APPID", "") or "").strip()
+    secret = (os.environ.get("WECHAT_SECRET") or getattr(settings, "WECHAT_SECRET", "") or "").strip()
+    if not appid or not secret:
+        raise HTTPException(status_code=500, detail="未配置微信小程序 AppID/Secret，请联系管理员")
+    try:
+        r = httpx.get(
+            "https://api.weixin.qq.com/sns/jscode2session",
+            params={"appid": appid, "secret": secret, "js_code": code, "grant_type": "authorization_code"},
+            timeout=10,
+        )
+        data = r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"微信登录服务暂不可用：{e}") from e
+    if not data.get("openid"):
+        raise HTTPException(status_code=502, detail=f"微信登录失败：{data.get('errmsg', '未知错误')}")
+    return data
+
+
+@parent_router.post("/auth/wechat")
+def wechat_login(body: WechatLoginIn, db: Session = Depends(get_db)) -> dict:
+    data = _code2session(body.code.strip())
+    user = ps.find_or_create_parent_by_openid(db, openid=data["openid"], nickname=body.nickname.strip())
+    token = security.create_access_token(str(user.id))
+    return {"access_token": token, "user": {"id": str(user.id), "role": user.role, "name": user.name}}
+
+
+def _thread_out(th: ParentServiceThread) -> dict:
+    return {
+        "id": str(th.id), "status": th.status, "risk_flag": bool(th.risk_flag),
+        "created_at": th.created_at.isoformat() if th.created_at else None,
+        "updated_at": th.updated_at.isoformat() if th.updated_at else None,
+    }
+
+
+@parent_router.post("/chat")
+def parent_chat(
+    body: ChatIn, db: Session = Depends(get_db), user: User | None = Depends(_optional_user)
+) -> dict:
+    content = (body.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="请输入问题内容")
+    parent_id = user.id if user is not None and user.role == Role.PARENT.value else None
+    anon_key = (body.anon_key or "").strip() if parent_id is None else ""
+    if parent_id is None and not anon_key:
+        raise HTTPException(status_code=422, detail="匿名咨询请携带设备标识（anon_key）")
+
+    # 1) 配额（DB 计数口径：当日 user 消息数；P1 再迁 Redis）
+    anon_limit, parent_limit = ps.quota_limits(db)
+    used = ps.count_today_user_messages(db, parent_id=parent_id, anon_key=anon_key or None)
+    limit = parent_limit if parent_id is not None else anon_limit
+    if used >= limit:
+        tip = (
+            "今日咨询次数已用完，请明日再来，或点击转人工咨询老师。"
+            if parent_id is not None
+            else "匿名体验次数已用完，请绑定微信后继续咨询。"
+        )
+        raise HTTPException(status_code=429, detail=tip)
+
+    # 2) 会话 + 存用户消息
+    th = ps.get_or_create_thread(db, parent_id=parent_id, anon_key=anon_key or None, thread_id=body.thread_id)
+    if parent_id is not None and th.parent_id != parent_id:
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+    if parent_id is None and th.anon_key != anon_key:
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+    ps.add_message(db, thread_id=th.id, role=ROLE_USER, content=content)
+
+    # 3) 高风险 → 直接转人工，不调 LLM
+    words = ps.risk_words(db)
+    hit = ps.hit_risk_word(content, words)
+    if hit is not None:
+        ps.escalate(db, th, risk_word=hit)
+        ps.add_message(
+            db, thread_id=th.id, role=ROLE_ASSISTANT,
+            content=f"您的问题涉及「{hit}」，已为您转接人工老师，请稍候，老师会尽快回复。",
+        )
+        return {"thread": _thread_out(th), "answer": None, "refs": [], "escalated": True, "risk_word": hit}
+
+    # 4) 家长域 RAG：collected_ids 只传家长版白名单（物理复用 Chroma，逻辑隔离）
+    diag: dict = {}
+    hits: list[dict] = []
+    white = ps.parent_visible_doc_ids(db)
+    if not white:
+        # 白名单为空（运营尚未勾选）：直接走"零命中不编造"分支，不调检索
+        hits = []
+    else:
+        # owner 语义：登录家长用本人 id；匿名用首个 admin 占位（collected_ids 白名单仍生效隔离）
+        owner_id = parent_id
+        if owner_id is None:
+            admin = db.query(User).filter(User.role == Role.ADMIN.value).first()
+            owner_id = admin.id if admin is not None else (user.id if user is not None else None)
+        if owner_id is None:
+            hits = []
+        else:
+            try:
+                hits = rag.retrieve(
+                    content, db=db, owner_id=owner_id,
+                    collected_ids=white, top_k=5, diag=diag,
+                )
+            except Exception:
+                hits = []
+    # 二次硬过滤：doc_id 不在白名单的一律丢弃（防 collected_ids 语义漂移）
+    allowed = {str(d) for d in white}
+    hits = [h for h in hits if str(h.get("doc_id") or "") in allowed]
+
+    if not hits:
+        ps.add_message(
+            db, thread_id=th.id, role=ROLE_ASSISTANT,
+            content="暂未找到相关的政策说明，已为您记录，老师会尽快人工回复，您也可以直接点击转人工。",
+            retrieval_diag=diag or None,
+        )
+        return {
+            "thread": _thread_out(th), "answer": "暂未找到相关的政策说明，可点击转人工咨询老师。",
+            "refs": [], "escalated": False, "retrieval": rag.retrieval_summary(diag),
+        }
+
+    # 5) 生成（复用教师 agent 模块的对话模型解析；失败转人工兜底）
+    contexts = "\n\n".join(f"【{h.get('title', '')}】{h.get('text', '')[:800]}" for h in hits[:5])
+    prompt = f"家长问题：{content}\n\n政策资料：\n{contexts}\n\n请简洁回答（200字内），末尾注明依据了哪份资料。"
+    answer = ""
+    tokens: int | None = None
+    try:
+        from app.services import llm, llm_context
+
+        resolved = llm_context.resolve_override(db, user.id if user is not None else None, "agent")
+        with llm_context.use_llm(resolved):
+            answer = llm._invoke_with_system(PARENT_SYS, prompt) if hasattr(llm, "_invoke_with_system") else ""
+            if not answer:
+                from langchain_core.messages import HumanMessage, SystemMessage
+
+                resp = llm._chat_model().invoke([SystemMessage(content=PARENT_SYS), HumanMessage(content=prompt)])
+                answer = (resp.content or "").strip() if isinstance(resp.content, str) else str(resp.content)
+        tokens = len(answer) // 2 or None
+    except (LLMConfigError, Exception):
+        ps.escalate(db, th)
+        ps.add_message(
+            db, thread_id=th.id, role=ROLE_ASSISTANT,
+            content="AI 服务暂时不可用，已为您转接人工老师，请稍候。",
+            retrieval_diag=diag or None,
+        )
+        return {"thread": _thread_out(th), "answer": None, "refs": [], "escalated": True}
+    refs = [{"title": h.get("title", ""), "doc_id": h.get("doc_id", "")} for h in hits[:5]]
+    ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=answer, tokens=tokens, retrieval_diag=diag or None)
+    return {
+        "thread": _thread_out(th), "answer": answer, "refs": refs,
+        "escalated": False, "retrieval": rag.retrieval_summary(diag),
+    }
+
+
+@parent_router.post("/threads/{thread_id}/escalate")
+def parent_escalate(
+    thread_id: uuid.UUID, db: Session = Depends(get_db), user: User | None = Depends(_optional_user)
+) -> dict:
+    th = db.get(ParentServiceThread, thread_id)
+    if th is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if user is not None and th.parent_id is not None and th.parent_id != user.id:
+        raise HTTPException(status_code=403, detail="无权操作该会话")
+    ps.escalate(db, th)
+    return {"thread": _thread_out(th), "escalated": True}
+
+
+@parent_router.get("/threads/{thread_id}/messages")
+def parent_messages(
+    thread_id: uuid.UUID, db: Session = Depends(get_db), user: User | None = Depends(_optional_user)
+) -> dict:
+    th = db.get(ParentServiceThread, thread_id)
+    if th is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if user is not None and th.parent_id is not None and th.parent_id != user.id:
+        raise HTTPException(status_code=403, detail="无权查看该会话")
+    items = [
+        {"id": str(m.id), "role": m.role, "content": m.content,
+         "created_at": m.created_at.isoformat() if m.created_at else None}
+        for m in ps.list_messages(db, thread_id=thread_id)
+    ]
+    return {"thread": _thread_out(th), "items": items}
+
+
+# —— 教师端接待 ——
+
+def _staff() -> object:
+    return require_teacher_permission("service_reply")
+
+
+@teacher_router.get("/threads")
+def staff_threads(
+    limit: int = Query(default=100, le=200),
+    db: Session = Depends(get_db), user: User = Depends(_staff()),
+) -> dict:
+    _ = user
+    items = []
+    for th in ps.list_threads_for_staff(db, limit=limit):
+        d = _thread_out(th)
+        if th.parent_id is not None:
+            owner = db.get(User, th.parent_id)
+            d["parent_name"] = owner.name if owner else ""
+        else:
+            d["parent_name"] = f"匿名-{str(th.anon_key or '')[:8]}"
+        unread = (
+            db.query(ps.ParentServiceMessage).filter(
+                ps.ParentServiceMessage.thread_id == th.id,
+                ps.ParentServiceMessage.role == ROLE_USER,
+            ).count()
+        )
+        d["user_msg_count"] = unread
+        items.append(d)
+    return {"items": items}
+
+
+@teacher_router.get("/threads/{thread_id}/messages")
+def staff_messages(
+    thread_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(_staff())
+) -> dict:
+    _ = user
+    th = db.get(ParentServiceThread, thread_id)
+    if th is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    items = [
+        {"id": str(m.id), "role": m.role, "content": m.content,
+         "created_at": m.created_at.isoformat() if m.created_at else None}
+        for m in ps.list_messages(db, thread_id=thread_id)
+    ]
+    return {"thread": _thread_out(th), "items": items}
+
+
+@teacher_router.post("/threads/{thread_id}/reply")
+def staff_reply(
+    thread_id: uuid.UUID, body: ReplyIn,
+    db: Session = Depends(get_db), user: User = Depends(_staff()),
+) -> dict:
+    _ = user
+    th = db.get(ParentServiceThread, thread_id)
+    if th is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if th.status == THREAD_ESCALATED or th.status == "open":
+        msg = ps.add_message(db, thread_id=thread_id, role=ROLE_STAFF, content=body.content.strip())
+        return {"ok": True, "id": str(msg.id), "thread": _thread_out(th)}
+    raise HTTPException(status_code=400, detail="该会话已关闭")
+
+
+@teacher_router.post("/threads/{thread_id}/close")
+def staff_close(
+    thread_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(_staff())
+) -> dict:
+    _ = user
+    from app.models.parent_service import THREAD_CLOSED
+
+    th = db.get(ParentServiceThread, thread_id)
+    if th is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    th.status = THREAD_CLOSED
+    db.commit()
+    db.refresh(th)
+    return {"ok": True, "thread": _thread_out(th)}

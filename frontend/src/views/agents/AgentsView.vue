@@ -36,6 +36,7 @@ import {
   listPlaza,
   publishDoc,
   retryDoc,
+  toggleDocParentVisible,
   toggleDocSearch,
   uncollectDoc,
   unpublishDoc,
@@ -1196,6 +1197,16 @@ async function doToggleSearch(d: KnowledgeDoc) {
     const updated = await toggleDocSearch(d.id)
     d.enabled = updated.enabled
     d.status = updated.status
+  } catch (e: unknown) {
+    kbError.value = e instanceof Error ? e.message : '切换失败'
+  }
+}
+
+async function doToggleParentVisible(d: KnowledgeDoc) {
+  kbError.value = ''
+  try {
+    const updated = await toggleDocParentVisible(d.id)
+    d.visible_to_parents = updated.visible_to_parents
   } catch (e: unknown) {
     kbError.value = e instanceof Error ? e.message : '切换失败'
   }
@@ -2440,6 +2451,15 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                   @click="doToggleSearch(d)"
                 >
                   <span class="switch-dot" />{{ d.enabled === false ? '检索关' : '检索开' }}
+                </button>
+                <button
+                  v-if="d.status === 'ready'"
+                  class="mini-btn switch"
+                  :class="{ off: d.visible_to_parents !== true }"
+                  :title="d.visible_to_parents === true ? '家长端可见，点击对家长隐藏' : '家长端隐藏，点击开放给家长'"
+                  @click="doToggleParentVisible(d)"
+                >
+                  <span class="switch-dot" />{{ d.visible_to_parents === true ? '家长可见' : '家长隐藏' }}
                 </button>
                 <button v-if="d.visibility === 'private' && d.status === 'ready'" class="mini-btn" @click="doPublish(d.id)">发布到广场</button>
                 <button v-if="d.visibility === 'plaza'" class="mini-btn" @click="doUnpublish(d.id)">下架</button>
