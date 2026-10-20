@@ -146,6 +146,39 @@ def wechat_login(body: WechatLoginIn, db: Session = Depends(get_db)) -> dict:
     return {"access_token": token, "user": {"id": str(user.id), "role": user.role, "name": user.name}}
 
 
+def _render_tool_answer(name: str, result: dict) -> str | None:
+    """工具结果 → 家长话术（确定性渲染，数字原样透出，零幻觉）。
+
+    无数据返回 None（调用方走"诚实告知+转人工"分支）。
+    """
+    if name == "balance":
+        rows = result.get("students") or []
+        if not rows:
+            return None
+        lines = []
+        for s in rows:
+            warn = "（余额不足10，请及时续费）" if s.get("low") else ""
+            lines.append(f"• {s['student']}：剩余 {s['balance']} 课时{warn}")
+        return "查到课时余额如下：\n" + "\n".join(lines)
+    if name == "schedule":
+        items = result.get("items") or []
+        if not items:
+            return None
+        lines = []
+        for it in items[:8]:
+            st = (it.get("start") or "")[:16].replace("T", " ")
+            lines.append(f"• {st}｜{it.get('student','')}《{it.get('class','')}》{it.get('teacher','')}老师")
+        more = f"\n（共{len(items)}节，仅显示前8节）" if len(items) > 8 else ""
+        return "未来7天课表：\n" + "\n".join(lines) + more
+    if name == "feedbacks":
+        items = result.get("items") or []
+        if not items:
+            return None
+        lines = [f"• {it.get('student','')}：{it.get('summary','')}" for it in items[:3]]
+        return "老师最近反馈摘要：\n" + "\n".join(lines)
+    return None
+
+
 def _thread_out(th: ParentServiceThread) -> dict:
     return {
         "id": str(th.id), "status": th.status, "risk_flag": bool(th.risk_flag),
@@ -198,10 +231,28 @@ def parent_chat(
         return {"thread": _thread_out(th), "answer": None, "refs": [], "escalated": True, "risk_word": hit}
 
     # 4) 问路分类：闲聊/非业务 → 不调 RAG，直接短答（省 token + 防串味）
-    if _non_biz_hint(content):
+    if ps.non_biz_hint(content):
         small = "您好呀，我是课程小助手～可以问我课程、课时、请假、活动方面的问题，复杂问题也可以点右上角「转人工」找老师。"
         ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=small)
         return {"thread": _thread_out(th), "answer": small, "refs": [], "escalated": False, "kind": "smalltalk"}
+
+    # 4b) 查询工具（登录家长专属）：余额/课表/反馈走确定性数据，不走 RAG；
+    # 匿名无工具（倒逼绑定）。学生范围由后端反查，绝不信任前端输入。
+    if parent_id is not None and user is not None:
+        from app.services import parent_tools
+
+        tool_name = parent_tools.pick_tool(content)
+        if tool_name is not None:
+            result = parent_tools.run_tool(db, user, tool_name)
+            diag_tool = {"tool": tool_name, "ms": result.get("ms", 0)}
+            rendered = _render_tool_answer(tool_name, result)
+            if rendered is None:
+                # 有工具但无数据（如未绑定学员/无未来课程）：诚实告知 + 转人工入口
+                fallback = "没查到相关记录（可能是尚未绑定学员或暂无安排），已为您记录，老师会尽快人工回复，您也可以直接点击转人工。"
+                ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=fallback)
+                return {"thread": _thread_out(th), "answer": fallback, "refs": [], "escalated": False, "kind": "tool_empty"}
+            ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=rendered, retrieval_diag=diag_tool)
+            return {"thread": _thread_out(th), "answer": rendered, "refs": [], "escalated": False, "kind": f"tool:{tool_name}"}
 
     # 5) 家长域 RAG：collected_ids 只传家长版白名单（物理复用 Chroma，逻辑隔离）
     diag: dict = {}

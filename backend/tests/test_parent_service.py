@@ -73,6 +73,24 @@ def test_non_biz_hint():
     assert ps.non_biz_hint("课时还剩多少") is False
 
 
+def test_pick_tool_routing():
+    from app.services import parent_tools as pt
+
+    assert pt.pick_tool("课时还剩多少") == "balance"
+    assert pt.pick_tool("这周有什么课") == "schedule"
+    assert pt.pick_tool("老师反馈说了啥") == "feedbacks"
+    assert pt.pick_tool("怎么请假") is None
+
+
+def test_answer_numbers_safe():
+    from app.services import parent_tools as pt
+
+    ok_result = {"students": [{"balance": 12.5}]}
+    assert pt.answer_numbers_safe("剩余 12.5 课时", ok_result) is True
+    assert pt.answer_numbers_safe("剩余 99.9 课时", ok_result) is False
+    assert pt.answer_numbers_safe("未来7天有3节课", ok_result) is True  # 无小数不拦截
+
+
 def test_risk_words_default_when_empty(session_factory):
     from app.crud import parent_service as ps
 

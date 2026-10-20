@@ -4,6 +4,7 @@ import { nextTick, onMounted, ref } from 'vue'
 import {
   parentChat,
   parentEscalate,
+  parentMessages,
   type ParentMessage,
   type ParentThread,
 } from '@/api/parentService'
@@ -27,6 +28,27 @@ function anonKey(): string {
   return k
 }
 
+const THREAD_KEY = 'parent_service_thread_id'
+
+function saveThreadId(id: string) {
+  localStorage.setItem(THREAD_KEY, id)
+}
+
+/** 刷新恢复：有上次 thread_id 则拉历史消息（后端账本为准，不存前端副本）。 */
+async function restore() {
+  const tid = localStorage.getItem(THREAD_KEY)
+  if (!tid) return
+  try {
+    const r = await parentMessages(tid)
+    thread.value = r.thread
+    items.value = r.items
+    if (r.thread.status === 'escalated') escalatedNote.value = '已转接人工老师，老师回复后会同步到本页。'
+    await scrollBottom()
+  } catch {
+    localStorage.removeItem(THREAD_KEY) // 会话已清理/无权访问：静默开新会话
+  }
+}
+
 async function scrollBottom() {
   await nextTick()
   threadEl.value?.scrollTo({ top: threadEl.value.scrollHeight, behavior: 'smooth' })
@@ -44,6 +66,7 @@ async function sendText(text: string) {
   try {
     const r = await parentChat(t, { thread_id: thread.value?.id, anon_key: anonKey() })
     thread.value = r.thread
+    saveThreadId(r.thread.id)
     if (r.escalated || r.kind === 'smalltalk' || r.answer) {
       if (r.escalated) escalatedNote.value = '已为您转接人工老师，请稍候，老师会尽快回复。'
       if (r.answer) {
@@ -86,7 +109,7 @@ function fmtTime(iso: string | null): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-onMounted(() => {})
+onMounted(restore)
 </script>
 
 <template>
