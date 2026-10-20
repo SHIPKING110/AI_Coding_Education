@@ -27,7 +27,9 @@ export interface ParentChatResult {
   answer: string | null
   refs: { title: string; doc_id: string }[]
   escalated: boolean
+  kind?: string
   risk_word?: string
+  guard?: string
   retrieval?: string
 }
 
