@@ -56,6 +56,23 @@ def test_hit_risk_word():
     assert ps.hit_risk_word("", words) is None
 
 
+def test_unsafe_output_guard():
+    from app.crud import parent_service as ps
+
+    assert ps.unsafe_output("退多少钱能说一下吗") == "退多少钱"
+    assert ps.unsafe_output("课程安排是周六上午") is None
+    assert ps.unsafe_output("") is None
+
+
+def test_non_biz_hint():
+    from app.crud import parent_service as ps
+
+    assert ps.non_biz_hint("你好") is True
+    assert ps.non_biz_hint("讲个笑话") is True
+    assert ps.non_biz_hint("怎么请假") is False
+    assert ps.non_biz_hint("课时还剩多少") is False
+
+
 def test_risk_words_default_when_empty(session_factory):
     from app.crud import parent_service as ps
 

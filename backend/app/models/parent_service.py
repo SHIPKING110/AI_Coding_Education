@@ -35,6 +35,11 @@ class ParentServiceThread(Base):
     anon_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(16), default=THREAD_OPEN, index=True)
     risk_flag: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 归属教师：家长首个在读学员的主带教师（取首个班级 teacher_id），用于
+    # parent_service 模块映射 + 教师级 Rerank；匿名/无归属时为空（走系统默认）。
+    owner_teacher_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

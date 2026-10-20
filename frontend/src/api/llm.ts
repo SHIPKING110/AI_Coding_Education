@@ -26,6 +26,7 @@ export const LLM_MODULES = [
   { key: 'evaluation', label: '学员评估' },
   { key: 'assignment', label: 'AI 习题' },
   { key: 'feedback', label: '客户反馈' },
+  { key: 'parent_service', label: '教学服务 · 家长客服（对话+RAG）' },
 ] as const
 
 export type LLMModuleKey = (typeof LLM_MODULES)[number]['key']

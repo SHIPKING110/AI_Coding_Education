@@ -46,11 +46,39 @@ teacher_router = APIRouter(prefix="/teacher/service", tags=["teacher-service"])
 settings = get_settings()
 _optional_bearer = HTTPBearer(auto_error=False)
 
+# 教学服务模块键：对话模型与 Rerank 共用 teacher_module_models.parent_service 映射。
+# - 对话：家长登录用本人映射；匿名用会话归属教师（thread.owner_teacher_id）映射，均无则走默认→系统；
+# - Rerank：系统级 embedding 决定向量空间（全校统一）；教师级 rerank 按归属教师取，未配则退化单层召回。
+PARENT_MODULE = "parent_service"
+
+# 家长客服垂直化 system：业务边界（课程/课时/请假/活动/成长）+ 非业务婉拒 + 输出格式约束。
+# 费用/退费/安全类由词表前置拦截（不调 LLM），此处是第二道语义护栏。
 PARENT_SYS = (
-    "你是少儿编程培训机构的家长客服助手，亲切、简洁、有依据。"
-    "只根据给定的政策资料回答家长关于课程/课时/请假/活动的问题；"
-    "不知道就说不知道，并引导家长转人工咨询老师，绝不编造政策细节、费用与时间。"
+    "你是少儿编程培训机构的家长客服助手「课程小助手」，亲切、简洁、有依据。\n"
+    "【业务范围】只回答：课程内容与安排、课时与余额查询指引、请假与补课流程、"
+    "校区活动通知、孩子学习成长情况查询指引。\n"
+    "【越界处理】超出范围的问题（如闲聊、通用知识、作业代写、其他机构比较），"
+    "礼貌婉拒并引导回业务或转人工，绝不展开回答。\n"
+    "【高风险】涉及退费/收费/价格/安全/伤害/投诉/报警/律师等，一律只回复固定话术："
+    "「这个问题需要老师人工确认，已为您转接人工老师，请稍候。」并引导转人工。\n"
+    "【输出格式】200字内，分点不超过3条；有政策依据时末尾注明「依据：《标题》」；"
+    "不编造政策细节、费用数字与时间；不知道就说不知道并给转人工入口。"
 )
+
+# 输出安全护栏：命中任一模式 → 答案作废、转人工（防模型绕过词表前置拦截）。
+UNSAFE_PATTERNS = ps.UNSAFE_PATTERNS
+
+# 业务/非业务粗分类关键词（纯规则前置，LLM 只做兜底表达）
+NON_BIZ_HINTS = ps.NON_BIZ_HINTS
+
+
+def _unsafe_output(answer: str) -> str | None:
+    """输出护栏：返回命中的风险片段，否则 None（实现见 crud，便于单测）。"""
+    return ps.unsafe_output(answer)
+
+
+def _non_biz_hint(content: str) -> bool:
+    return ps.non_biz_hint(content)
 
 
 class WechatLoginIn(BaseModel):
@@ -150,7 +178,7 @@ def parent_chat(
         )
         raise HTTPException(status_code=429, detail=tip)
 
-    # 2) 会话 + 存用户消息
+    # 2) 会话 + 存用户消息（归属教师在建会话时解析，用于模块映射+Rerank）
     th = ps.get_or_create_thread(db, parent_id=parent_id, anon_key=anon_key or None, thread_id=body.thread_id)
     if parent_id is not None and th.parent_id != parent_id:
         raise HTTPException(status_code=403, detail="无权访问该会话")
@@ -169,7 +197,13 @@ def parent_chat(
         )
         return {"thread": _thread_out(th), "answer": None, "refs": [], "escalated": True, "risk_word": hit}
 
-    # 4) 家长域 RAG：collected_ids 只传家长版白名单（物理复用 Chroma，逻辑隔离）
+    # 4) 问路分类：闲聊/非业务 → 不调 RAG，直接短答（省 token + 防串味）
+    if _non_biz_hint(content):
+        small = "您好呀，我是课程小助手～可以问我课程、课时、请假、活动方面的问题，复杂问题也可以点右上角「转人工」找老师。"
+        ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=small)
+        return {"thread": _thread_out(th), "answer": small, "refs": [], "escalated": False, "kind": "smalltalk"}
+
+    # 5) 家长域 RAG：collected_ids 只传家长版白名单（物理复用 Chroma，逻辑隔离）
     diag: dict = {}
     hits: list[dict] = []
     white = ps.parent_visible_doc_ids(db)
@@ -177,11 +211,20 @@ def parent_chat(
         # 白名单为空（运营尚未勾选）：直接走"零命中不编造"分支，不调检索
         hits = []
     else:
-        # owner 语义：登录家长用本人 id；匿名用首个 admin 占位（collected_ids 白名单仍生效隔离）
-        owner_id = parent_id
+        # RAG owner = 归属教师（教师级 Rerank 按此生效）；匿名/无归属用首个 admin 占位，
+        # 白名单 collected_ids 仍保证家长域隔离。
+        owner_id = th.owner_teacher_id
         if owner_id is None:
-            admin = db.query(User).filter(User.role == Role.ADMIN.value).first()
-            owner_id = admin.id if admin is not None else (user.id if user is not None else None)
+            if parent_id is not None:
+                ps_owner = ps.resolve_owner_teacher(db, parent_id)
+                if ps_owner is not None:
+                    th.owner_teacher_id = ps_owner
+                    db.commit()
+                    db.refresh(th)
+                    owner_id = ps_owner
+            if owner_id is None:
+                admin = db.query(User).filter(User.role == Role.ADMIN.value).first()
+                owner_id = admin.id if admin is not None else None
         if owner_id is None:
             hits = []
         else:
@@ -207,15 +250,19 @@ def parent_chat(
             "refs": [], "escalated": False, "retrieval": rag.retrieval_summary(diag),
         }
 
-    # 5) 生成（复用教师 agent 模块的对话模型解析；失败转人工兜底）
+    # 6) 生成：走 parent_service 模块映射（管理员/教师可在模型配置页按模块选用）；
+    # owner 取登录家长（匿名取占位 admin），失败转人工兜底。
     contexts = "\n\n".join(f"【{h.get('title', '')}】{h.get('text', '')[:800]}" for h in hits[:5])
-    prompt = f"家长问题：{content}\n\n政策资料：\n{contexts}\n\n请简洁回答（200字内），末尾注明依据了哪份资料。"
+    prompt = f"家长问题：{content}\n\n政策资料：\n{contexts}\n\n请按【输出格式】作答（200字内）。末尾注明依据了哪份资料。"
     answer = ""
     tokens: int | None = None
     try:
         from app.services import llm, llm_context
 
-        resolved = llm_context.resolve_override(db, user.id if user is not None else None, "agent")
+        # 模型归属：归属教师的 parent_service 映射 → 教师默认 → 系统默认；
+        # 匿名/无归属退化为占位 owner（admin）的映射/默认/系统。
+        model_owner = th.owner_teacher_id or parent_id or owner_id
+        resolved = llm_context.resolve_override(db, model_owner, PARENT_MODULE)
         with llm_context.use_llm(resolved):
             answer = llm._invoke_with_system(PARENT_SYS, prompt) if hasattr(llm, "_invoke_with_system") else ""
             if not answer:
@@ -232,6 +279,13 @@ def parent_chat(
             retrieval_diag=diag or None,
         )
         return {"thread": _thread_out(th), "answer": None, "refs": [], "escalated": True}
+    # 7) 输出安全护栏：命中风险模式 → 作废答案、转人工（防模型绕过词表前置拦截）
+    bad = _unsafe_output(answer)
+    if bad is not None:
+        ps.escalate(db, th, risk_word=bad)
+        safe = "这个问题需要老师人工确认，已为您转接人工老师，请稍候。"
+        ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=safe, retrieval_diag=diag or None)
+        return {"thread": _thread_out(th), "answer": safe, "refs": [], "escalated": True, "guard": bad}
     refs = [{"title": h.get("title", ""), "doc_id": h.get("doc_id", "")} for h in hits[:5]]
     ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=answer, tokens=tokens, retrieval_diag=diag or None)
     return {
@@ -278,18 +332,29 @@ def _staff() -> object:
 
 @teacher_router.get("/threads")
 def staff_threads(
+    campus: str | None = Query(default=None),
     limit: int = Query(default=100, le=200),
     db: Session = Depends(get_db), user: User = Depends(_staff()),
 ) -> dict:
     _ = user
     items = []
     for th in ps.list_threads_for_staff(db, limit=limit):
+        ident = ps.parent_identity(db, th.parent_id)
         d = _thread_out(th)
         if th.parent_id is not None:
-            owner = db.get(User, th.parent_id)
-            d["parent_name"] = owner.name if owner else ""
+            first = (ident["students"] or [{}])[0]
+            cls = ", ".join(c["name"] for c in (first.get("classes") or [])[:2])
+            d["parent_name"] = f"{ident['name'] or '家长'}"
+            d["student_name"] = first.get("name", "")
+            d["student_label"] = " · ".join(x for x in [first.get("name", ""), cls] if x) or "未绑定学员"
+            d["phone"] = ident["phone"]
         else:
             d["parent_name"] = f"匿名-{str(th.anon_key or '')[:8]}"
+            d["student_label"] = "匿名咨询"
+            d["phone"] = ""
+            d["student_name"] = ""
+        d["campuses"] = ident["campuses"]
+        d["campus_label"] = "、".join(ident["campuses"][:2]) if ident["campuses"] else "未分区校"
         unread = (
             db.query(ps.ParentServiceMessage).filter(
                 ps.ParentServiceMessage.thread_id == th.id,
@@ -297,8 +362,11 @@ def staff_threads(
             ).count()
         )
         d["user_msg_count"] = unread
+        if campus and campus not in (ident["campuses"] or []):
+            continue
         items.append(d)
-    return {"items": items}
+    campuses = sorted({c for it in items for c in (it.get("campuses") or []) if c})
+    return {"items": items, "campuses": campuses}
 
 
 @teacher_router.get("/threads/{thread_id}/messages")

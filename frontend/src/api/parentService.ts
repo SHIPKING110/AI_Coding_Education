@@ -5,6 +5,11 @@ export interface ParentThread {
   status: string
   risk_flag: boolean
   parent_name?: string
+  student_name?: string
+  student_label?: string
+  phone?: string
+  campus_label?: string
+  campuses?: string[]
   user_msg_count?: number
   created_at: string | null
   updated_at: string | null
@@ -46,10 +51,12 @@ export async function parentMessages(threadId: string): Promise<{ thread: Parent
   return data
 }
 
-/** 教师接待列表（escalated 置顶） */
-export async function staffServiceThreads(): Promise<ParentThread[]> {
-  const { data } = await http.get<{ items: ParentThread[] }>('/teacher/service/threads')
-  return data.items
+/** 教师接待列表（escalated 置顶；可按校区过滤） */
+export async function staffServiceThreads(campus?: string): Promise<{ items: ParentThread[]; campuses: string[] }> {
+  const { data } = await http.get<{ items: ParentThread[]; campuses: string[] }>('/teacher/service/threads', {
+    params: campus ? { campus } : {},
+  })
+  return data
 }
 
 export async function staffServiceMessages(threadId: string): Promise<{ thread: ParentThread; items: ParentMessage[] }> {

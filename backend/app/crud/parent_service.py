@@ -28,6 +28,37 @@ DEFAULT_RISK_WORDS = [
     "投诉", "报警", "律师", "骨折", "过敏",
 ]
 
+# 输出安全护栏：命中任一模式 → 答案作废、转人工（防模型绕过词表前置拦截）。
+UNSAFE_PATTERNS = (
+    "退多少钱", "退款金额", "赔偿", "赔付", "报警", "律师函", "起诉",
+    "保证提分", "保证拿奖", "100%通过", "内部价", "回扣",
+)
+
+# 业务/非业务粗分类关键词（纯规则前置，LLM 只做兜底表达）
+NON_BIZ_HINTS = (
+    "你是谁", "你叫什么", "讲个笑话", "写作业", "代写", "作文",
+    "天气", "股票", "彩票", "游戏攻略", "追星",
+)
+
+
+def unsafe_output(answer: str) -> str | None:
+    """输出护栏：返回命中的风险片段，否则 None。"""
+    t = answer or ""
+    for p in UNSAFE_PATTERNS:
+        if p and p in t:
+            return p
+    return None
+
+
+def non_biz_hint(content: str) -> bool:
+    """闲聊/非业务 → True（不调 RAG，直接短答，省 token + 防串味）。"""
+    t = (content or "").strip()
+    if not t:
+        return True
+    if len(t) <= 4 and t in ("你好", "在吗", "谢谢", "再见", "辛苦了"):
+        return True
+    return any(h in t for h in NON_BIZ_HINTS)
+
 
 def parent_visible_doc_ids(db: Session) -> list[uuid.UUID]:
     """家长版白名单：ready + 启用 + 家长可见 的文档 id（家长域检索的 collected_ids）。"""
@@ -126,10 +157,60 @@ def get_or_create_thread(
     if th is not None:
         return th
     th = ParentServiceThread(parent_id=parent_id, anon_key=anon_key, status=THREAD_OPEN)
+    if parent_id is not None:
+        th.owner_teacher_id = resolve_owner_teacher(db, parent_id)
     db.add(th)
     db.commit()
     db.refresh(th)
     return th
+
+
+def resolve_owner_teacher(db: Session, parent_id: uuid.UUID) -> uuid.UUID | None:
+    """归属教师：家长首个在读学员的首个班级主带教师；无归属返回 None（走系统默认）。"""
+    from app.models.enrollment import Student, StudentStatus
+
+    stu = db.scalars(
+        select(Student)
+        .where(Student.parent_user_id == parent_id, Student.status != StudentStatus.ARCHIVED.value)
+        .order_by(Student.created_at.asc())
+        .limit(1)
+    ).first()
+    if stu is None:
+        return None
+    for c in stu.classes or []:
+        if c.teacher_id is not None:
+            return c.teacher_id
+    return None
+
+
+def parent_identity(db: Session, parent_id: uuid.UUID | None) -> dict:
+    """家长身份聚合：名下在读学员（姓名/校区/班级/余额）+ 联系方式，供接待列表展示。
+
+    解决"只显示一个号码不知道是谁"：教师看到的是"张三家长 · 学员李四（一校·Python启蒙班）"。
+    """
+    out: dict = {"students": [], "campuses": [], "phone": "", "name": ""}
+    if parent_id is None:
+        return out
+    from app.models.enrollment import Student, StudentStatus
+
+    owner = db.get(User, parent_id)
+    if owner is not None:
+        out["name"] = owner.name or ""
+        out["phone"] = owner.phone or ""
+    rows = db.scalars(
+        select(Student)
+        .where(Student.parent_user_id == parent_id, Student.status != StudentStatus.ARCHIVED.value)
+        .order_by(Student.created_at.asc())
+    ).all()
+    for s in rows:
+        classes = [{"name": c.name, "subject": c.subject} for c in (s.classes or [])]
+        out["students"].append({
+            "id": str(s.id), "name": s.name, "campus": s.campus or "",
+            "balance": float(s.lesson_balance or 0), "classes": classes,
+        })
+        if s.campus and s.campus not in out["campuses"]:
+            out["campuses"].append(s.campus)
+    return out
 
 
 def add_message(
@@ -216,7 +297,11 @@ __all__ = [
     "hit_risk_word",
     "list_messages",
     "list_threads_for_staff",
+    "non_biz_hint",
+    "parent_identity",
     "parent_visible_doc_ids",
     "quota_limits",
+    "resolve_owner_teacher",
     "risk_words",
+    "unsafe_output",
 ]

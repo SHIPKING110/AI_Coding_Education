@@ -353,7 +353,7 @@ onMounted(() => {
 
     <section class="card">
       <h2>各模块选用模型</h2>
-      <p class="muted">不选 = 用上面的默认配置。Agent 工作台还可在对话时临时切换。</p>
+      <p class="muted">不选 = 用上面的默认配置。Agent 工作台还可在对话时临时切换。「教学服务 · 家长客服」控制家长端问答用的对话模型，其 RAG 检索共用系统级 Embedding（下方配置）与归属教师的 Rerank；家长只能看到后台勾选为「家长可见」的文档。</p>
       <div class="map-grid">
         <label v-for="m in LLM_MODULES" :key="m.key" class="map-row">
           <span>{{ m.label }}</span>

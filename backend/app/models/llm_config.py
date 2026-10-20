@@ -9,8 +9,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
 # 需要用模型的业务模块（agent=Agent工作台，report=报告总结，
-# evaluation=学员评估，assignment=AI习题，feedback=客户反馈）
-LLM_MODULES = ("agent", "report", "evaluation", "assignment", "feedback")
+# evaluation=学员评估，assignment=AI习题，feedback=客户反馈，
+# parent_service=教学服务·家长客服：对话+家长域RAG共用此映射，Rerank 仍按教师取）
+LLM_MODULES = ("agent", "report", "evaluation", "assignment", "feedback", "parent_service")
 
 
 class TeacherLLMConfig(Base):
