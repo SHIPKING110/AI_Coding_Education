@@ -15,17 +15,26 @@ export interface ParentThread {
   updated_at: string | null
 }
 
+export interface CitationRef {
+  title: string
+  doc_id?: string
+  excerpt?: string
+  similarity?: number | null
+}
+
 export interface ParentMessage {
   id: string
   role: string
   content: string
   created_at: string | null
+  refs?: CitationRef[]
 }
 
 export interface ParentChatResult {
   thread: ParentThread
   answer: string | null
-  refs: { title: string; doc_id: string }[]
+  refs: CitationRef[]
+  citations?: { refs: CitationRef[]; summary: string }
   escalated: boolean
   kind?: string
   risk_word?: string

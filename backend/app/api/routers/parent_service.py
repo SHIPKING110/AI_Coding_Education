@@ -176,6 +176,24 @@ def _render_tool_answer(name: str, result: dict) -> str | None:
             return None
         lines = [f"• {it.get('student','')}：{it.get('summary','')}" for it in items[:3]]
         return "老师最近反馈摘要：\n" + "\n".join(lines)
+    if name == "history":
+        rows = result.get("students") or []
+        if not rows:
+            return None
+        blocks = []
+        for s in rows:
+            head = f"{s['student']}共上过 {s['total']} 节课"
+            detail = f"（到课 {s['attended']} 节，请假 {s['leave']} 节）" if s.get("attended") or s.get("leave") else ""
+            lines = [head + detail]
+            for it in (s.get("lessons") or [])[:6]:
+                st = (it.get("start") or "")[:16].replace("T", " ")
+                lines.append(
+                    f"• {st}｜《{it.get('class','')}》{it.get('teacher','')}老师 · {it.get('attendance','')}"
+                )
+            if len(s.get("lessons") or []) > 6:
+                lines.append(f"…（仅显示最近6节，共 {s['total']} 节）")
+            blocks.append("\n".join(lines))
+        return "上课历史：\n" + "\n\n".join(blocks)
     return None
 
 
@@ -236,6 +254,16 @@ def parent_chat(
         ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=small)
         return {"thread": _thread_out(th), "answer": small, "refs": [], "escalated": False, "kind": "smalltalk"}
 
+    # 4a) 多轮上下文（对齐教师端 Agent 的对话记忆）：
+    # - 生成环注入最近 6 条历史，跟随问句（"上了几次""那下周呢"）不丢指代；
+    # - 短跟随问句检索时拼接上一问，避免"几次"单独检索命中政策文档。
+    history_msgs = ps.list_messages(db, thread_id=th.id)[:-1][-6:]
+    last_user_q = next((m.content for m in reversed(history_msgs) if m.role == ROLE_USER), "")
+    _FOLLOWUP_MARKERS = ("几次", "哪些", "那个", "还有", "怎么弄", "多久", "什么时候", "呢", "那")
+    retrieval_query = content
+    if last_user_q and len(content) <= 12 and any(k in content for k in _FOLLOWUP_MARKERS):
+        retrieval_query = f"{last_user_q} {content}"
+
     # 4b) 查询工具（登录家长专属）：余额/课表/反馈走确定性数据，不走 RAG；
     # 匿名无工具（倒逼绑定）。学生范围由后端反查，绝不信任前端输入。
     if parent_id is not None and user is not None:
@@ -281,7 +309,7 @@ def parent_chat(
         else:
             try:
                 hits = rag.retrieve(
-                    content, db=db, owner_id=owner_id,
+                    retrieval_query, db=db, owner_id=owner_id,
                     collected_ids=white, top_k=5, diag=diag,
                 )
             except Exception:
@@ -304,7 +332,15 @@ def parent_chat(
     # 6) 生成：走 parent_service 模块映射（管理员/教师可在模型配置页按模块选用）；
     # owner 取登录家长（匿名取占位 admin），失败转人工兜底。
     contexts = "\n\n".join(f"【{h.get('title', '')}】{h.get('text', '')[:800]}" for h in hits[:5])
-    prompt = f"家长问题：{content}\n\n政策资料：\n{contexts}\n\n请按【输出格式】作答（200字内）。末尾注明依据了哪份资料。"
+    hist_txt = "\n".join(
+        f"{'家长' if m.role == ROLE_USER else ('老师' if m.role == ROLE_STAFF else '客服')}：{m.content[:200]}"
+        for m in history_msgs
+    )
+    prompt = (
+        (f"最近对话：\n{hist_txt}\n\n" if hist_txt else "")
+        + f"家长问题：{content}\n\n政策资料：\n{contexts}\n\n请按【输出格式】作答（200字内）。"
+        "结合最近对话理解指代；末尾注明依据了哪份资料。"
+    )
     answer = ""
     tokens: int | None = None
     try:
@@ -337,10 +373,27 @@ def parent_chat(
         safe = "这个问题需要老师人工确认，已为您转接人工老师，请稍候。"
         ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=safe, retrieval_diag=diag or None)
         return {"thread": _thread_out(th), "answer": safe, "refs": [], "escalated": True, "guard": bad}
-    refs = [{"title": h.get("title", ""), "doc_id": h.get("doc_id", "")} for h in hits[:5]]
-    ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=answer, tokens=tokens, retrieval_diag=diag or None)
+    # 结构化引用（对齐教师端 Agent：去重 + 摘录 + 相似度，前端收起可展开）
+    refs: list[dict] = []
+    seen: set[str] = set()
+    for h in hits:
+        did = str(h.get("doc_id") or "")
+        if not did or did in seen:
+            continue
+        seen.add(did)
+        refs.append({
+            "title": h.get("title", ""), "doc_id": did,
+            "excerpt": (h.get("text") or "")[:120],
+            "similarity": h.get("similarity"),
+        })
+        if len(refs) >= 3:
+            break
+    store_diag = dict(diag or {})
+    store_diag["refs"] = refs
+    ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=answer, tokens=tokens, retrieval_diag=store_diag)
     return {
         "thread": _thread_out(th), "answer": answer, "refs": refs,
+        "citations": {"refs": refs, "summary": rag.retrieval_summary(diag)},
         "escalated": False, "retrieval": rag.retrieval_summary(diag),
     }
 
@@ -368,8 +421,11 @@ def parent_messages(
     if user is not None and th.parent_id is not None and th.parent_id != user.id:
         raise HTTPException(status_code=403, detail="无权查看该会话")
     items = [
-        {"id": str(m.id), "role": m.role, "content": m.content,
-         "created_at": m.created_at.isoformat() if m.created_at else None}
+        {
+            "id": str(m.id), "role": m.role, "content": m.content,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+            "refs": ((m.retrieval_diag or {}).get("refs") or []),
+        }
         for m in ps.list_messages(db, thread_id=thread_id)
     ]
     return {"thread": _thread_out(th), "items": items}

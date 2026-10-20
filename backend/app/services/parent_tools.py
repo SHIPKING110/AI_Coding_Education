@@ -98,18 +98,76 @@ def tool_feedbacks(db: Session, user: User, *, limit: int = 3) -> dict:
     return {"tool": "feedbacks", "ms": int((time.time() - t0) * 1000), "items": out[: limit * 2]}
 
 
+def tool_history(db: Session, user: User, *, limit: int = 10) -> dict:
+    """上课历史（上过哪些课/上了几次）：考勤×已上排课 join，含出勤/请假统计。
+
+    口径：schedules.status=completed 且该学员在考勤表中（attended/leave 均计入"上过"），
+    已取消排课不计。数据来源确定性，答案可由工具结果直接渲染，零幻觉。
+    """
+    from app.models.schedule import Attendance, AttendanceStatus, Schedule
+
+    t0 = time.time()
+    out: list[dict] = []
+    for s in _own_students(db, user):
+        rows = db.execute(
+            select(Schedule, Attendance)
+            .join(Attendance, Attendance.schedule_id == Schedule.id)
+            .where(
+                Attendance.student_id == s.id,
+                Schedule.status == ScheduleStatus.COMPLETED.value,
+            )
+            .order_by(Schedule.start_time.desc())
+            .limit(limit + 1)
+        ).all()
+        attended = sum(1 for _, a in rows if a.status == AttendanceStatus.ATTENDED.value)
+        leave = sum(1 for _, a in rows if a.status == AttendanceStatus.LEAVE.value)
+        total = db.scalar(
+            select(func.count(Attendance.id))
+            .join(Schedule, Schedule.id == Attendance.schedule_id)
+            .where(
+                Attendance.student_id == s.id,
+                Schedule.status == ScheduleStatus.COMPLETED.value,
+            )
+        ) or 0
+        lessons = []
+        for sch, att in rows[:limit]:
+            lessons.append({
+                "student": s.name,
+                "class": sch.schedule_class.name if sch.schedule_class else "",
+                "subject": sch.schedule_class.subject if sch.schedule_class else "",
+                "teacher": sch.teacher.name if sch.teacher else "",
+                "start": sch.start_time.isoformat() if sch.start_time else "",
+                "attendance": "到课" if att.status == AttendanceStatus.ATTENDED.value else (
+                    "请假" if att.status == AttendanceStatus.LEAVE.value else "未标记"
+                ),
+            })
+        out.append({
+            "student": s.name, "total": total, "attended": attended, "leave": leave,
+            "lessons": lessons,
+        })
+    return {"tool": "history", "ms": int((time.time() - t0) * 1000), "students": out}
+
+
 # —— 规则路由：问题 → 工具（快、准、零 token；LLM 规划是 P1 后半的可选项） ——
 
 _BALANCE_HINTS = ("课时", "余额", "还剩", "剩余", "消耗", "欠费")
 _SCHEDULE_HINTS = ("课表", "上课时间", "什么时候上课", "这周", "下周", "排课", "补课时间")
 _FEEDBACK_HINTS = ("反馈", "老师怎么说", "评价", "表现怎么样", "学得怎么样")
+# 历史课：与未来课表区分（上过/学过/以往/几次）；"上课"类不含"上了/上过"仍走课表
+_HISTORY_HINTS = ("上过", "上了几", "学过", "历史课", "以往", "以前上", "之前上", "每次课", "上了哪些", "上过哪些", "上个哪些")
 
 
 def pick_tool(content: str) -> str | None:
-    """返回 balance / schedule / feedbacks / None（RAG）。多命中按余额>课表>反馈优先级。"""
+    """返回 balance / history / schedule / feedbacks / None（RAG）。
+
+    优先级：余额 > 历史课 > 未来课表 > 反馈。历史课先行于课表——"上过哪些课"
+    含"课"但不是未来安排。
+    """
     t = content or ""
     if any(h in t for h in _BALANCE_HINTS):
         return "balance"
+    if any(h in t for h in _HISTORY_HINTS):
+        return "history"
     if any(h in t for h in _SCHEDULE_HINTS):
         return "schedule"
     if any(h in t for h in _FEEDBACK_HINTS):
@@ -120,6 +178,8 @@ def pick_tool(content: str) -> str | None:
 def run_tool(db: Session, user: User, name: str) -> dict:
     if name == "balance":
         return tool_balance(db, user)
+    if name == "history":
+        return tool_history(db, user)
     if name == "schedule":
         return tool_schedule(db, user)
     if name == "feedbacks":
@@ -166,6 +226,7 @@ __all__ = [
     "run_tool",
     "tool_balance",
     "tool_feedbacks",
+    "tool_history",
     "tool_numbers",
     "tool_schedule",
 ]

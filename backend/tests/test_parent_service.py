@@ -27,17 +27,37 @@ def session_factory():
         conn.execute(text(f"CREATE DATABASE {TEST_DB_NAME}"))
     admin_engine.dispose()
     engine = create_engine(base_url + f"/{TEST_DB_NAME}")
+    # 确保所有模型都已注册到 metadata（否则 create_all 缺表）
+    import app.models.knowledge  # noqa: F401
+    import app.models.parent_service  # noqa: F401
+    import app.models.system_setting  # noqa: F401
+    import app.models.user  # noqa: F401
+
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     yield factory
     engine.dispose()
 
 
-def _mk_doc(db, title, *, status="ready", enabled=True, visible=False):
+def _mk_user(db, username="owner1"):
+    from app.models.user import User
+
+    u = db.query(User).filter(User.username == username).first()
+    if u is None:
+        u = User(role="admin", username=username, name=username, password_hash="!")
+        db.add(u)
+        db.commit()
+        db.refresh(u)
+    return u
+
+
+def _mk_doc(db, title, *, status="ready", enabled=True, visible=False, owner_id=None):
     from app.models.knowledge import KnowledgeDocument
 
+    if owner_id is None:
+        owner_id = _mk_user(db).id
     doc = KnowledgeDocument(
-        owner_id=uuid.uuid4(), title=title, description="t",
+        owner_id=owner_id, title=title, description="t",
         file_name="t.md", file_path="/tmp/t.md",
         status=status, enabled=enabled, visible_to_parents=visible,
     )
@@ -78,6 +98,8 @@ def test_pick_tool_routing():
 
     assert pt.pick_tool("课时还剩多少") == "balance"
     assert pt.pick_tool("这周有什么课") == "schedule"
+    assert pt.pick_tool("小明上过哪些课") == "history"
+    assert pt.pick_tool("上了几次课") == "history"
     assert pt.pick_tool("老师反馈说了啥") == "feedbacks"
     assert pt.pick_tool("怎么请假") is None
 

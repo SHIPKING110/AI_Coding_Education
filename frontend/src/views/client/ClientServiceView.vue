@@ -70,9 +70,14 @@ async function sendText(text: string) {
     if (r.escalated || r.kind === 'smalltalk' || r.answer) {
       if (r.escalated) escalatedNote.value = '已为您转接人工老师，请稍候，老师会尽快回复。'
       if (r.answer) {
-        const refs = (r.refs || []).map((x) => x.title).filter(Boolean)
-        const body = refs.length ? `${r.answer}\n\n依据：《${refs.slice(0, 2).join('》《')}》` : (r.answer || '')
-        items.value.push({ id: `a-${Date.now()}`, role: 'assistant', content: body, created_at: null })
+        const refs = r.citations?.refs ?? r.refs ?? []
+        items.value.push({
+          id: `a-${Date.now()}`,
+          role: 'assistant',
+          content: r.answer,
+          created_at: null,
+          refs: refs.length ? refs : undefined,
+        })
       } else if (r.escalated) {
         items.value.push({ id: `a-${Date.now()}`, role: 'assistant', content: '这个问题需要老师人工确认，已为您转接人工老师，请稍候。', created_at: null })
       }
@@ -136,6 +141,14 @@ onMounted(restore)
         <div v-if="m.role !== 'user'" class="mini-avatar">智</div>
         <div class="bubble-wrap">
           <div class="bubble">{{ m.content }}</div>
+          <details v-if="m.refs && m.refs.length" class="cite">
+            <summary>检索依据（{{ m.refs.length }}）· 展开查看</summary>
+            <div v-for="(r, i) in m.refs" :key="i" class="cite-item">
+              <b class="cite-title">《{{ r.title }}》</b>
+              <span v-if="r.similarity != null" class="cite-score">相似度 {{ Number(r.similarity).toFixed(3) }}</span>
+              <p v-if="r.excerpt" class="cite-excerpt">{{ r.excerpt }}</p>
+            </div>
+          </details>
           <span v-if="m.created_at" class="time">{{ fmtTime(m.created_at) }}</span>
         </div>
       </div>
@@ -184,6 +197,12 @@ onMounted(restore)
 .msg.user .bubble { background: linear-gradient(135deg, #6366f1, #06b6d4); color: #fff; border-bottom-right-radius: 6px; }
 .msg.assistant .bubble, .msg.staff .bubble { background: #f1f5f9; color: #0f172a; border-bottom-left-radius: 6px; }
 .time { font-size: 11px; color: #94a3b8; }
+.cite { width: 100%; background: #f8fafc; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; }
+.cite summary { font-size: 12px; color: #4338ca; cursor: pointer; user-select: none; }
+.cite-item { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #e2e8f0; }
+.cite-title { font-size: 12.5px; color: #0f172a; }
+.cite-score { margin-left: 8px; font-size: 11px; color: #64748b; }
+.cite-excerpt { margin: 4px 0 0; font-size: 12px; color: #64748b; line-height: 1.55; }
 .typing { display: flex; gap: 5px; padding: 14px 16px; }
 .typing span { width: 7px; height: 7px; border-radius: 50%; background: #94a3b8; animation: blink 1.2s infinite; }
 .typing span:nth-child(2) { animation-delay: 0.2s; }
