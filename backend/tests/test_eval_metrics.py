@@ -32,8 +32,9 @@ def test_mrr_and_ndcg():
     assert ndcg_at_k(["A", "B", "X"], REL, 3) == 1.0
     # 差排序：ndcg < 1
     assert ndcg_at_k(["X", "A", "B"], REL, 3) < 1.0
-    # 同一相关文档重复出现只计一次，ndcg 不会 > 1
-    assert ndcg_at_k(["A", "A", "A"], REL, 3) == 1.0
+    # 同一相关文档重复出现只计一次，ndcg 不会 > 1；
+    # 注意：relevant 有 A、B 两篇，只命中 A 时 ndcg < 1（ideal 覆盖两篇）
+    assert ndcg_at_k(["A", "A", "A"], REL, 3) < 1.0
     assert ndcg_at_k(["A", "A", "A", "B"], {"A", "B"}, 4) <= 1.0
 
 

@@ -74,6 +74,8 @@ def main() -> None:
     ap.add_argument("--dataset", required=True, help="数据集 JSONL 路径")
     ap.add_argument("--owner", default=None, help="用户名（owner），默认取库中第一个用户")
     ap.add_argument("--top-k", type=int, default=5, dest="top_k")
+    ap.add_argument("--judge", action="store_true",
+                    help="LLM 裁判答案质量：用教师 agent 模块的对话模型对每条做 faithfulness/relevance 打分")
     ap.add_argument("--json", default=None, help="把结果写到该 JSON 文件")
     args = ap.parse_args()
 
@@ -97,11 +99,37 @@ def main() -> None:
         print(json.dumps(compare_runs(base_metrics, rr_metrics, key="hit@3"), ensure_ascii=False, indent=2))
 
         print("\n== 逐条明细（rerank=on）==")
+        judge_rows: list[dict] = []
+        use_judge = bool(args.judge)
+        if use_judge:
+            from app.services import llm_context, rag_judge
+            resolved = llm_context.resolve_override(db, owner_id, "agent")
         for r in rr_rows:
             mark = "✓" if set(r["ranked"]) & set(r["relevant"]) else "✗"
             print(f"{mark} Q: {r['query']}")
             print(f"    命中顺序: {r['ranked']}")
             print(f"    标注相关: {r['relevant']}  检索链: {r['retrieval']}")
+            if use_judge:
+                try:
+                    with llm_context.use_llm(resolved):
+                        # 裁判输入的「回答」用检索片段拼装（不调生成模型，保证只读可复现）；
+                        # 评的是「检索支撑度」：片段能不能支撑出好答案。
+                        pseudo = "\n".join(f"[{t}]" for t in r["ranked"][: args.top_k]) or "（无检索命中）"
+                        j = rag_judge.judge_answer(
+                            r["query"], r["ranked"][: args.top_k],
+                            f"基于检索到的 {len(r['ranked'])} 个相关文档作答：{pseudo}",
+                        )
+                except Exception as e:  # 无模型/调用失败 → 跳过该条，不中断评估
+                    j = {"faithfulness": None, "relevance": None, "reason": f"跳过：{e}"}
+                judge_rows.append({"query": r["query"], **j})
+                print(f"    裁判: faithfulness={j.get('faithfulness')} "
+                      f"relevance={j.get('relevance')} 理由={j.get('reason')}")
+        if use_judge and judge_rows:
+            scored = [j for j in judge_rows if isinstance(j.get("faithfulness"), int)]
+            if scored:
+                print(f"\n== 裁判均分（{len(scored)}/{len(judge_rows)} 条有效）==")
+                print(f"faithfulness={round(sum(j['faithfulness'] for j in scored)/len(scored), 2)} "
+                      f"relevance={round(sum(j['relevance'] for j in scored)/len(scored), 2)}")
 
         if args.json:
             Path(args.json).write_text(

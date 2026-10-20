@@ -898,7 +898,7 @@ def _apply_rerank(query: str, cands: list[dict], db, owner_id) -> tuple[list[dic
 
 def retrieve(
     query: str, *, db, owner_id: uuid.UUID, collected_ids: list[uuid.UUID] | None = None,
-    top_k: int = TOP_K_DEFAULT, min_similarity: float = 0.15, per_doc_cap: int = 2,
+    top_k: int = TOP_K_DEFAULT, min_similarity: float | None = None, per_doc_cap: int = 2,
     rerank: bool = True, diag: dict | None = None,
 ) -> list[dict]:
     """两阶段检索：向量过召回（top_k*5）→（可选）rerank 精排 → 取 top_k。
@@ -912,10 +912,14 @@ def retrieve(
     diag：若传入 dict，则回填本次检索的可观测诊断（向量/关键词/重排是否生效、
     各阶段计数），用于前端「引用来源」标注与运维排查。
     """
+    from app.core.config import get_settings
     from app.crud import knowledge as _kb
 
+    # 阈值门控：显式 min_similarity 优先，否则取全局 RAG_MIN_SIMILARITY（默认 0.35）。
+    # 评估暴露 0.15 过松 → 低相关过度召回（反例「午餐吃什么」也捞到片段）。
+    gate = float(min_similarity) if min_similarity is not None else float(get_settings().RAG_MIN_SIMILARITY)
     d = diag if diag is not None else {}
-    d.update({"vector": False, "keyword": False, "rerank": False, "rerank_model": None})
+    d.update({"vector": False, "keyword": False, "rerank": False, "rerank_model": None, "gate": gate})
     t0 = time.time()
     where: dict
     collected = [str(d) for d in (collected_ids or [])]
@@ -936,7 +940,8 @@ def retrieve(
         dists = (res.get("distances") or [[]])[0]
         for doc, meta, dist in zip(docs, metas, dists):
             sim = round(1 - float(dist) / 2, 4) if dist is not None else 0.0
-            if sim < min_similarity:
+            if sim < gate:
+                d["gated_out"] = d.get("gated_out", 0) + 1
                 continue
             cands.append({
                 "text": doc, "title": (meta or {}).get("title", ""),
@@ -1003,6 +1008,8 @@ def retrieval_summary(diag: dict) -> str:
     stages: list[str] = []
     if diag.get("vector"):
         stages.append(f"向量召回 {diag.get('vector_in', 0)} 条")
+        if diag.get("gated_out"):
+            stages.append(f"门控过滤 {diag.get('gated_out')} 条（相似度<{diag.get('gate')}）")
     if diag.get("rerank"):
         model = diag.get("rerank_model") or ""
         stages.append(f"重排精排（{model}）" if model else "重排精排")

@@ -1,8 +1,19 @@
-# Agent 任务评估种子集（示例，可逐步扩充）
+# Agent 任务评估种子集（精标 16 条：单工具 / 多工具组合 / 闲聊不调 / Skill / 越权约束）
 # 格式：每行一个 JSON；expect_tools=应调用，forbid_tools=不该调用
 # 工具名取自规划层可用工具（见 app/services/agent_tools.py）
 {"task": "我本周的排课和考勤情况怎么样？", "expect_tools": ["my_schedule_overview"], "forbid_tools": [], "notes": "排课考勤→my_schedule_overview"}
 {"task": "看看我有哪些班级", "expect_tools": ["list_my_classes"], "forbid_tools": [], "notes": "班级列表"}
 {"task": "帮我查一下学员张三的学习情况", "expect_tools": ["student_progress"], "forbid_tools": [], "notes": "指定学员→student_progress"}
 {"task": "有哪些学员课时不足需要催缴？", "expect_tools": ["find_students"], "forbid_tools": [], "notes": "低课时学员→find_students(low_balance_only)"}
-{"task": "今天天气怎么样？", "expect_tools": [], "forbid_tools": ["my_schedule_overview", "find_students"], "notes": "闲聊：不应调用任何业务工具"}
+{"task": "我们班小明的评估写完了吗？", "expect_tools": ["student_evaluations"], "forbid_tools": [], "notes": "单学员评估查询"}
+{"task": "三班的学员评估都完成了吗，谁还没写？", "expect_tools": ["class_evaluation_overview"], "forbid_tools": [], "notes": "班级评估完成情况，忌用 student_evaluations 逐个查"}
+{"task": "我这个月的教学数据怎么样，达标了吗？", "expect_tools": ["my_teaching_stats"], "forbid_tools": [], "notes": "教学统计→my_teaching_stats"}
+{"task": "三班都有哪些学员？", "expect_tools": ["find_students"], "forbid_tools": [], "notes": "按班级查学员→find_students(class_name)，忌先 list_my_classes 绕路"}
+{"task": "我带的学员里谁的课时最少？", "expect_tools": ["find_students"], "forbid_tools": ["sql_query", "sql_list_tables"], "notes": "现成工具可解，禁 sql 三件套"}
+{"task": "帮我统计下各班的平均出勤率并排名", "expect_tools": ["sql_list_tables"], "forbid_tools": [], "notes": "多步取数：现成工具覆盖不到，允许 sql_* 起手"}
+{"task": "今天天气怎么样？", "expect_tools": [], "forbid_tools": ["my_schedule_overview", "find_students", "my_teaching_stats", "list_my_classes"], "notes": "闲聊：不应调用任何业务工具"}
+{"task": "你好！", "expect_tools": [], "forbid_tools": ["my_schedule_overview", "find_students", "my_teaching_stats", "list_my_classes", "student_progress"], "notes": "寒暄：零工具"}
+{"task": "谢谢，你很棒", "expect_tools": [], "forbid_tools": ["my_schedule_overview", "find_students", "my_teaching_stats"], "notes": "致谢：零工具"}
+{"task": "我们机构的退费政策是什么？", "expect_tools": [], "forbid_tools": ["my_schedule_overview", "find_students", "student_progress", "sql_query"], "notes": "制度问答走 RAG，不调业务工具"}
+{"task": "帮我用 PPT 技能做一份家长会演示文稿", "expect_tools": ["read_skill_file"], "forbid_tools": [], "notes": "Skill 任务：先读 SKILL.md 再执行，read 起手"}
+{"task": "把二班所有学员的课时余额导出来", "expect_tools": ["find_students"], "forbid_tools": ["sql_query"], "notes": "约束：现成工具能解时不许直写 SQL"}

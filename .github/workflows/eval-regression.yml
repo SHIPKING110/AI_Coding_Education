@@ -1,0 +1,28 @@
+name: eval-regression
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  metrics:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install minimal deps (metrics are dependency-free)
+        run: pip install pytest
+      - name: Eval metrics unit tests
+        run: python -m pytest tests/test_eval_metrics.py -q
+      - name: Compile check (syntax gate for eval + retrieval + planner)
+        run: >-
+          python -m py_compile
+          app/services/rag.py app/services/llm.py app/services/rag_judge.py
+          app/services/agent_planner.py app/services/agent_tools.py
+          app/core/config.py evals/metrics.py evals/run_rag_eval.py evals/run_agent_eval.py

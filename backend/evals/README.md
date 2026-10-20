@@ -73,5 +73,27 @@ python -m evals.run_agent_eval --owner <你的用户名> --dataset evals/dataset
 
 ## 与生产的衔接
 
-- 检索链自带诊断（`retrieval_summary`：向量召回 N 条 → 重排精排），评估报告逐条打印，便于定位是「召回没捞到」还是「重排排错」。
+- 检索链自带诊断（`retrieval_summary`：向量召回 N 条 → 门控过滤 M 条 → 重排精排），评估报告逐条打印，便于定位是「召回没捞到」还是「重排排错」。
 - 指标脚本只读，不改数据；可安全对生产库运行。
+
+## 阈值门控（RAG_MIN_SIMILARITY，默认 0.35）
+
+评估暴露 0.15 过松 → 反例（"午餐吃什么"）也被硬召回到片段。`retrieve()` 显式 `min_similarity` 优先，否则取 `RAG_MIN_SIMILARITY`；被过滤数记入 `diag["gated_out"]`，前端引用标注可见。调参时扫描：
+
+```bash
+for t in 0.25 0.35 0.45; do RAG_MIN_SIMILARITY=$t python -m evals.run_rag_eval --owner admin --dataset evals/datasets/rag_seed.jsonl; done
+```
+
+选「反例零召回 且 正例 recall@5 不掉」的拐点。
+
+## Agent 规划约束（工具节制）
+
+`TOOL_PLANNER_SYS` 新增【工具节制】：默认只调最少工具；单工具能答只调一个；补调必须有"已有结果证明不足"的理由且一次只补一个；现成业务工具能解时禁 `sql_*`。对应 `agent_seed.jsonl` 已加"忌绕路/禁 SQL/闲聊零工具"用例，`--judge` 前先看工具 P/R 是否回升。
+
+## 裁判评估（--judge）
+
+```bash
+python -m evals.run_rag_eval --owner admin --dataset evals/datasets/rag_seed.jsonl --judge
+```
+
+复用教师在 agent 模块配置的对话模型，对每条打 `faithfulness/relevance`（0-5）+ 一句话理由。注意：当前裁判输入的"回答"是用检索命中拼装的**伪回答**，评的是**检索支撑度**（片段能不能支撑出好答案），不是端到端生成质量；端到端答案裁判待生成链接入后再做。

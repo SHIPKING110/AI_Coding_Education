@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     AGENT_TOOL_RESULT_CHARS: int = 1200  # 单个工具结果回灌给模型的最大字符数
     AGENT_TOOL_BLOCK_CHARS: int = 5000   # 注入最终回答的业务数据块最大字符数
 
+    # RAG 检索阈值门控（评估暴露：0.15 过松导致低相关过度召回）
+    RAG_MIN_SIMILARITY: float = 0.35  # 向量相似度低于此直接丢弃；可用 env 覆盖
+
 
 @lru_cache
 def get_settings() -> Settings:

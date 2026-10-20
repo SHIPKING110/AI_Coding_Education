@@ -1,9 +1,25 @@
-# RAG 检索评估种子集（示例，可逐步扩充）
+# RAG 检索评估种子集（精标 22 条：事实召回 / 多片段 / 跨文档区分 / 反例）
 # 格式：每行一个 JSON；relevant 用「文档标题」标注（与命中 title 对齐）
 # 注意：relevant 里的标题必须是你知识库中「已入库且已启用」的文档标题。
 {"query": "meta_agent 这篇论文讲的是什么？", "relevant": ["meta_agent"], "notes": "整篇主旨，应命中该文档多个片段"}
 {"query": "meta_agent 中多智能体是怎么协作的？", "relevant": ["meta_agent"], "notes": "考察共享消息池/通信协议相关片段的召回"}
 {"query": "可执行反馈驱动的迭代式编程是什么？", "relevant": ["meta_agent"], "notes": "考察技术细节片段召回"}
+{"query": "meta_agent 的实验部分得出了什么结论？", "relevant": ["meta_agent"], "notes": "事实召回：实验结论片段"}
+{"query": "meta_agent 与单智能体基线相比优势在哪？", "relevant": ["meta_agent"], "notes": "对比类问法，同文档多片段"}
+{"query": "meta_agent 里提到的角色分工有哪些？", "relevant": ["meta_agent"], "notes": "多片段召回：角色定义散落多处"}
+{"query": "meta_agent 的局限性和未来工作是什么？", "relevant": ["meta_agent"], "notes": "尾部章节召回，考验切块完整性"}
+{"query": "meta_agent 的核心贡献用一句话概括是什么？", "relevant": ["meta_agent"], "notes": "摘要式问法，应命中引言/结论"}
 {"query": "child_code 的规章制度有哪些？", "relevant": ["child_code规章制度"], "notes": "多文档区分：应命中规章制度而非 meta_agent"}
 {"query": "学员考勤是怎么规定的？", "relevant": ["child_code规章制度"], "notes": "细节召回"}
-{"query": "今天午餐吃什么？", "relevant": [], "notes": "反例：知识库无相关内容，relevant 留空；应检索不到（或低相关），用于暴露过度召回"}
+{"query": "请假需要提前多久申请？", "relevant": ["child_code规章制度"], "notes": "细节召回：请假流程"}
+{"query": "教师上课迟到有什么处理办法？", "relevant": ["child_code规章制度"], "notes": "跨主体区分：教师侧制度"}
+{"query": "课时费是怎么结算的？", "relevant": ["child_code规章制度"], "notes": "数值型事实召回"}
+{"query": "学员退费政策是什么？", "relevant": ["child_code规章制度"], "notes": "政策类长片段召回"}
+{"query": "meta_agent 的协作机制和 child_code 的考勤制度分别是什么？", "relevant": ["meta_agent", "child_code规章制度"], "notes": "多文档召回：答案散落两篇，recall 应覆盖两者"}
+{"query": "结合论文思想，我们机构的教学管理可以借鉴什么？", "relevant": ["meta_agent", "child_code规章制度"], "notes": "开放问法：两篇都应被捞到，由生成层综合"}
+{"query": "今天午餐吃什么？", "relevant": [], "notes": "反例：知识库无相关内容，应检索不到，用于暴露过度召回"}
+{"query": "明天会下雨吗？", "relevant": [], "notes": "反例：常识问答，不应命中任何文档"}
+{"query": "Python 的装饰器怎么写？", "relevant": [], "notes": "反例：通用编程问题但库中无此内容，不应硬召回"}
+{"query": "帮我写一首关于春天的诗", "relevant": [], "notes": "反例：创作任务，检索应为空，由模型直接生成"}
+{"query": "你好，在吗？", "relevant": [], "notes": "反例：寒暄，needs_retrieval 应直接跳过检索"}
+{"query": "谢谢！", "relevant": [], "notes": "反例：致谢，无实质检索意图"}
