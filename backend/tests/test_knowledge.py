@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
 from app.main import app
+from tests.env_capability import embedding_available
 
 TEST_DB_NAME = "child_code_test"
 
@@ -82,6 +83,7 @@ def _wait_ready(client, headers, timeout: float = 180.0) -> dict:
     raise AssertionError("文档索引超时未完成")
 
 
+@pytest.mark.skipif(not embedding_available(), reason="本环境无可用 embedding（无 API 凭据/本地权重），跳过真实索引链路")
 def test_knowledge_full_chain(client):
     """上传 → 索引 → 检索 → 发布 → 广场可见 → 收录 → 取消收录 → 下架 → 删除。"""
     teacher = _register(client, "teacher", "kb-t")
