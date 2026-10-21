@@ -153,6 +153,68 @@ def test_intent_policy_default():
     assert pi.looks_like_menu("请假需提前一天在群里说") is False
 
 
+def test_intent_tool_followup_reuses_last_tool():
+    from app.services import parent_intent as pi
+
+    # 上轮来自 history 工具，本轮"对应课题呢" → 沿用 history（答案自然带课题）
+    r = pi.classify("对应课题呢", last_tool="history", last_user="小明上过哪些课")
+    assert r["intent"] == pi.TOOL and r["tool"] == "history"
+    # 无上下文的孤立指代（"那个呢"）→ 严格追问（澄清菜单），不乱检索
+    r2 = pi.classify("那个呢")
+    assert r2["intent"] == pi.CLARIFY
+    # 澄清菜单后回序号 → 直接映射工具
+    r3 = pi.classify("3", last_assistant=pi.CLARIFY_REPLY)
+    assert r3["intent"] == pi.TOOL and r3["tool"] == "history"
+
+
+def test_intent_synonyms():
+    from app.services import parent_tools as pt
+
+    assert pt.pick_tool("上课记录有哪些") == "history"
+    assert pt.pick_tool("出勤情况怎么样") == "history"
+    assert pt.pick_tool("讲了哪些课题") == "history"  # 课题归 history（带该节课课题）
+    assert pt.pick_tool("下一节课什么时候") == "schedule"
+
+
+def test_auto_close_stale_and_idle_limits(session_factory):
+    from app.crud import parent_service as ps
+    from app.models.system_setting import SystemSetting
+
+    db = session_factory()
+    try:
+        row = db.get(SystemSetting, 1)
+        if row is None:
+            row = SystemSetting(id=1)
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        row.parent_open_idle_hours = 1
+        row.parent_escalated_idle_hours = 1
+        db.commit()
+        open_h, esc_h = ps.idle_limits(db)
+        assert (open_h, esc_h) == (1, 1)
+
+        # 造一个"很久没动"的 open 会话 → 应被自动关闭
+        from datetime import datetime, timedelta
+
+        from app.models.parent_service import ParentServiceThread, THREAD_OPEN
+
+        th = ParentServiceThread(parent_id=None, anon_key="idle-test", status=THREAD_OPEN)
+        db.add(th)
+        db.commit()
+        db.refresh(th)
+        th.updated_at = datetime.now() - timedelta(hours=30)
+        db.commit()
+        stats = ps.auto_close_stale(db)
+        assert stats["open_closed"] >= 1
+        db.refresh(th)
+        assert th.status == "closed"
+        db.delete(th)
+        db.commit()
+    finally:
+        db.close()
+
+
 def test_risk_words_default_when_empty(session_factory):
     from app.crud import parent_service as ps
 

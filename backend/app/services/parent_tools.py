@@ -99,10 +99,11 @@ def tool_feedbacks(db: Session, user: User, *, limit: int = 3) -> dict:
 
 
 def tool_history(db: Session, user: User, *, limit: int = 10) -> dict:
-    """上课历史（上过哪些课/上了几次）：考勤×已上排课 join，含出勤/请假统计。
+    """上课历史（上过哪些课/上了几次/对应课题）：考勤×已上排课 join，含课题与出勤统计。
 
     口径：schedules.status=completed 且该学员在考勤表中（attended/leave 均计入"上过"），
-    已取消排课不计。数据来源确定性，答案可由工具结果直接渲染，零幻觉。
+    已取消排课不计。课题取自该节课的课后反馈 Feedback.topic（按 schedule_id+student_id
+    关联），无反馈的课标"未记录课题"。数据来源确定性，答案零幻觉。
     """
     from app.models.schedule import Attendance, AttendanceStatus, Schedule
 
@@ -129,6 +130,18 @@ def tool_history(db: Session, user: User, *, limit: int = 10) -> dict:
                 Schedule.status == ScheduleStatus.COMPLETED.value,
             )
         ) or 0
+        # 课题：按 (schedule_id, student_id) 取该节课的课后反馈课题
+        topics: dict[str, str] = {}
+        if rows:
+            sids = [sch.id for sch, _ in rows]
+            for fb_t, fb_sid in db.execute(
+                select(Feedback.topic, Feedback.schedule_id).where(
+                    Feedback.student_id == s.id,
+                    Feedback.schedule_id.in_(sids),
+                )
+            ).all():
+                if fb_t and fb_sid:
+                    topics[str(fb_sid)] = str(fb_t)
         lessons = []
         for sch, att in rows[:limit]:
             lessons.append({
@@ -137,6 +150,7 @@ def tool_history(db: Session, user: User, *, limit: int = 10) -> dict:
                 "subject": sch.schedule_class.subject if sch.schedule_class else "",
                 "teacher": sch.teacher.name if sch.teacher else "",
                 "start": sch.start_time.isoformat() if sch.start_time else "",
+                "topic": topics.get(str(sch.id), ""),
                 "attendance": "到课" if att.status == AttendanceStatus.ATTENDED.value else (
                     "请假" if att.status == AttendanceStatus.LEAVE.value else "未标记"
                 ),
@@ -150,11 +164,20 @@ def tool_history(db: Session, user: User, *, limit: int = 10) -> dict:
 
 # —— 规则路由：问题 → 工具（快、准、零 token；LLM 规划是 P1 后半的可选项） ——
 
-_BALANCE_HINTS = ("课时", "余额", "还剩", "剩余", "消耗", "欠费")
-_SCHEDULE_HINTS = ("课表", "上课时间", "什么时候上课", "这周", "下周", "排课", "补课时间")
-_FEEDBACK_HINTS = ("反馈", "老师怎么说", "评价", "表现怎么样", "学得怎么样")
-# 历史课：与未来课表区分（上过/学过/以往/几次）；"上课"类不含"上了/上过"仍走课表
-_HISTORY_HINTS = ("上过", "上了几", "学过", "历史课", "以往", "以前上", "之前上", "每次课", "上了哪些", "上过哪些", "上个哪些")
+_BALANCE_HINTS = ("课时", "余额", "还剩", "剩余", "消耗", "欠费", "充了多少", "扣了多少", "用了多少课时")
+# 历史课：与未来课表区分（上过/学过/以往/几次/出勤/记录/课题）
+# "课题"归 history：history 工具已 join Feedback.topic，直接给出"上过的课+对应课题"，
+# 比跳到 feedbacks 工具更贴切（家长问"对应课题呢"要的是那节课的课题，不是反馈摘要）。
+_HISTORY_HINTS = (
+    "上过", "上了几", "学过", "历史课", "以往", "以前上", "之前上", "每次课", "上了哪些", "上过哪些",
+    "上课记录", "出勤", "考勤", "到课", "签到", "缺课", "上几次", "课消", "课题",
+)
+# 课后反馈（"课题"不在此表：避免与 history 抢路由）
+_FEEDBACK_HINTS = (
+    "反馈", "老师怎么说", "评价", "表现怎么样", "学得怎么样", "课堂反馈", "课后反馈", "讲的内容",
+)
+# 未来课表
+_SCHEDULE_HINTS = ("课表", "上课时间", "什么时候上课", "这周", "下周", "排课", "补课时间", "接下来上什么", "下一节课")
 
 
 def pick_tool(content: str) -> str | None:

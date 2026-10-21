@@ -49,6 +49,9 @@ class SystemSetting(Base):
     )
     # 教师快捷回复 JSON 数组字符串（F8 低优，默认空）
     parent_quick_replies: Mapped[str] = mapped_column(Text, default="[]")
+    # 会话自动关闭阈值（小时）：open 会话闲置 / escalated 会话闲置 → 自动结束
+    parent_open_idle_hours: Mapped[int] = mapped_column(Integer, default=24)
+    parent_escalated_idle_hours: Mapped[int] = mapped_column(Integer, default=48)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

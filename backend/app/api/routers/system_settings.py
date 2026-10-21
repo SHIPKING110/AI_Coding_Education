@@ -54,6 +54,9 @@ class SystemSettingUpdate(BaseModel):
     parent_daily_limit: int | None = None
     parent_risk_words: list[str] | str | None = None
     parent_quick_replies: list[str] | str | None = None
+    # 会话自动关闭阈值（小时）：open 闲置 / escalated 闲置
+    parent_open_idle_hours: int | None = None
+    parent_escalated_idle_hours: int | None = None
 
 
 def _ensure_columns(db: Session) -> None:
@@ -82,6 +85,8 @@ def _ensure_columns(db: Session) -> None:
         "parent_daily_limit": "ALTER TABLE system_settings ADD COLUMN parent_daily_limit INTEGER DEFAULT 50",
         "parent_risk_words": "ALTER TABLE system_settings ADD COLUMN parent_risk_words TEXT DEFAULT '[]'",
         "parent_quick_replies": "ALTER TABLE system_settings ADD COLUMN parent_quick_replies TEXT DEFAULT '[]'",
+        "parent_open_idle_hours": "ALTER TABLE system_settings ADD COLUMN parent_open_idle_hours INTEGER DEFAULT 24",
+        "parent_escalated_idle_hours": "ALTER TABLE system_settings ADD COLUMN parent_escalated_idle_hours INTEGER DEFAULT 48",
     }
     for col, sql in ddl.items():
         if col not in cols:
@@ -131,6 +136,8 @@ def _out(row: SystemSetting) -> dict:
         "parent_daily_limit": int(getattr(row, "parent_daily_limit", 50) or 50),
         "parent_risk_words": _parse_str_list(getattr(row, "parent_risk_words", None)),
         "parent_quick_replies": _parse_str_list(getattr(row, "parent_quick_replies", None)),
+        "parent_open_idle_hours": int(getattr(row, "parent_open_idle_hours", 24) or 24),
+        "parent_escalated_idle_hours": int(getattr(row, "parent_escalated_idle_hours", 48) or 48),
     }
 
 
@@ -170,6 +177,11 @@ def update_settings(
             iv = int(v)
             if iv < 0 or iv > 1000:
                 raise HTTPException(status_code=400, detail=f"{k} 需在 0~1000 之间")
+            setattr(row, k, iv)
+        elif k in ("parent_open_idle_hours", "parent_escalated_idle_hours"):
+            iv = int(v)
+            if iv < 1 or iv > 720:
+                raise HTTPException(status_code=400, detail=f"{k} 需在 1~720 小时之间")
             setattr(row, k, iv)
         elif k in ("parent_risk_words", "parent_quick_replies"):
             arr = v if isinstance(v, list) else [s.strip() for s in str(v).split("\n") if s.strip()]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -96,6 +96,71 @@ def risk_words(db: Session) -> list[str]:
     except (ValueError, TypeError):
         pass
     return list(DEFAULT_RISK_WORDS)
+
+
+def idle_limits(db: Session) -> tuple[int, int]:
+    """(open 闲置小时, escalated 闲置小时)，读单例配置，缺失用默认 24/48。"""
+    s = get_setting(db)
+    open_h = int(getattr(s, "parent_open_idle_hours", 24) or 24)
+    esc_h = int(getattr(s, "parent_escalated_idle_hours", 48) or 48)
+    return max(1, open_h), max(1, esc_h)
+
+
+def auto_close_stale(db: Session) -> dict:
+    """惰性扫描：闲置超阈值的 open/escalated 会话自动关闭（返回关闭数）。
+
+    调用点：教师接待列表（打开即清理僵尸会话）、家长建/取会话（过期会话不再续用，
+    新消息自然开启新段）。不依赖 cron，部署即生效。
+    """
+    open_h, esc_h = idle_limits(db)
+    now = datetime.now()
+    stats = {"open_closed": 0, "escalated_closed": 0}
+    for status, hours, key in ((THREAD_OPEN, open_h, "open_closed"), (THREAD_ESCALATED, esc_h, "escalated_closed")):
+        cut = now - timedelta(hours=hours)
+        rows = db.scalars(
+            select(ParentServiceThread).where(
+                ParentServiceThread.status == status,
+                ParentServiceThread.updated_at < cut,
+            )
+        ).all()
+        for th in rows:
+            th.status = THREAD_CLOSED
+            stats[key] += 1
+    if stats["open_closed"] or stats["escalated_closed"]:
+        db.commit()
+    return stats
+
+
+def previous_segment_tail(
+    db: Session, *, parent_id: uuid.UUID | None, anon_key: str | None,
+    within_days: int = 7, limit: int = 4,
+) -> list[dict]:
+    """上一段已关闭会话的尾部消息（跨段轻量记忆：新段开头注入 prompt）。
+
+    仅取最近 7 天内关闭的上一段，把最后 limit 条（家长/客服/老师）按时间序返回。
+    """
+    stmt = select(ParentServiceThread).where(ParentServiceThread.status == THREAD_CLOSED)
+    if parent_id is not None:
+        stmt = stmt.where(ParentServiceThread.parent_id == parent_id)
+    elif anon_key:
+        stmt = stmt.where(ParentServiceThread.anon_key == anon_key)
+    else:
+        return []
+    cut = datetime.now() - timedelta(days=within_days)
+    stmt = stmt.where(ParentServiceThread.updated_at >= cut).order_by(ParentServiceThread.updated_at.desc())
+    prev = db.scalars(stmt.limit(1)).first()
+    if prev is None:
+        return []
+    msgs = list(
+        db.scalars(
+            select(ParentServiceMessage)
+            .where(ParentServiceMessage.thread_id == prev.id)
+            .order_by(ParentServiceMessage.created_at.desc())
+            .limit(limit)
+        ).all()
+    )
+    msgs.reverse()
+    return [{"role": m.role, "content": m.content} for m in msgs]
 
 
 def hit_risk_word(content: str, words: list[str]) -> str | None:
@@ -289,17 +354,20 @@ def find_or_create_parent_by_openid(db: Session, *, openid: str, nickname: str =
 __all__ = [
     "DEFAULT_RISK_WORDS",
     "add_message",
+    "auto_close_stale",
     "count_today_user_messages",
     "escalate",
     "find_or_create_parent_by_openid",
     "get_or_create_thread",
     "get_setting",
     "hit_risk_word",
+    "idle_limits",
     "list_messages",
     "list_threads_for_staff",
     "non_biz_hint",
     "parent_identity",
     "parent_visible_doc_ids",
+    "previous_segment_tail",
     "quota_limits",
     "resolve_owner_teacher",
     "risk_words",

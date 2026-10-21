@@ -50,11 +50,13 @@ const visibleTabs = computed(() => ({
   business: canSet('settings_tab_business'),
 }))
 
-// ---- 家长客服（配额/高风险词表，落库单例行） ----
+// ---- 家长客服（配额/高风险词表/会话自动关闭阈值，落库单例行） ----
 const parentAnonLimit = ref('3')
 const parentDailyLimit = ref('50')
 const parentRiskWords = ref('')
 const parentQuickReplies = ref('')
+const parentOpenIdleHours = ref('24')
+const parentEscalatedIdleHours = ref('48')
 
 async function loadParentService() {
   try {
@@ -63,6 +65,8 @@ async function loadParentService() {
     parentDailyLimit.value = String(s.parent_daily_limit ?? 50)
     parentRiskWords.value = (s.parent_risk_words ?? []).join('\n')
     parentQuickReplies.value = (s.parent_quick_replies ?? []).join('\n')
+    parentOpenIdleHours.value = String(s.parent_open_idle_hours ?? 24)
+    parentEscalatedIdleHours.value = String(s.parent_escalated_idle_hours ?? 48)
   } catch {
     // 旧库无列时保持默认，不打断业务设置加载
   }
@@ -76,6 +80,8 @@ async function saveParentService() {
       parent_daily_limit: Math.max(0, Math.min(1000, Number(parentDailyLimit.value) || 0)),
       parent_risk_words: toList(parentRiskWords.value),
       parent_quick_replies: toList(parentQuickReplies.value),
+      parent_open_idle_hours: Math.max(1, Math.min(720, Number(parentOpenIdleHours.value) || 24)),
+      parent_escalated_idle_hours: Math.max(1, Math.min(720, Number(parentEscalatedIdleHours.value) || 48)),
     })
     flash('家长客服设置已保存')
   } catch (e: any) {
@@ -427,13 +433,19 @@ onMounted(async () => {
       <!-- 家长客服 -->
       <section class="card">
         <h2>家长客服</h2>
-        <p class="muted">家长端 AI 客服的每日轮次配额（0=不限制该类）与高风险词表（命中强制转人工）；快捷回复供教师端一键插入。</p>
+        <p class="muted">家长端 AI 客服的每日轮次配额（0=不限制该类）与高风险词表（命中强制转人工）；快捷回复供教师端一键插入；闲置超时自动结束会话。</p>
         <div class="add-row">
           <label class="field-inline">匿名日限额
             <input v-model="parentAnonLimit" type="number" min="0" max="1000" step="1" class="inline-input num" />
           </label>
           <label class="field-inline">家长日限额
             <input v-model="parentDailyLimit" type="number" min="0" max="1000" step="1" class="inline-input num" />
+          </label>
+          <label class="field-inline">普通会话闲置(h)
+            <input v-model="parentOpenIdleHours" type="number" min="1" max="720" step="1" class="inline-input num" />
+          </label>
+          <label class="field-inline">待接待闲置(h)
+            <input v-model="parentEscalatedIdleHours" type="number" min="1" max="720" step="1" class="inline-input num" />
           </label>
           <button class="btn primary sm" @click="saveParentService">保存家长客服设置</button>
         </div>

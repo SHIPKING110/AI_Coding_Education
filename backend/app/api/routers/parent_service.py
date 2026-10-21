@@ -187,8 +187,10 @@ def _render_tool_answer(name: str, result: dict) -> str | None:
             lines = [head + detail]
             for it in (s.get("lessons") or [])[:6]:
                 st = (it.get("start") or "")[:16].replace("T", " ")
+                topic = it.get("topic") or ""
+                topic_part = f" 课题：{topic}" if topic else ""
                 lines.append(
-                    f"• {st}｜《{it.get('class','')}》{it.get('teacher','')}老师 · {it.get('attendance','')}"
+                    f"• {st}｜《{it.get('class','')}》{it.get('teacher','')}老师 · {it.get('attendance','')}{topic_part}"
                 )
             if len(s.get("lessons") or []) > 6:
                 lines.append(f"…（仅显示最近6节，共 {s['total']} 节）")
@@ -230,6 +232,8 @@ def parent_chat(
         raise HTTPException(status_code=429, detail=tip)
 
     # 2) 会话 + 存用户消息（归属教师在建会话时解析，用于模块映射+Rerank）
+    # 2a) 惰性清理：闲置超阈值的 open/escalated 会话自动关闭（教师端列表也会触发）
+    ps.auto_close_stale(db)
     th = ps.get_or_create_thread(db, parent_id=parent_id, anon_key=anon_key or None, thread_id=body.thread_id)
     if parent_id is not None and th.parent_id != parent_id:
         raise HTTPException(status_code=403, detail="无权访问该会话")
@@ -253,9 +257,24 @@ def parent_chat(
     from app.services import parent_intent as pi
 
     history_msgs = ps.list_messages(db, thread_id=th.id)[:-1][-6:]
+    # 跨段轻量记忆：本段首条消息时，注入上一段（7 天内已关闭）尾部 4 条
+    prev_tail: list[dict] = []
+    if len(history_msgs) == 0:
+        prev_tail = ps.previous_segment_tail(db, parent_id=parent_id, anon_key=anon_key or None)
     last_user_q = next((m.content for m in reversed(history_msgs) if m.role == ROLE_USER), "")
     last_assistant = next((m.content for m in reversed(history_msgs) if m.role == ROLE_ASSISTANT), "")
-    intent = pi.classify(content, last_assistant=last_assistant, last_user=last_user_q)
+    # 上轮是否来自查询工具（diag 记 tool 名）：用于"对应课题呢/具体哪些"这类跟随问句
+    # 直接重跑上轮工具（补全后自然带课题），而不是误杀进兜底。
+    last_tool = ""
+    for m in reversed(history_msgs):
+        if m.role == ROLE_ASSISTANT:
+            d = m.retrieval_diag or {}
+            if d.get("tool"):
+                last_tool = str(d.get("tool"))
+            break
+    intent = pi.classify(
+        content, last_assistant=last_assistant, last_user=last_user_q, last_tool=last_tool
+    )
     intent_name = intent["intent"]
 
     # 4a) 零 token 短路：越界/能力清单/寒暄
@@ -277,6 +296,12 @@ def parent_chat(
                        retrieval_diag={"intent": pi.SMALLTALK})
         return {"thread": _thread_out(th), "answer": reply, "refs": [], "escalated": False,
                 "kind": "smalltalk", "intent": pi.SMALLTALK}
+    if intent_name == pi.CLARIFY:
+        reply = pi.CLARIFY_REPLY
+        ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=reply,
+                       retrieval_diag={"intent": pi.CLARIFY})
+        return {"thread": _thread_out(th), "answer": reply, "refs": [], "escalated": False,
+                "kind": "clarify", "intent": pi.CLARIFY}
 
     # 4b) 查询工具（登录家长专属）：余额/历史课/课表/反馈走确定性数据，不走 RAG；
     # 匿名无工具（倒逼绑定）。学生范围由后端反查，绝不信任前端输入。
@@ -366,6 +391,11 @@ def parent_chat(
         f"{'家长' if m.role == ROLE_USER else ('老师' if m.role == ROLE_STAFF else '客服')}：{m.content[:200]}"
         for m in history_msgs
     )
+    prev_txt = ""
+    if prev_tail:
+        prev_txt = "上一段对话（供理解上下文）：\n" + "\n".join(
+            f"{'家长' if m['role'] == ROLE_USER else '客服'}：{m['content'][:150]}" for m in prev_tail
+        ) + "\n\n"
     menu_hint = (
         "家长这条消息是在选择你上一条列表中的若干项，请逐项简要回答；"
         "没有资料的项目直接说明未收录并建议转人工，不要编造引用。\n\n"
@@ -374,6 +404,7 @@ def parent_chat(
     )
     prompt = (
         menu_hint
+        + prev_txt
         + (f"最近对话：\n{hist_txt}\n\n" if hist_txt else "")
         + f"家长问题：{content}\n\n政策资料：\n{contexts}\n\n请按【输出格式】作答（200字内）。"
         "结合最近对话理解指代；末尾注明依据了哪份资料。"
@@ -482,6 +513,8 @@ def staff_threads(
     db: Session = Depends(get_db), user: User = Depends(_staff()),
 ) -> dict:
     _ = user
+    # 惰性清理：闲置超阈值的会话自动结束（open 24h / escalated 48h，阈值可后台改）
+    closed = ps.auto_close_stale(db)
     items = []
     for th in ps.list_threads_for_staff(db, limit=limit):
         ident = ps.parent_identity(db, th.parent_id)
@@ -511,7 +544,7 @@ def staff_threads(
             continue
         items.append(d)
     campuses = sorted({c for it in items for c in (it.get("campuses") or []) if c})
-    return {"items": items, "campuses": campuses}
+    return {"items": items, "campuses": campuses, "auto_closed": closed}
 
 
 @teacher_router.get("/threads/{thread_id}/messages")
