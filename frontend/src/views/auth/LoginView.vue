@@ -67,62 +67,121 @@ async function onSubmit() {
       <p class="gutter-hint">~ / 行舟 · 教师控制台</p>
     </div>
 
-    <!-- 3) 像素乐园：像素天空 + 天际线 + 草地 -->
+    <!-- 3) 像素乐园：编程乐园关卡 + 海龟画图彩虹轨迹 -->
     <div v-if="theme.loginTheme === 'light'" class="scene pixel-scene" aria-hidden="true">
-      <svg class="pixel-art" viewBox="0 0 1280 240" preserveAspectRatio="xMidYMax slice" shape-rendering="crispEdges">
-        <!-- 像素太阳 -->
-        <g fill="#ffd84d">
-          <rect x="1040" y="24" width="72" height="12" />
-          <rect x="1028" y="36" width="96" height="12" />
-          <rect x="1016" y="48" width="120" height="12" />
-          <rect x="1016" y="60" width="120" height="12" />
-          <rect x="1016" y="72" width="120" height="12" />
-          <rect x="1016" y="84" width="120" height="12" />
-          <rect x="1028" y="96" width="96" height="12" />
-          <rect x="1040" y="108" width="72" height="12" />
+      <svg class="pixel-art" viewBox="0 0 1280 280" preserveAspectRatio="xMidYMax slice" shape-rendering="crispEdges">
+        <!-- 像素太阳（暖） -->
+        <g fill="#ffd23f">
+          <rect x="1096" y="40" width="64" height="8" />
+          <rect x="1088" y="48" width="80" height="8" />
+          <rect x="1080" y="56" width="96" height="8" />
+          <rect x="1080" y="64" width="96" height="8" />
+          <rect x="1080" y="72" width="96" height="8" />
+          <rect x="1088" y="80" width="80" height="8" />
+          <rect x="1096" y="88" width="64" height="8" />
         </g>
         <!-- 像素云 -->
-        <g fill="#ffffff" opacity="0.92">
-          <rect x="150" y="52" width="72" height="12" />
-          <rect x="138" y="64" width="108" height="12" />
-          <rect x="150" y="76" width="84" height="12" />
-          <rect x="470" y="34" width="48" height="12" />
-          <rect x="458" y="46" width="84" height="12" />
-          <rect x="470" y="58" width="60" height="12" />
-          <rect x="760" y="70" width="60" height="12" />
-          <rect x="748" y="82" width="96" height="12" />
-          <rect x="760" y="94" width="72" height="12" />
+        <g fill="#ffffff" opacity="0.95">
+          <rect x="196" y="60" width="80" height="8" />
+          <rect x="180" y="68" width="112" height="8" />
+          <rect x="172" y="76" width="128" height="8" />
+          <rect x="188" y="84" width="96" height="8" />
+          <rect x="560" y="40" width="56" height="8" />
+          <rect x="548" y="48" width="80" height="8" />
+          <rect x="540" y="56" width="96" height="8" />
+          <rect x="552" y="64" width="72" height="8" />
         </g>
-        <!-- 像素天际线 -->
+        <!-- 圆润远山（薄荷绿，三级台阶） -->
+        <g fill="#bfe8ad">
+          <rect x="120" y="212" width="360" height="24" />
+          <rect x="152" y="204" width="296" height="8" />
+          <rect x="196" y="196" width="208" height="8" />
+          <rect x="236" y="188" width="128" height="8" />
+        </g>
+        <g fill="#a9dd94">
+          <rect x="760" y="212" width="400" height="24" />
+          <rect x="796" y="204" width="328" height="8" />
+          <rect x="848" y="196" width="224" height="8" />
+          <rect x="892" y="188" width="136" height="8" />
+        </g>
+        <!-- 像素树（左） -->
         <g>
-          <rect x="60" y="140" width="96" height="100" fill="#9db4d6" />
-          <rect x="168" y="108" width="72" height="132" fill="#b6c9e4" />
-          <rect x="252" y="156" width="108" height="84" fill="#9db4d6" />
-          <rect x="372" y="124" width="84" height="116" fill="#b6c9e4" />
-          <rect x="520" y="168" width="120" height="72" fill="#9db4d6" />
-          <rect x="652" y="132" width="72" height="108" fill="#b6c9e4" />
-          <rect x="820" y="150" width="108" height="90" fill="#9db4d6" />
-          <rect x="940" y="112" width="84" height="128" fill="#b6c9e4" />
+          <rect x="176" y="188" width="16" height="48" fill="#8b5a2b" />
+          <rect x="160" y="156" width="48" height="8" fill="#4fae45" />
+          <rect x="152" y="164" width="64" height="8" fill="#5fc457" />
+          <rect x="144" y="172" width="80" height="8" fill="#5fc457" />
+          <rect x="144" y="180" width="80" height="8" fill="#4fae45" />
+          <rect x="152" y="188" width="64" height="8" fill="#4fae45" />
         </g>
-        <!-- 窗户（白） -->
-        <g fill="#ffffff" opacity="0.85">
-          <rect x="76" y="156" width="12" height="12" /><rect x="100" y="156" width="12" height="12" />
-          <rect x="76" y="180" width="12" height="12" /><rect x="100" y="180" width="12" height="12" />
-          <rect x="184" y="124" width="12" height="12" /><rect x="208" y="124" width="12" height="12" />
-          <rect x="184" y="148" width="12" height="12" /><rect x="208" y="148" width="12" height="12" />
-          <rect x="388" y="140" width="12" height="12" /><rect x="412" y="140" width="12" height="12" />
-          <rect x="388" y="164" width="12" height="12" /><rect x="412" y="164" width="12" height="12" />
-          <rect x="956" y="128" width="12" height="12" /><rect x="980" y="128" width="12" height="12" />
-          <rect x="956" y="152" width="12" height="12" /><rect x="980" y="152" width="12" height="12" />
+        <!-- 像素树（右，较大） -->
+        <g>
+          <rect x="1120" y="176" width="16" height="60" fill="#8b5a2b" />
+          <rect x="1096" y="136" width="64" height="8" fill="#4fae45" />
+          <rect x="1088" y="144" width="80" height="8" fill="#5fc457" />
+          <rect x="1080" y="152" width="96" height="8" fill="#5fc457" />
+          <rect x="1080" y="160" width="96" height="8" fill="#5fc457" />
+          <rect x="1080" y="168" width="96" height="8" fill="#4fae45" />
+          <rect x="1088" y="176" width="80" height="8" fill="#4fae45" />
         </g>
-        <!-- 草地（双绿） -->
-        <rect x="0" y="216" width="1280" height="24" fill="#7ed957" />
-        <rect x="0" y="228" width="1280" height="12" fill="#53b86b" />
-        <g fill="#53b86b">
-          <rect x="40" y="210" width="8" height="8" /><rect x="220" y="212" width="8" height="8" />
-          <rect x="430" y="210" width="8" height="8" /><rect x="610" y="212" width="8" height="8" />
-          <rect x="800" y="210" width="8" height="8" /><rect x="1010" y="212" width="8" height="8" />
-          <rect x="1180" y="210" width="8" height="8" />
+        <!-- 海龟画图彩虹轨迹（签名元素）：一路拖到海龟尾部 -->
+        <g>
+          <rect x="96" y="216" width="32" height="8" fill="#ff8a7a" />
+          <rect x="128" y="208" width="32" height="8" fill="#ffb84d" />
+          <rect x="160" y="200" width="32" height="8" fill="#ffd84d" />
+          <rect x="192" y="200" width="32" height="8" fill="#9be15d" />
+          <rect x="224" y="208" width="32" height="8" fill="#4dd0c4" />
+          <rect x="256" y="216" width="32" height="8" fill="#6ec1ff" />
+          <rect x="288" y="216" width="32" height="8" fill="#c39bff" />
+          <rect x="320" y="208" width="32" height="8" fill="#ff8a7a" />
+          <rect x="352" y="200" width="32" height="8" fill="#ffb84d" />
+          <rect x="384" y="192" width="32" height="8" fill="#ffd84d" />
+          <rect x="416" y="192" width="32" height="8" fill="#9be15d" />
+          <rect x="448" y="200" width="32" height="8" fill="#4dd0c4" />
+          <rect x="480" y="208" width="32" height="8" fill="#6ec1ff" />
+          <rect x="512" y="216" width="32" height="8" fill="#c39bff" />
+          <rect x="544" y="216" width="32" height="8" fill="#ff8a7a" />
+          <rect x="576" y="208" width="32" height="8" fill="#ffb84d" />
+          <rect x="608" y="200" width="32" height="8" fill="#ffd84d" />
+          <rect x="640" y="200" width="32" height="8" fill="#9be15d" />
+          <rect x="672" y="208" width="32" height="8" fill="#4dd0c4" />
+          <rect x="704" y="216" width="32" height="8" fill="#6ec1ff" />
+          <rect x="736" y="216" width="32" height="8" fill="#c39bff" />
+        </g>
+        <!-- 像素海龟（面向右，正拖出轨迹） -->
+        <g>
+          <!-- 壳（深描边 + 亮填充 + 龟甲纹） -->
+          <rect x="772" y="196" width="72" height="8" fill="#2f7d3f" />
+          <rect x="764" y="204" width="88" height="24" fill="#2f7d3f" />
+          <rect x="780" y="196" width="56" height="8" fill="#5fc457" />
+          <rect x="772" y="204" width="72" height="16" fill="#6fd268" />
+          <rect x="796" y="208" width="8" height="8" fill="#3f9b4d" />
+          <rect x="820" y="208" width="8" height="8" fill="#3f9b4d" />
+          <rect x="808" y="216" width="8" height="8" fill="#3f9b4d" />
+          <!-- 头 + 眼 -->
+          <rect x="852" y="200" width="24" height="20" fill="#6fd268" />
+          <rect x="852" y="196" width="20" height="8" fill="#2f7d3f" />
+          <rect x="868" y="204" width="6" height="6" fill="#17322a" />
+          <!-- 四足 + 尾 -->
+          <rect x="776" y="228" width="12" height="10" fill="#3f9b4d" />
+          <rect x="824" y="228" width="12" height="10" fill="#3f9b4d" />
+          <rect x="760" y="212" width="8" height="8" fill="#3f9b4d" />
+        </g>
+        <!-- 草地平台（双层绿 + 顶部亮边 + 底部土壤） -->
+        <rect x="0" y="236" width="1280" height="44" fill="#6bcb5f" />
+        <rect x="0" y="236" width="1280" height="8" fill="#8ee07f" />
+        <rect x="0" y="268" width="1280" height="12" fill="#4fae45" />
+        <!-- 草尖 + 小fafa -->
+        <g fill="#5fc457">
+          <rect x="56" y="230" width="8" height="8" /><rect x="332" y="230" width="8" height="8" />
+          <rect x="512" y="230" width="8" height="8" /><rect x="704" y="230" width="8" height="8" />
+          <rect x="1016" y="230" width="8" height="8" /><rect x="1224" y="230" width="8" height="8" />
+        </g>
+        <g>
+          <rect x="384" y="252" width="8" height="8" fill="#ff8a9b" />
+          <rect x="376" y="260" width="8" height="8" fill="#5fc457" />
+          <rect x="376" y="244" width="8" height="8" fill="#ffd84d" />
+          <rect x="936" y="256" width="8" height="8" fill="#6ec1ff" />
+          <rect x="928" y="248" width="8" height="8" fill="#ffd84d" />
         </g>
       </svg>
     </div>
@@ -272,14 +331,14 @@ async function onSubmit() {
 
 /* 3) 像素乐园：像素天空 */
 .page.login-light {
-  --login-bg: #cfe9ff;
-  --login-ink: #17324f;
-  --login-sub: #4f6f8f;
-  --login-accent: #2563eb;
-  --login-field-bg: #f2f7fd;
-  --login-field-border: #cfe0f2;
-  --login-card-shadow: 0 20px 48px rgba(23, 50, 79, 0.18);
-  background: linear-gradient(180deg, #cfe9ff 0%, #e8f5ff 62%, #f2fbff 100%);
+  --login-bg: #bfe3ff;
+  --login-ink: #16324e;
+  --login-sub: #4a6a88;
+  --login-accent: #1d6fe0;
+  --login-field-bg: #f3f9ff;
+  --login-field-border: #cde2f5;
+  --login-card-shadow: 0 20px 48px rgba(23, 50, 79, 0.16);
+  background: linear-gradient(180deg, #a9dcff 0%, #cfeaff 46%, #eaf6ff 100%);
 }
 
 /* 4) 品牌海报：松林深底 */
@@ -414,7 +473,7 @@ async function onSubmit() {
   left: 0;
   right: 0;
   bottom: 0;
-  height: 240px;
+  height: 280px;
 }
 .pixel-art {
   width: 100%;

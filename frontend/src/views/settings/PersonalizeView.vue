@@ -535,14 +535,24 @@ h1 {
 .login-prev-dark i:nth-child(3) { left: 13px; top: 24px; width: 36px; height: 4px; border-radius: 2px; background: #6ea8fe; }
 .login-prev-dark i:nth-child(4) { left: 13px; top: 32px; width: 20px; height: 4px; border-radius: 2px; background: #e8b96b; }
 /* 像素乐园 */
-.login-prev-light { background: linear-gradient(180deg, #cfe9ff 0%, #e8f5ff 100%); }
-.login-prev-light i:nth-child(1) { right: 9px; top: 7px; width: 9px; height: 9px; background: #ffd84d; }
+.login-prev-light { background: linear-gradient(180deg, #a9dcff 0%, #cfeaff 46%, #eaf6ff 100%); }
+.login-prev-light i:nth-child(1) { right: 9px; top: 7px; width: 9px; height: 9px; background: #ffd23f; }
 .login-prev-light i:nth-child(2) { left: 7px; top: 9px; width: 14px; height: 5px; background: #fff; box-shadow: 4px 3px 0 #fff; }
 .login-prev-light i:nth-child(3) {
-  left: 8px; bottom: 8px; width: 10px; height: 14px; background: #9db4d6;
-  box-shadow: 14px 4px 0 #b6c9e4, 28px -2px 0 #9db4d6, 44px 5px 0 #b6c9e4, 54px 0 0 #9db4d6;
+  left: 8px; bottom: 12px; width: 14px; height: 8px; background: #a9dd94; border-radius: 3px 3px 0 0;
+  box-shadow: 22px -3px 0 #bfe8ad, 40px 1px 0 #a9dd94;
 }
-.login-prev-light i:nth-child(4) { left: 0; bottom: 0; width: 100%; height: 8px; background: #7ed957; border-top: 3px solid #53b86b; }
+.login-prev-light i:nth-child(4) {
+  left: 0; bottom: 0; width: 100%; height: 9px; background: #6bcb5f; border-top: 3px solid #8ee07f;
+  box-shadow: inset 0 -3px 0 #4fae45;
+}
+.login-prev-light::after {
+  content: '';
+  position: absolute;
+  left: 8px; bottom: 11px; width: 7px; height: 2px;
+  background: #ffd84d;
+  box-shadow: 9px 0 0 #9be15d, 18px 0 0 #6ec1ff, 27px 0 0 #c39bff, 36px 0 0 #ff8a7a;
+}
 /* 品牌海报 */
 .login-prev-poster { background: radial-gradient(circle at 25% 30%, #14503a 0%, #0a2b22 72%); }
 .login-prev-poster i:nth-child(1) {

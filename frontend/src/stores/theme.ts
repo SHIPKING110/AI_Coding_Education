@@ -10,7 +10,7 @@ import {
 export const LOGIN_THEMES = [
   { key: 'default', label: '积木工坊', desc: '浅色 · Scratch 积木拼搭' },
   { key: 'dark', label: '代码夜色', desc: '深色 · 编辑器视感' },
-  { key: 'light', label: '像素乐园', desc: '像素天空 · 天际线' },
+  { key: 'light', label: '像素乐园', desc: '编程乐园 · 海龟画图' },
   { key: 'poster', label: '品牌海报', desc: '左文右卡 · 标题制' },
 ] as const
 
