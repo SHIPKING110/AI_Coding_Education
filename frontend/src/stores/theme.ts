@@ -8,10 +8,10 @@ import {
 } from '@/api/system'
 
 export const LOGIN_THEMES = [
-  { key: 'default', label: '深空藏青' },
-  { key: 'light', label: '云白明亮' },
-  { key: 'dark', label: '暗夜' },
-  { key: 'poster', label: '品牌海报' },
+  { key: 'default', label: '积木工坊', desc: '浅色 · Scratch 积木拼搭' },
+  { key: 'dark', label: '代码夜色', desc: '深色 · 编辑器视感' },
+  { key: 'light', label: '像素乐园', desc: '像素天空 · 天际线' },
+  { key: 'poster', label: '品牌海报', desc: '左文右卡 · 标题制' },
 ] as const
 
 export const UI_THEMES = [

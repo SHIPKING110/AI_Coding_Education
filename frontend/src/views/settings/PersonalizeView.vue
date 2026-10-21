@@ -197,12 +197,15 @@ onMounted(load)
           <button
             v-for="t in LOGIN_THEMES"
             :key="t.key"
-            class="swatch"
+            class="swatch wide"
             :class="{ active: loginTheme === t.key }"
             @click="loginTheme = t.key"
           >
-            <span class="swatch-preview" :class="`login-prev-${t.key}`">登</span>
+            <span class="login-prev" :class="`login-prev-${t.key}`" aria-hidden="true">
+              <i v-for="n in 4" :key="n" />
+            </span>
             <span>{{ t.label }}</span>
+            <small>{{ t.desc }}</small>
           </button>
         </div>
       </section>
@@ -502,17 +505,52 @@ h1 {
   color: #fff;
   font-weight: 700;
 }
-.login-prev-default,
-.login-prev-dark {
-  background: #0f172a;
+/* ---- 登录主题迷你场景预览（74×48） ---- */
+.login-prev {
+  position: relative;
+  width: 74px;
+  height: 48px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  display: block;
 }
-.login-prev-light {
-  background: #eef2f7;
-  color: var(--ink-2);
+.login-prev i {
+  position: absolute;
+  display: block;
 }
-.login-prev-poster {
-  background: #123524;
+/* 积木工坊 */
+.login-prev-default { background: #eef3f2; }
+.login-prev-default i:nth-child(1) { left: 8px; top: 9px; width: 26px; height: 7px; border-radius: 2px; background: #ffab4d; }
+.login-prev-default i:nth-child(2) { left: 14px; top: 20px; width: 32px; height: 7px; border-radius: 2px; background: #7cc4ff; }
+.login-prev-default i:nth-child(3) { left: 10px; top: 31px; width: 24px; height: 7px; border-radius: 2px; background: #c39bff; }
+.login-prev-default i:nth-child(4) {
+  right: 9px; top: 8px; width: 20px; height: 32px; border-radius: 5px;
+  background: #fff; box-shadow: 0 2px 4px rgba(20, 41, 63, 0.18); border: 1px solid #e2e9e7;
 }
+/* 代码夜色 */
+.login-prev-dark { background: #0e1520; }
+.login-prev-dark i:nth-child(1) { inset: 7px 8px; background: #101826; border: 1px solid #22314c; border-radius: 5px; }
+.login-prev-dark i:nth-child(2) { left: 13px; top: 16px; width: 28px; height: 4px; border-radius: 2px; background: #9ece6a; }
+.login-prev-dark i:nth-child(3) { left: 13px; top: 24px; width: 36px; height: 4px; border-radius: 2px; background: #6ea8fe; }
+.login-prev-dark i:nth-child(4) { left: 13px; top: 32px; width: 20px; height: 4px; border-radius: 2px; background: #e8b96b; }
+/* 像素乐园 */
+.login-prev-light { background: linear-gradient(180deg, #cfe9ff 0%, #e8f5ff 100%); }
+.login-prev-light i:nth-child(1) { right: 9px; top: 7px; width: 9px; height: 9px; background: #ffd84d; }
+.login-prev-light i:nth-child(2) { left: 7px; top: 9px; width: 14px; height: 5px; background: #fff; box-shadow: 4px 3px 0 #fff; }
+.login-prev-light i:nth-child(3) {
+  left: 8px; bottom: 8px; width: 10px; height: 14px; background: #9db4d6;
+  box-shadow: 14px 4px 0 #b6c9e4, 28px -2px 0 #9db4d6, 44px 5px 0 #b6c9e4, 54px 0 0 #9db4d6;
+}
+.login-prev-light i:nth-child(4) { left: 0; bottom: 0; width: 100%; height: 8px; background: #7ed957; border-top: 3px solid #53b86b; }
+/* 品牌海报 */
+.login-prev-poster { background: radial-gradient(circle at 25% 30%, #14503a 0%, #0a2b22 72%); }
+.login-prev-poster i:nth-child(1) {
+  left: 8px; top: 12px; width: 26px; height: 5px; border-radius: 2px; background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 9px 0 rgba(255, 255, 255, 0.5), 0 18px 0 rgba(143, 212, 174, 0.6);
+}
+.login-prev-poster i:nth-child(2) { right: 8px; top: 8px; width: 22px; height: 32px; border-radius: 5px; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3); }
+.login-prev-poster i:nth-child(3) { left: 38px; bottom: 5px; width: 13px; height: 13px; border: 1.5px solid rgba(143, 212, 174, 0.5); border-radius: 4px; transform: rotate(8deg); }
 .swatch-preview.custom {
   background: var(--surface-alt);
   color: var(--ink-3);
