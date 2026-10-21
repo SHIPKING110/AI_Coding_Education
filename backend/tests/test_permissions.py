@@ -100,23 +100,25 @@ def test_admin_can_revoke_and_teacher_blocked(client):
 
 def test_expanded_keys_enforced(client):
     c, ids, tokens = client
-    # 默认：教师不可删学员、不可见订单（保持现有行为）；排课查看与新建保持开放
+    # 默认：教师不可删学员；排课查看与新建保持开放；订单可见性由 finance_revenue 控制（默认开）
     r = c.delete(f"/api/students/{ids['stu']}", headers=_h(tokens, "t1"))
     assert r.status_code == 403, r.text
     r = c.get("/api/orders", headers=_h(tokens, "t1"))
-    assert r.status_code == 403, r.text
+    assert r.status_code == 200, r.text
     r = c.get("/api/schedules", headers=_h(tokens, "t1"))
     assert r.status_code == 200, r.text
     # 管理员收权后排课不可见，重新开通后恢复
     c.put(f"/api/permissions/teachers/{ids['t1']}", headers=_h(tokens, "admin"),
-          json={"schedule_create": False})
+          json={"schedule_create": False, "finance_revenue": False})
     r = c.get("/api/schedules", headers=_h(tokens, "t1"))
+    assert r.status_code == 403, r.text
+    r = c.get("/api/orders", headers=_h(tokens, "t1"))
     assert r.status_code == 403, r.text
     # 管理员逐项开通后放行
     r = c.put(
         f"/api/permissions/teachers/{ids['t1']}",
         headers=_h(tokens, "admin"),
-        json={"student_delete": True, "order_visible": True, "schedule_create": True},
+        json={"student_delete": True, "finance_revenue": True, "schedule_create": True},
     )
     assert r.status_code == 200, r.text
     r = c.get("/api/orders", headers=_h(tokens, "t1"))
@@ -205,12 +207,16 @@ def test_teacher_only_own_schedules(client):
     )
     assert r.status_code == 201, r.text
     sched_id = r.json()["schedule"]["id"]
-    # 李老师查看/考勤王老师的排课 → 403
+    # 李老师查看王老师的排课：详情只读开放（可看，不可改）
     r = c.get(f"/api/schedules/{sched_id}", headers=_h(tokens, "t2"))
-    assert r.status_code == 403, r.text
+    assert r.status_code == 200, r.text
+    assert r.json()["readonly"] is True
+    # 李老师不可取消王老师的排课（写操作按归属校验 + 默认无 schedule_cancel）
     r = c.delete(f"/api/schedules/{sched_id}", headers=_h(tokens, "t2"))
     assert r.status_code == 403, r.text
-    # 本人可查看、可取消
+    # 管理员给 t1 开通取消权限后，本人可查看、可取消
+    c.put(f"/api/permissions/teachers/{ids['t1']}", headers=_h(tokens, "admin"),
+          json={"schedule_cancel": True})
     r = c.get(f"/api/schedules/{sched_id}", headers=_h(tokens, "t1"))
     assert r.status_code == 200, r.text
     r = c.delete(f"/api/schedules/{sched_id}", headers=_h(tokens, "t1"))

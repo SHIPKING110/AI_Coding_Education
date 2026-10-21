@@ -11,29 +11,33 @@ import os
 
 
 def embedding_available() -> bool:
-    """当前环境是否具备可用的向量化能力（远程 embedding API 或本地模型权重）。"""
-    # 1) 远程 embedding 凭据（任一 key 存在即认为可用）
-    for env_key in (
-        "EMBEDDING_API_KEY",
-        "EMBEDDING_BASE_URL",
-        "OPENAI_API_KEY",
-        "DASHSCOPE_API_KEY",
-        "MOONSHOT_API_KEY",
-        "EMBEDDING_MODEL",
-    ):
-        if os.getenv(env_key):
-            return True
-    # 2) 本地模型权重
+    """当前环境是否具备适合单测的向量化能力（远程 embedding API）。
+
+    判定依据是应用层真实的解析结果（system_settings 配置 + 全局 env 回退），
+    而不是只看环境变量——只有解析为远程 provider 时才可用：
+
+    - 本地 provider（sentence-transformers / Qwen 权重）首次加载需数分钟，
+      不适合放进常规单测（会拖死整轮），应作为独立的慢测试单独运行；
+    - 未配置任何可用 embedding 时，应用会回退本地权重，同样不适合单测。
+    """
+    try:
+        from app.services import rag
+
+        resolved = rag._resolve_embedding(force=True)
+    except Exception:
+        resolved = None
+    if resolved is not None and getattr(resolved, "provider", "") != "local":
+        return True
+    # 未配置系统级 embedding 时，应用回退全局 env（需 LLM_EMBED_MODEL + LLM_API_KEY 同时存在）；
+    # 两者缺一时仍会回退本地权重，故不视为可用。
     try:
         from app.core.config import get_settings
 
-        settings = get_settings()
-    except Exception:
-        return False
-    for attr in ("EMBEDDING_MODEL_PATH", "LOCAL_EMBEDDING_MODEL_PATH"):
-        path = getattr(settings, attr, None) or os.getenv(attr)
-        if path and os.path.isdir(str(path)):
+        s = get_settings()
+        if (s.LLM_EMBED_MODEL or "").strip() and (s.LLM_API_KEY or "").strip():
             return True
+    except Exception:
+        pass
     return False
 
 

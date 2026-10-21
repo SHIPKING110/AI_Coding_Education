@@ -635,7 +635,7 @@ def test_period_monthly_and_comparison_charts(client, admin_token):
 
 
 def test_empty_summary_ppt_blocked_422(client, admin_token):
-    """空数据门禁：正文全空 + 统计全零的季度/年度总结生成 PPT 返回 422。"""
+    """空内容门禁：正文全空的季度/年度总结无法保存（422），从源头杜绝空报告出 PPT。"""
     teacher = _register(client, "teacher", "rep-empty")
 
     q = client.post(
@@ -649,10 +649,9 @@ def test_empty_summary_ppt_blocked_422(client, admin_token):
         },
         headers=teacher,
     )
-    assert q.status_code == 201, q.text
-    ppt = client.post(f"/api/reports/{q.json()['id']}/ppt", headers=teacher)
-    assert ppt.status_code == 422, ppt.text
-    assert "暂无实质内容" in ppt.json()["detail"]
+    # 空正文在保存阶段即被拒（比"存下来再拦 PPT"更早防护）
+    assert q.status_code == 422, q.text
+    assert "内容为空" in q.json()["detail"]
 
     y = client.post(
         "/api/reports",
@@ -665,10 +664,8 @@ def test_empty_summary_ppt_blocked_422(client, admin_token):
         },
         headers=teacher,
     )
-    assert y.status_code == 201, y.text
-    ppt_y = client.post(f"/api/reports/{y.json()['id']}/ppt", headers=teacher)
-    assert ppt_y.status_code == 422, ppt_y.text
-    assert "季度总结" in ppt_y.json()["detail"]
+    assert y.status_code == 422, y.text
+    assert "内容为空" in y.json()["detail"]
 
 
 def test_yearly_ai_draft_uses_selected_quarters(client, admin_token, monkeypatch):
@@ -677,7 +674,7 @@ def test_yearly_ai_draft_uses_selected_quarters(client, admin_token, monkeypatch
 
     seen: dict = {}
 
-    def fake_period(*, report_type, material, extra_note=None, from_quarters=False):
+    def fake_period(*, report_type, material, extra_note=None, from_quarters=False, style_note=None):
         seen["material"] = material
         seen["from_quarters"] = from_quarters
         return {
@@ -727,7 +724,8 @@ def test_yearly_ai_draft_uses_selected_quarters(client, admin_token, monkeypatch
             "period_start": "2026-01-01T00:00:00",
             "period_end": "2026-12-31T00:00:00",
             "title": "2026 年度",
-            "content": {},
+            # 非空占位正文（保存要求）：AI 草稿会整体覆盖 content，不影响聚合测试
+            "content": {"summary": "占位"},
         },
         headers=teacher,
     )
@@ -764,7 +762,7 @@ def test_yearly_includes_q1_boundary(client, admin_token, monkeypatch):
 
     seen: dict = {}
 
-    def fake_period(*, report_type, material, extra_note=None, from_quarters=False):
+    def fake_period(*, report_type, material, extra_note=None, from_quarters=False, style_note=None):
         seen["material"] = material
         return {
             "title": "年度", "summary": "s", "highlights": "h",
@@ -802,7 +800,9 @@ def test_yearly_includes_q1_boundary(client, admin_token, monkeypatch):
         "/api/reports",
         json={
             "type": "yearly", "period_start": "2026-01-01T00:00:00",
-            "period_end": "2026-12-31T23:59:59", "title": "2026年度", "content": {},
+            "period_end": "2026-12-31T23:59:59", "title": "2026年度",
+            # 非空占位正文（保存要求）
+            "content": {"summary": "占位"},
         },
         headers=teacher,
     )
@@ -978,7 +978,7 @@ def test_ppt_build_custom(client, admin_token):
     url = build.json()["ppt_url"]
     assert url.startswith("ppt/") and url.endswith(".pptx")
 
-    # 空数据报告：仍被门禁拦截
+    # 空正文报告：在保存阶段即被拒（422），不会产生可出 PPT 的空报告
     empty = client.post(
         "/api/reports",
         json={
@@ -990,13 +990,7 @@ def test_ppt_build_custom(client, admin_token):
         },
         headers=teacher,
     )
-    assert empty.status_code == 201
-    blocked = client.post(
-        f"/api/reports/{empty.json()['id']}/ppt-build",
-        json={"slides": []},
-        headers=teacher,
-    )
-    assert blocked.status_code == 422, blocked.text
+    assert empty.status_code == 422, empty.text
 
 
 def test_ppt_chat_streams_sse(client, admin_token, monkeypatch):

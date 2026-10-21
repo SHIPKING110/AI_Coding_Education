@@ -403,15 +403,23 @@ def test_attendance_blocked_before_start(client, admin_token):
     )
     sched_id = r.json()["schedule"]["id"]
 
-    # 已到 / 请假 都应被拦截并提示"未到上课时间"
-    for st in ("attended", "leave"):
-        sub = client.post(
-            f"/api/schedules/{sched_id}/attendance",
-            json={"items": [{"student_id": sid, "status": st}]},
-            headers=admin_token,
-        )
-        assert sub.status_code == 400
-        assert "未到上课时间" in sub.json()["detail"]
+    # 未到上课时间：签到被拦截并提示"未到上课时间"；请假允许提前标记（方便家长提前请假）
+    sub = client.post(
+        f"/api/schedules/{sched_id}/attendance",
+        json={"items": [{"student_id": sid, "status": "attended"}]},
+        headers=admin_token,
+    )
+    assert sub.status_code == 400
+    assert "未到上课时间" in sub.json()["detail"]
+
+    # 提前请假允许（不扣课时）
+    leave = client.post(
+        f"/api/schedules/{sched_id}/attendance",
+        json={"items": [{"student_id": sid, "status": "leave"}]},
+        headers=admin_token,
+    )
+    assert leave.status_code == 200
+    assert len(leave.json()["lesson_records"]) == 0
 
     # 余额未被扣减
     stu = client.get(f"/api/students/{sid}", headers=admin_token)
