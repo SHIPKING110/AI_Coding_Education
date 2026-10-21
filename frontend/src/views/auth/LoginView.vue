@@ -67,121 +67,199 @@ async function onSubmit() {
       <p class="gutter-hint">~ / 行舟 · 教师控制台</p>
     </div>
 
-    <!-- 3) 像素乐园：编程乐园关卡 + 海龟画图彩虹轨迹 -->
+    <!-- 3) 像素乐园：童趣编程乐园（分层阴影 + 海龟画图彩虹轨迹 + 天空点缀） -->
+    <div v-if="theme.loginTheme === 'light'" class="scene pixel-sky" aria-hidden="true">
+      <!-- 像素太阳（暖，带光晕） -->
+      <svg class="px-sun" viewBox="0 0 132 132" shape-rendering="crispEdges">
+        <g fill="#ffe6a6" opacity="0.7">
+          <rect x="48" y="6" width="12" height="12" /><rect x="66" y="6" width="12" height="12" />
+          <rect x="6" y="48" width="12" height="12" /><rect x="6" y="66" width="12" height="12" />
+          <rect x="108" y="48" width="12" height="12" /><rect x="108" y="66" width="12" height="12" />
+          <rect x="48" y="108" width="12" height="12" /><rect x="66" y="108" width="12" height="12" />
+        </g>
+        <g fill="#ffd24c">
+          <rect x="54" y="24" width="24" height="12" />
+          <rect x="42" y="36" width="48" height="12" />
+          <rect x="30" y="48" width="72" height="12" />
+          <rect x="30" y="60" width="72" height="12" />
+          <rect x="30" y="72" width="72" height="12" />
+          <rect x="42" y="84" width="48" height="12" />
+          <rect x="54" y="96" width="24" height="12" />
+        </g>
+        <g fill="#ffe58c">
+          <rect x="42" y="36" width="24" height="12" />
+          <rect x="42" y="48" width="12" height="12" />
+        </g>
+      </svg>
+      <!-- 像素云 A -->
+      <svg class="px-cloud px-cloud-a" viewBox="0 0 168 72" shape-rendering="crispEdges">
+        <g fill="#ffffff">
+          <rect x="24" y="30" width="120" height="20" />
+          <rect x="40" y="18" width="88" height="14" />
+          <rect x="60" y="8" width="48" height="12" />
+        </g>
+        <g fill="#dcebfb">
+          <rect x="24" y="48" width="120" height="8" />
+        </g>
+      </svg>
+      <!-- 像素云 B -->
+      <svg class="px-cloud px-cloud-b" viewBox="0 0 132 60" shape-rendering="crispEdges">
+        <g fill="#ffffff">
+          <rect x="18" y="26" width="96" height="16" />
+          <rect x="34" y="14" width="64" height="12" />
+          <rect x="50" y="6" width="32" height="10" />
+        </g>
+        <g fill="#dcebfb">
+          <rect x="18" y="40" width="96" height="6" />
+        </g>
+      </svg>
+      <!-- 像素云 C（小，高） -->
+      <svg class="px-cloud px-cloud-c" viewBox="0 0 108 50" shape-rendering="crispEdges">
+        <g fill="#ffffff">
+          <rect x="14" y="22" width="80" height="14" />
+          <rect x="28" y="12" width="52" height="10" />
+          <rect x="42" y="4" width="24" height="8" />
+        </g>
+        <g fill="#dcebfb">
+          <rect x="14" y="34" width="80" height="5" />
+        </g>
+      </svg>
+      <!-- 像素云 D（右，中高） -->
+      <svg class="px-cloud px-cloud-d" viewBox="0 0 132 60" shape-rendering="crispEdges">
+        <g fill="#ffffff">
+          <rect x="18" y="26" width="96" height="16" />
+          <rect x="34" y="14" width="64" height="12" />
+          <rect x="50" y="6" width="32" height="10" />
+        </g>
+        <g fill="#dcebfb">
+          <rect x="18" y="40" width="96" height="6" />
+        </g>
+      </svg>
+    </div>
+
     <div v-if="theme.loginTheme === 'light'" class="scene pixel-scene" aria-hidden="true">
-      <svg class="pixel-art" viewBox="0 0 1280 280" preserveAspectRatio="xMidYMax slice" shape-rendering="crispEdges">
-        <!-- 像素太阳（暖） -->
-        <g fill="#ffd23f">
-          <rect x="1096" y="40" width="64" height="8" />
-          <rect x="1088" y="48" width="80" height="8" />
-          <rect x="1080" y="56" width="96" height="8" />
-          <rect x="1080" y="64" width="96" height="8" />
-          <rect x="1080" y="72" width="96" height="8" />
-          <rect x="1088" y="80" width="80" height="8" />
-          <rect x="1096" y="88" width="64" height="8" />
+      <svg class="pixel-art" viewBox="0 0 1440 320" preserveAspectRatio="xMidYMax slice" shape-rendering="crispEdges">
+        <!-- 天空小鸟 -->
+        <g fill="#5e7a96">
+          <rect x="250" y="70" width="8" height="8" /><rect x="258" y="62" width="8" height="8" /><rect x="266" y="70" width="8" height="8" />
+          <rect x="320" y="92" width="8" height="8" /><rect x="328" y="84" width="8" height="8" /><rect x="336" y="92" width="8" height="8" />
+          <rect x="470" y="66" width="8" height="8" /><rect x="478" y="58" width="8" height="8" /><rect x="486" y="66" width="8" height="8" />
         </g>
-        <!-- 像素云 -->
-        <g fill="#ffffff" opacity="0.95">
-          <rect x="196" y="60" width="80" height="8" />
-          <rect x="180" y="68" width="112" height="8" />
-          <rect x="172" y="76" width="128" height="8" />
-          <rect x="188" y="84" width="96" height="8" />
-          <rect x="560" y="40" width="56" height="8" />
-          <rect x="548" y="48" width="80" height="8" />
-          <rect x="540" y="56" width="96" height="8" />
-          <rect x="552" y="64" width="72" height="8" />
+        <!-- 远山（薄荷绿，双层阴影） -->
+        <g fill="#b7e4a8">
+          <rect x="0" y="222" width="1440" height="28" />
+          <rect x="110" y="214" width="300" height="8" />
+          <rect x="164" y="206" width="196" height="8" />
+          <rect x="214" y="198" width="104" height="8" />
+          <rect x="820" y="214" width="360" height="8" />
+          <rect x="884" y="206" width="240" height="8" />
+          <rect x="944" y="198" width="128" height="8" />
         </g>
-        <!-- 圆润远山（薄荷绿，三级台阶） -->
-        <g fill="#bfe8ad">
-          <rect x="120" y="212" width="360" height="24" />
-          <rect x="152" y="204" width="296" height="8" />
-          <rect x="196" y="196" width="208" height="8" />
-          <rect x="236" y="188" width="128" height="8" />
+        <g fill="#9dd48d">
+          <rect x="0" y="242" width="1440" height="10" />
         </g>
-        <g fill="#a9dd94">
-          <rect x="760" y="212" width="400" height="24" />
-          <rect x="796" y="204" width="328" height="8" />
-          <rect x="848" y="196" width="224" height="8" />
-          <rect x="892" y="188" width="136" height="8" />
+        <!-- 近山（绿，双层阴影） -->
+        <g fill="#68be5c">
+          <rect x="30" y="232" width="280" height="12" />
+          <rect x="84" y="224" width="160" height="8" />
+          <rect x="126" y="216" width="80" height="8" />
+          <rect x="980" y="232" width="320" height="12" />
+          <rect x="1034" y="224" width="212" height="8" />
+          <rect x="1088" y="216" width="112" height="8" />
         </g>
-        <!-- 像素树（左） -->
+        <g fill="#82d477">
+          <rect x="84" y="224" width="160" height="6" />
+          <rect x="1034" y="224" width="212" height="6" />
+        </g>
+        <!-- 松树 A（三色调针叶 + 树干） -->
         <g>
-          <rect x="176" y="188" width="16" height="48" fill="#8b5a2b" />
-          <rect x="160" y="156" width="48" height="8" fill="#4fae45" />
-          <rect x="152" y="164" width="64" height="8" fill="#5fc457" />
-          <rect x="144" y="172" width="80" height="8" fill="#5fc457" />
-          <rect x="144" y="180" width="80" height="8" fill="#4fae45" />
-          <rect x="152" y="188" width="64" height="8" fill="#4fae45" />
+          <rect x="556" y="230" width="16" height="22" fill="#7a5230" />
+          <rect x="556" y="230" width="6" height="22" fill="#5f3f24" />
+          <rect x="570" y="196" width="12" height="10" fill="#5fcb6b" />
+          <rect x="562" y="206" width="28" height="10" fill="#3fa854" />
+          <rect x="552" y="216" width="48" height="10" fill="#3fa854" />
+          <rect x="542" y="226" width="68" height="10" fill="#2e8544" />
         </g>
-        <!-- 像素树（右，较大） -->
+        <!-- 松树 B（右侧，稍大） -->
         <g>
-          <rect x="1120" y="176" width="16" height="60" fill="#8b5a2b" />
-          <rect x="1096" y="136" width="64" height="8" fill="#4fae45" />
-          <rect x="1088" y="144" width="80" height="8" fill="#5fc457" />
-          <rect x="1080" y="152" width="96" height="8" fill="#5fc457" />
-          <rect x="1080" y="160" width="96" height="8" fill="#5fc457" />
-          <rect x="1080" y="168" width="96" height="8" fill="#4fae45" />
-          <rect x="1088" y="176" width="80" height="8" fill="#4fae45" />
+          <rect x="1000" y="222" width="18" height="30" fill="#7a5230" />
+          <rect x="1000" y="222" width="7" height="30" fill="#5f3f24" />
+          <rect x="1016" y="180" width="14" height="12" fill="#5fcb6b" />
+          <rect x="1006" y="192" width="34" height="10" fill="#3fa854" />
+          <rect x="996" y="202" width="54" height="10" fill="#3fa854" />
+          <rect x="984" y="212" width="78" height="12" fill="#2e8544" />
         </g>
-        <!-- 海龟画图彩虹轨迹（签名元素）：一路拖到海龟尾部 -->
+        <!-- 海龟画图彩虹轨迹（签名元素）：连绵正弦波，一路拖到海龟尾 -->
         <g>
-          <rect x="96" y="216" width="32" height="8" fill="#ff8a7a" />
-          <rect x="128" y="208" width="32" height="8" fill="#ffb84d" />
-          <rect x="160" y="200" width="32" height="8" fill="#ffd84d" />
-          <rect x="192" y="200" width="32" height="8" fill="#9be15d" />
-          <rect x="224" y="208" width="32" height="8" fill="#4dd0c4" />
-          <rect x="256" y="216" width="32" height="8" fill="#6ec1ff" />
-          <rect x="288" y="216" width="32" height="8" fill="#c39bff" />
-          <rect x="320" y="208" width="32" height="8" fill="#ff8a7a" />
-          <rect x="352" y="200" width="32" height="8" fill="#ffb84d" />
-          <rect x="384" y="192" width="32" height="8" fill="#ffd84d" />
-          <rect x="416" y="192" width="32" height="8" fill="#9be15d" />
-          <rect x="448" y="200" width="32" height="8" fill="#4dd0c4" />
-          <rect x="480" y="208" width="32" height="8" fill="#6ec1ff" />
-          <rect x="512" y="216" width="32" height="8" fill="#c39bff" />
-          <rect x="544" y="216" width="32" height="8" fill="#ff8a7a" />
-          <rect x="576" y="208" width="32" height="8" fill="#ffb84d" />
-          <rect x="608" y="200" width="32" height="8" fill="#ffd84d" />
-          <rect x="640" y="200" width="32" height="8" fill="#9be15d" />
-          <rect x="672" y="208" width="32" height="8" fill="#4dd0c4" />
-          <rect x="704" y="216" width="32" height="8" fill="#6ec1ff" />
-          <rect x="736" y="216" width="32" height="8" fill="#c39bff" />
+          <rect x="36" y="206" width="22" height="8" rx="2" fill="#ff8a7a" />
+          <rect x="52" y="199" width="22" height="8" rx="2" fill="#ff9a4d" />
+          <rect x="68" y="196" width="22" height="8" rx="2" fill="#ffc93c" />
+          <rect x="84" y="199" width="22" height="8" rx="2" fill="#9be15d" />
+          <rect x="100" y="206" width="22" height="8" rx="2" fill="#43cfc0" />
+          <rect x="116" y="214" width="22" height="8" rx="2" fill="#5cb8ff" />
+          <rect x="132" y="219" width="22" height="8" rx="2" fill="#b18bff" />
+          <rect x="148" y="219" width="22" height="8" rx="2" fill="#ff8a7a" />
+          <rect x="164" y="213" width="22" height="8" rx="2" fill="#ff9a4d" />
+          <rect x="180" y="205" width="22" height="8" rx="2" fill="#ffc93c" />
+          <rect x="196" y="199" width="22" height="8" rx="2" fill="#9be15d" />
+          <rect x="212" y="197" width="22" height="8" rx="2" fill="#43cfc0" />
+          <rect x="228" y="201" width="22" height="8" rx="2" fill="#5cb8ff" />
+          <rect x="244" y="209" width="22" height="8" rx="2" fill="#b18bff" />
+          <rect x="260" y="216" width="22" height="8" rx="2" fill="#ff8a7a" />
+          <rect x="276" y="219" width="22" height="8" rx="2" fill="#ff9a4d" />
         </g>
-        <!-- 像素海龟（面向右，正拖出轨迹） -->
+        <!-- 像素海龟（面向右，圆顶龟壳 + 头颈 + 四足 + 尾，正拖出轨迹） -->
         <g>
-          <!-- 壳（深描边 + 亮填充 + 龟甲纹） -->
-          <rect x="772" y="196" width="72" height="8" fill="#2f7d3f" />
-          <rect x="764" y="204" width="88" height="24" fill="#2f7d3f" />
-          <rect x="780" y="196" width="56" height="8" fill="#5fc457" />
-          <rect x="772" y="204" width="72" height="16" fill="#6fd268" />
-          <rect x="796" y="208" width="8" height="8" fill="#3f9b4d" />
-          <rect x="820" y="208" width="8" height="8" fill="#3f9b4d" />
-          <rect x="808" y="216" width="8" height="8" fill="#3f9b4d" />
-          <!-- 头 + 眼 -->
-          <rect x="852" y="200" width="24" height="20" fill="#6fd268" />
-          <rect x="852" y="196" width="20" height="8" fill="#2f7d3f" />
-          <rect x="868" y="204" width="6" height="6" fill="#17322a" />
+          <!-- 龟壳圆顶（自下而上逐层收窄，形成穹顶） -->
+          <rect x="316" y="240" width="72" height="8" rx="4" fill="#2f7d46" />
+          <rect x="320" y="234" width="64" height="8" fill="#3f9b4d" />
+          <rect x="324" y="228" width="56" height="8" fill="#5fc457" />
+          <rect x="330" y="222" width="44" height="8" fill="#5fc457" />
+          <rect x="338" y="216" width="28" height="8" fill="#8fe07f" />
+          <rect x="346" y="212" width="12" height="6" rx="3" fill="#9be48a" />
+          <!-- 龟甲纹（沿穹顶分布） -->
+          <rect x="332" y="228" width="7" height="7" fill="#3f9b4d" />
+          <rect x="366" y="228" width="7" height="7" fill="#3f9b4d" />
+          <rect x="350" y="234" width="7" height="7" fill="#3f9b4d" />
+          <!-- 头颈（右）+ 眼 + 腮红 + 微笑 -->
+          <rect x="384" y="230" width="26" height="16" rx="7" fill="#b8ec9b" />
+          <rect x="392" y="234" width="6" height="6" fill="#1b2a22" />
+          <rect x="393" y="235" width="2" height="2" fill="#ffffff" />
+          <rect x="402" y="240" width="6" height="3" rx="1.5" fill="#2f7d46" />
+          <rect x="386" y="240" width="6" height="4" rx="2" fill="#ff9aa6" opacity="0.7" />
           <!-- 四足 + 尾 -->
-          <rect x="776" y="228" width="12" height="10" fill="#3f9b4d" />
-          <rect x="824" y="228" width="12" height="10" fill="#3f9b4d" />
-          <rect x="760" y="212" width="8" height="8" fill="#3f9b4d" />
+          <rect x="326" y="246" width="12" height="10" rx="3" fill="#8fd070" />
+          <rect x="364" y="246" width="12" height="10" rx="3" fill="#8fd070" />
+          <rect x="308" y="234" width="9" height="9" rx="3" fill="#8fd070" />
         </g>
-        <!-- 草地平台（双层绿 + 顶部亮边 + 底部土壤） -->
-        <rect x="0" y="236" width="1280" height="44" fill="#6bcb5f" />
-        <rect x="0" y="236" width="1280" height="8" fill="#8ee07f" />
-        <rect x="0" y="268" width="1280" height="12" fill="#4fae45" />
-        <!-- 草尖 + 小fafa -->
-        <g fill="#5fc457">
-          <rect x="56" y="230" width="8" height="8" /><rect x="332" y="230" width="8" height="8" />
-          <rect x="512" y="230" width="8" height="8" /><rect x="704" y="230" width="8" height="8" />
-          <rect x="1016" y="230" width="8" height="8" /><rect x="1224" y="230" width="8" height="8" />
+        <!-- 草地平台（三色调 + 草尖 + 花 + 蘑菇） -->
+        <rect x="0" y="250" width="1440" height="8" fill="#93e585" />
+        <rect x="0" y="258" width="1440" height="42" fill="#6bcd5e" />
+        <rect x="0" y="300" width="1440" height="20" fill="#4fb24e" />
+        <g fill="#7ed973">
+          <rect x="70" y="244" width="6" height="8" /><rect x="300" y="244" width="6" height="8" />
+          <rect x="700" y="244" width="6" height="8" /><rect x="900" y="244" width="6" height="8" />
+          <rect x="1180" y="244" width="6" height="8" /><rect x="1360" y="244" width="6" height="8" />
         </g>
+        <!-- 花朵（左） -->
         <g>
-          <rect x="384" y="252" width="8" height="8" fill="#ff8a9b" />
-          <rect x="376" y="260" width="8" height="8" fill="#5fc457" />
-          <rect x="376" y="244" width="8" height="8" fill="#ffd84d" />
-          <rect x="936" y="256" width="8" height="8" fill="#6ec1ff" />
-          <rect x="928" y="248" width="8" height="8" fill="#ffd84d" />
+          <rect x="150" y="268" width="6" height="6" fill="#ff8fbf" /><rect x="144" y="274" width="6" height="6" fill="#ff8fbf" />
+          <rect x="156" y="274" width="6" height="6" fill="#ff8fbf" /><rect x="150" y="280" width="6" height="6" fill="#ff8fbf" />
+          <rect x="150" y="274" width="6" height="6" fill="#ffe066" />
+          <rect x="150" y="286" width="4" height="10" fill="#4fa854" />
+        </g>
+        <!-- 蘑菇（右） -->
+        <g>
+          <rect x="1120" y="268" width="36" height="14" rx="5" fill="#ff7b7b" />
+          <rect x="1128" y="272" width="6" height="6" fill="#fff3e0" /><rect x="1142" y="272" width="6" height="6" fill="#fff3e0" />
+          <rect x="1132" y="282" width="12" height="14" fill="#fff3e0" />
+        </g>
+        <!-- 花朵（右） -->
+        <g>
+          <rect x="1270" y="264" width="6" height="6" fill="#6ec1ff" /><rect x="1264" y="270" width="6" height="6" fill="#6ec1ff" />
+          <rect x="1276" y="270" width="6" height="6" fill="#6ec1ff" /><rect x="1270" y="276" width="6" height="6" fill="#6ec1ff" />
+          <rect x="1270" y="270" width="6" height="6" fill="#ffe066" />
+          <rect x="1270" y="282" width="4" height="10" fill="#4fa854" />
         </g>
       </svg>
     </div>
@@ -473,13 +551,66 @@ async function onSubmit() {
   left: 0;
   right: 0;
   bottom: 0;
-  height: 280px;
+  height: 320px;
 }
 .pixel-art {
   width: 100%;
   height: 100%;
   display: block;
   image-rendering: pixelated;
+}
+.pixel-sky {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.px-sun {
+  position: absolute;
+  top: 48px;
+  right: 110px;
+  width: 132px;
+  height: 132px;
+  image-rendering: pixelated;
+}
+.px-cloud {
+  position: absolute;
+  image-rendering: pixelated;
+  opacity: 0.96;
+}
+.px-cloud-a {
+  top: 96px;
+  left: 9%;
+  width: 168px;
+  height: 72px;
+  animation: cloud-drift 26s ease-in-out infinite alternate;
+}
+.px-cloud-b {
+  top: 180px;
+  right: 12%;
+  width: 132px;
+  height: 60px;
+  animation: cloud-drift 34s ease-in-out infinite alternate-reverse;
+}
+.px-cloud-c {
+  top: 252px;
+  left: 20%;
+  width: 104px;
+  height: 48px;
+  opacity: 0.9;
+  animation: cloud-drift 40s ease-in-out infinite alternate;
+}
+.px-cloud-d {
+  top: 130px;
+  right: 30%;
+  width: 120px;
+  height: 54px;
+  opacity: 0.92;
+  animation: cloud-drift 30s ease-in-out infinite alternate-reverse;
+}
+@keyframes cloud-drift {
+  from { transform: translateX(0); }
+  to { transform: translateX(20px); }
 }
 
 /* —— 品牌海报 —— */
@@ -777,7 +908,8 @@ input:focus {
 /* ============ 无障碍：尊重减少动效 ============ */
 @media (prefers-reduced-motion: reduce) {
   .card,
-  .blk {
+  .blk,
+  .px-cloud {
     animation: none;
     opacity: 1;
   }
