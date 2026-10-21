@@ -113,6 +113,46 @@ def test_answer_numbers_safe():
     assert pt.answer_numbers_safe("未来7天有3节课", ok_result) is True  # 无小数不拦截
 
 
+def test_intent_capability_smalltalk_unknown():
+    from app.services import parent_intent as pi
+
+    assert pi.classify("你有哪些服务")["intent"] == pi.CAPABILITY
+    assert pi.classify("你能做什么")["intent"] == pi.CAPABILITY
+    assert pi.classify("你是谁")["intent"] == pi.CAPABILITY
+    assert pi.classify("你好")["intent"] == pi.SMALLTALK
+    assert pi.classify("谢谢！")["intent"] == pi.SMALLTALK
+    assert pi.classify("讲个笑话")["intent"] == pi.UNKNOWN
+    assert pi.classify("帮我写作业")["intent"] == pi.UNKNOWN
+
+
+def test_intent_tool_before_menu():
+    from app.services import parent_intent as pi
+
+    menu = "我可以帮您：\n1) 查课时余额\n2) 查未来 7 天课表\n3) 查上课历史"
+    # 直接数据查询优先于菜单跟进
+    r = pi.classify("课时还剩多少", last_assistant=menu, last_user="你有哪些服务")
+    assert r["intent"] == pi.TOOL and r["tool"] == "balance"
+
+
+def test_intent_menu_followup():
+    from app.services import parent_intent as pi
+
+    menu = "我可以帮您：\n1) 查课时余额\n2) 查未来 7 天课表\n3) 查上课历史与出勤\n5) 课程/请假/活动等政策问答"
+    r = pi.classify(
+        "请假与补课流程、校区活动通知",
+        last_assistant=menu, last_user="你有哪些服务",
+    )
+    assert r["intent"] == pi.MENU_FOLLOWUP
+    assert r["retrieval_query"] == "你有哪些服务 请假与补课流程、校区活动通知"
+
+def test_intent_policy_default():
+    from app.services import parent_intent as pi
+
+    assert pi.classify("怎么请假")["intent"] == pi.POLICY
+    assert pi.looks_like_menu("我可以帮您：\n1) 查课时余额\n2) 查课表") is True
+    assert pi.looks_like_menu("请假需提前一天在群里说") is False
+
+
 def test_risk_words_default_when_empty(session_factory):
     from app.crud import parent_service as ps
 

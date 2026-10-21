@@ -248,39 +248,65 @@ def parent_chat(
         )
         return {"thread": _thread_out(th), "answer": None, "refs": [], "escalated": True, "risk_word": hit}
 
-    # 4) 问路分类：闲聊/非业务 → 不调 RAG，直接短答（省 token + 防串味）
-    if ps.non_biz_hint(content):
-        small = "您好呀，我是课程小助手～可以问我课程、课时、请假、活动方面的问题，复杂问题也可以点右上角「转人工」找老师。"
-        ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=small)
-        return {"thread": _thread_out(th), "answer": small, "refs": [], "escalated": False, "kind": "smalltalk"}
+    # 4) 意图路由（分层，零 token 短路）：SMALLTALK/CAPABILITY/TOOL/MENU_FOLLOWUP/POLICY/UNKNOWN
+    # 只有 POLICY 与 MENU_FOLLOWUP 会走到 RAG+LLM；其余确定性回复，避免浪费 Token。
+    from app.services import parent_intent as pi
 
-    # 4a) 多轮上下文（对齐教师端 Agent 的对话记忆）：
-    # - 生成环注入最近 6 条历史，跟随问句（"上了几次""那下周呢"）不丢指代；
-    # - 短跟随问句检索时拼接上一问，避免"几次"单独检索命中政策文档。
     history_msgs = ps.list_messages(db, thread_id=th.id)[:-1][-6:]
     last_user_q = next((m.content for m in reversed(history_msgs) if m.role == ROLE_USER), "")
-    _FOLLOWUP_MARKERS = ("几次", "哪些", "那个", "还有", "怎么弄", "多久", "什么时候", "呢", "那")
-    retrieval_query = content
-    if last_user_q and len(content) <= 12 and any(k in content for k in _FOLLOWUP_MARKERS):
-        retrieval_query = f"{last_user_q} {content}"
+    last_assistant = next((m.content for m in reversed(history_msgs) if m.role == ROLE_ASSISTANT), "")
+    intent = pi.classify(content, last_assistant=last_assistant, last_user=last_user_q)
+    intent_name = intent["intent"]
 
-    # 4b) 查询工具（登录家长专属）：余额/课表/反馈走确定性数据，不走 RAG；
+    # 4a) 零 token 短路：越界/能力清单/寒暄
+    if intent_name == pi.UNKNOWN:
+        fallback = pi.UNIFIED_FALLBACK
+        ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=fallback,
+                       retrieval_diag={"intent": pi.UNKNOWN, "reason": intent.get("reason")})
+        return {"thread": _thread_out(th), "answer": fallback, "refs": [], "escalated": False,
+                "kind": "fallback", "intent": pi.UNKNOWN}
+    if intent_name == pi.CAPABILITY:
+        reply = pi.CAPABILITY_REPLY
+        ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=reply,
+                       retrieval_diag={"intent": pi.CAPABILITY})
+        return {"thread": _thread_out(th), "answer": reply, "refs": [], "escalated": False,
+                "kind": "capability", "intent": pi.CAPABILITY}
+    if intent_name == pi.SMALLTALK:
+        reply = pi.SMALLTALK_REPLY
+        ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=reply,
+                       retrieval_diag={"intent": pi.SMALLTALK})
+        return {"thread": _thread_out(th), "answer": reply, "refs": [], "escalated": False,
+                "kind": "smalltalk", "intent": pi.SMALLTALK}
+
+    # 4b) 查询工具（登录家长专属）：余额/历史课/课表/反馈走确定性数据，不走 RAG；
     # 匿名无工具（倒逼绑定）。学生范围由后端反查，绝不信任前端输入。
-    if parent_id is not None and user is not None:
+    tool_name = intent.get("tool") if intent_name == pi.TOOL else None
+    if tool_name is None and parent_id is not None and user is not None:
         from app.services import parent_tools
 
-        tool_name = parent_tools.pick_tool(content)
-        if tool_name is not None:
-            result = parent_tools.run_tool(db, user, tool_name)
-            diag_tool = {"tool": tool_name, "ms": result.get("ms", 0)}
-            rendered = _render_tool_answer(tool_name, result)
-            if rendered is None:
-                # 有工具但无数据（如未绑定学员/无未来课程）：诚实告知 + 转人工入口
-                fallback = "没查到相关记录（可能是尚未绑定学员或暂无安排），已为您记录，老师会尽快人工回复，您也可以直接点击转人工。"
-                ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=fallback)
-                return {"thread": _thread_out(th), "answer": fallback, "refs": [], "escalated": False, "kind": "tool_empty"}
-            ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=rendered, retrieval_diag=diag_tool)
-            return {"thread": _thread_out(th), "answer": rendered, "refs": [], "escalated": False, "kind": f"tool:{tool_name}"}
+        tool_name = parent_tools.pick_tool(content)  # 菜单跟进等场景兜底再扫一次
+    if tool_name is not None and parent_id is not None and user is not None:
+        from app.services import parent_tools
+
+        result = parent_tools.run_tool(db, user, tool_name)
+        diag_tool = {"intent": "tool", "tool": tool_name, "ms": result.get("ms", 0)}
+        rendered = _render_tool_answer(tool_name, result)
+        if rendered is None:
+            # 有工具但无数据（未绑定学员/无记录）：统一兜底话术
+            fallback = pi.UNIFIED_FALLBACK
+            ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=fallback, retrieval_diag=diag_tool)
+            return {"thread": _thread_out(th), "answer": fallback, "refs": [], "escalated": False,
+                    "kind": "fallback", "intent": "tool_empty"}
+        ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=rendered, retrieval_diag=diag_tool)
+        return {"thread": _thread_out(th), "answer": rendered, "refs": [], "escalated": False,
+                "kind": f"tool:{tool_name}", "intent": "tool"}
+
+    # 4c) 检索查询：菜单跟进用「上一问+本轮」；其余短跟随问句拼接上一问
+    retrieval_query = intent.get("retrieval_query") or content
+    if last_user_q and len(content) <= 12 and any(
+        k in content for k in ("几次", "哪些", "那个", "还有", "怎么弄", "多久", "什么时候", "呢", "那")
+    ):
+        retrieval_query = f"{last_user_q} {content}"
 
     # 5) 家长域 RAG：collected_ids 只传家长版白名单（物理复用 Chroma，逻辑隔离）
     diag: dict = {}
@@ -319,14 +345,18 @@ def parent_chat(
     hits = [h for h in hits if str(h.get("doc_id") or "") in allowed]
 
     if not hits:
+        # 统一兜底话术（零编造；RAG 零命中不再各自造文案）
+        fallback = pi.UNIFIED_FALLBACK
+        diag["intent"] = intent_name
         ps.add_message(
             db, thread_id=th.id, role=ROLE_ASSISTANT,
-            content="暂未找到相关的政策说明，已为您记录，老师会尽快人工回复，您也可以直接点击转人工。",
+            content=fallback,
             retrieval_diag=diag or None,
         )
         return {
-            "thread": _thread_out(th), "answer": "暂未找到相关的政策说明，可点击转人工咨询老师。",
-            "refs": [], "escalated": False, "retrieval": rag.retrieval_summary(diag),
+            "thread": _thread_out(th), "answer": fallback,
+            "refs": [], "escalated": False, "kind": "fallback", "intent": intent_name,
+            "retrieval": rag.retrieval_summary(diag),
         }
 
     # 6) 生成：走 parent_service 模块映射（管理员/教师可在模型配置页按模块选用）；
@@ -336,8 +366,15 @@ def parent_chat(
         f"{'家长' if m.role == ROLE_USER else ('老师' if m.role == ROLE_STAFF else '客服')}：{m.content[:200]}"
         for m in history_msgs
     )
+    menu_hint = (
+        "家长这条消息是在选择你上一条列表中的若干项，请逐项简要回答；"
+        "没有资料的项目直接说明未收录并建议转人工，不要编造引用。\n\n"
+        if intent_name == pi.MENU_FOLLOWUP
+        else ""
+    )
     prompt = (
-        (f"最近对话：\n{hist_txt}\n\n" if hist_txt else "")
+        menu_hint
+        + (f"最近对话：\n{hist_txt}\n\n" if hist_txt else "")
         + f"家长问题：{content}\n\n政策资料：\n{contexts}\n\n请按【输出格式】作答（200字内）。"
         "结合最近对话理解指代；末尾注明依据了哪份资料。"
     )
@@ -389,12 +426,13 @@ def parent_chat(
         if len(refs) >= 3:
             break
     store_diag = dict(diag or {})
+    store_diag["intent"] = intent_name
     store_diag["refs"] = refs
     ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=answer, tokens=tokens, retrieval_diag=store_diag)
     return {
         "thread": _thread_out(th), "answer": answer, "refs": refs,
         "citations": {"refs": refs, "summary": rag.retrieval_summary(diag)},
-        "escalated": False, "retrieval": rag.retrieval_summary(diag),
+        "escalated": False, "intent": intent_name, "retrieval": rag.retrieval_summary(diag),
     }
 
 
