@@ -1405,6 +1405,7 @@ const TOOL_LABELS: Record<string, string> = {
   sql_list_tables: '数据库·表清单',
   sql_describe_table: '数据库·表结构',
   sql_query: '数据库查询',
+  web_search: '联网搜索',
   run_skill_script: 'Skill脚本执行',
   write_skill_file: 'Skill文件写入',
   read_skill_file: 'Skill文件读取',

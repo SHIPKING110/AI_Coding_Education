@@ -95,7 +95,9 @@ def plan_and_run(
     inv = _skill_inventory(db, user)
     if not agent_tools.looks_like_business(message):
         if not (inv and agent_tools.looks_like_skill_task(message)):
-            return PlanOutcome()
+            # 外部/时效性事实问题也需要规划器参与（由模型决定是否调 web_search）
+            if not agent_tools.looks_like_web_search(message):
+                return PlanOutcome()
 
     cfg = get_settings()
     budget_ms = time_budget_ms or cfg.AGENT_TOOL_TIME_BUDGET_MS
@@ -300,23 +302,43 @@ def _format_block(
 ) -> str:
     if not steps:
         return ""
-    parts = ["【业务数据】（系统实时数据，请据此作答并注明数据周期；未列出的不要编造）"]
-    for s in steps:
-        if s.ok:
-            parts.append(f"· {s.tool}({_brief_args(s.args)})：{compact_result(s.result, result_chars)}")
-        else:
-            parts.append(f"· {s.tool}：查询失败（{s.error}）")
-    # 整块也按条裁剪：宁可少保留一个结果，也不截断到一行中间
-    total = 0
-    kept: list[str] = []
-    for p in parts:
-        if total + len(p) + 1 > max_chars:
+    # 内部业务数据与公网搜索结果严格分块，避免模型把网上信息当成本机构事实
+    internal = [s for s in steps if s.tool != "web_search"]
+    external = [s for s in steps if s.tool == "web_search"]
+
+    sections: list[str] = []
+    if internal:
+        parts = ["【业务数据】（系统实时数据，请据此作答并注明数据周期；未列出的不要编造）"]
+        for s in internal:
+            if s.ok:
+                parts.append(f"· {s.tool}({_brief_args(s.args)})：{compact_result(s.result, result_chars)}")
+            else:
+                parts.append(f"· {s.tool}：查询失败（{s.error}）")
+        sections.append("\n".join(parts))
+    if external:
+        parts = [
+            "【联网搜索结果·公网外部资料】（仅用于补充行业/公开/通用知识等外部事实，"
+            "**不得**用于回答本校的学员、课时、排课、收费、退费、请假政策等内部问题；"
+            "引用时请标注来源链接；若与内部数据或知识库冲突，一律以内部为准）"
+        ]
+        for s in external:
+            if s.ok:
+                parts.append(f"· web_search({_brief_args(s.args)})：{compact_result(s.result, result_chars)}")
+            else:
+                parts.append(f"· web_search：联网检索失败（{s.error}）")
+        sections.append("\n".join(parts))
+
+    # 整块按预算拼接（优先保留内部业务数据；空间不足时公网块可被裁掉）
+    block = ""
+    for sec in sections:
+        candidate = (block + "\n\n" + sec).strip() if block else sec
+        if len(candidate) > max_chars:
+            if not block:
+                block = sec[:max_chars] + "…（已截断）"
+            else:
+                block += "\n…（其余内容因篇幅未列出，如需可再追问）"
             break
-        kept.append(p)
-        total += len(p) + 1
-    block = "\n".join(kept)
-    if len(kept) < len(parts):
-        block += "\n…（其余业务数据因篇幅未列出，如需可再追问）"
+        block = candidate
     return block
 
 

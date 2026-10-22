@@ -462,6 +462,37 @@ def _tool_sql_query(db: Session, user: User, *, sql: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 联网搜索工具（Tavily）：补充「公网外部事实」，不用于内部政策/数据问答
+# ---------------------------------------------------------------------------
+
+def _tool_web_search(
+    db: Session, user: User, *, query: str = "", max_results: int = 5,
+    topic: str = "general", time_range: str = "",
+) -> dict:
+    """联网检索公开信息（行业动态/竞品/通用知识/公开资料）。
+
+    安全边界：只补充**外部公开信息**；本校的学员/课时/排课/收费/政策一律以内部数据与
+    知识库为准，不得用联网结果回答。未配置 Tavily 时返回明确提示（不报错）。
+    """
+    from app.crud import search_config as _sc
+    from app.services import web_search as _ws
+
+    resolved = _sc.resolve_search(db)
+    if resolved is None:
+        return {
+            "来源": "公网",
+            "错误": "联网搜索未启用（管理员尚未在设置中配置 Tavily），本次只能依据系统内部数据与知识库作答",
+        }
+    return _ws.search_web(
+        resolved,
+        query=query,
+        max_results=max_results,
+        topic=topic or "general",
+        time_range=(time_range or "").strip() or None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 注册表
 # ---------------------------------------------------------------------------
 
@@ -688,6 +719,7 @@ _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "sql_list_tables": _tool_sql_list_tables,
     "sql_describe_table": _tool_sql_describe_table,
     "sql_query": _tool_sql_query,
+    "web_search": _tool_web_search,
     "run_skill_script": _tool_run_skill_script,
     "write_skill_file": _tool_write_skill_file,
     "read_skill_file": _tool_read_skill_file,
@@ -842,6 +874,40 @@ TOOLS_SCHEMA: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "web_search",
+            "description": (
+                "联网检索公开信息（Tavily），返回标题/链接/摘要/日期。"
+                "仅用于需要**外部公开事实**的问题：行业动态、竞品/同行做法、公开资料、通用知识、"
+                "最新政策或新闻等。凡涉及本校的学员、课时、排课、收费、退费、请假制度等，"
+                "必须用内部工具或知识库回答，**绝不可用联网结果代替**。"
+                "若已有内部数据或知识库片段能回答，就不要调用本工具。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "检索关键词（用自然语言，中文即可）"},
+                    "max_results": {
+                        "type": "integer",
+                        "description": "返回条数（1-10，默认5）",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "enum": ["general", "news", "finance"],
+                        "description": "检索主题：general=通用、news=新闻资讯、finance=财经",
+                    },
+                    "time_range": {
+                        "type": "string",
+                        "enum": ["day", "week", "month", "year"],
+                        "description": "只看最近一段时间的结果（可选）",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_skill_script",
             "description": (
                 "执行用户 Skill 包内的 .py/.js/.sh 脚本（走沙箱：本地或阿里云百炼，依赖自动安装）。"
@@ -958,6 +1024,30 @@ def looks_like_skill_task(message: str) -> bool:
     if not t:
         return False
     return any(k in t for k in _SKILL_KEYWORDS)
+
+
+# 联网搜索触发词：命中性问题让「规划器有机会运行」，是否真搜仍由模型判断。
+# 只覆盖"明显需要外部/时效信息"的信号，避免每句闲聊都触发规划（省一次 LLM 往返）。
+_WEB_SEARCH_KEYWORDS = (
+    "最新", "近期", "最近", "今年", "现在", "当前", "近日", "实时", "新出的", "新版",
+    "新闻", "资讯", "动态", "趋势", "业内", "行业", "同行", "竞品", "别家", "其他机构",
+    "外面", "网上", "联网", "搜一下", "搜索", "查一下网上", "帮我查", "调研",
+    "政策", "规定", "法规", "标准", "指南", "教程", "文档", "官网", "资料",
+    "什么是", "是什么", "什么是", "了解一下", "科普", "原理", "怎么用", "如何用",
+)
+
+
+def looks_like_web_search(message: str) -> bool:
+    """是否可能需要联网检索（仅作规划放行信号；真正的检索决策交给模型）。
+
+    注意：与 looks_like_business 并列——业务问题走内部工具，外部/时效问题才可能联网。
+    本校政策/收费/退费/课时规则等即使命中关键词，也应由内部工具/知识库回答，
+    模型侧由 web_search 工具描述与注入块约束兜底，这里不拦截（否则会误伤通用知识问答）。
+    """
+    t = (message or "").strip()
+    if not t:
+        return False
+    return any(k in t for k in _WEB_SEARCH_KEYWORDS)
 
 
 def heuristic_skill_calls(db, user) -> list[dict]:

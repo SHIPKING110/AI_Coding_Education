@@ -25,6 +25,14 @@ import {
   type RetrievalConfigIn,
   type RetrievalConfigOut,
 } from '@/api/retrievalConfig'
+import {
+  deleteSearchConfig,
+  getSearchConfig,
+  saveSearchConfig,
+  testSearchConfig,
+  type SearchConfigIn,
+  type SearchConfigOut,
+} from '@/api/searchConfig'
 import { toastApiError, useToastStore } from '@/stores/toast'
 import { useAuthStore } from '@/stores/auth'
 
@@ -311,9 +319,87 @@ async function checkRrk() {
   }
 }
 
+/* —— 联网搜索：Tavily（系统级，管理员） —— */
+const search = ref<SearchConfigOut | null>(null)
+const searchForm = ref<SearchConfigIn>({
+  base_url: 'https://api.tavily.com',
+  api_key: '',
+  enabled: true,
+  search_depth: 'basic',
+  max_results: 5,
+  language: 'zh',
+})
+const showSearchForm = ref(false)
+const savingSearch = ref(false)
+const testingSearch = ref(false)
+const searchTestMsg = ref('')
+
+async function loadSearch() {
+  try {
+    search.value = await getSearchConfig()
+    searchForm.value = search.value
+      ? {
+          base_url: search.value.base_url,
+          api_key: '',
+          enabled: search.value.enabled,
+          search_depth: search.value.search_depth,
+          max_results: search.value.max_results,
+          language: search.value.language,
+        }
+      : { base_url: 'https://api.tavily.com', api_key: '', enabled: true, search_depth: 'basic', max_results: 5, language: 'zh' }
+  } catch {
+    // 联网搜索为可选增强，读取失败不阻塞模型配置页
+  }
+}
+
+async function saveSearch() {
+  if (!search.value && !searchForm.value.api_key.trim()) {
+    toast.error('首次配置需填写 Tavily API Key')
+    return
+  }
+  savingSearch.value = true
+  try {
+    search.value = await saveSearchConfig(searchForm.value)
+    toast.success('已保存联网搜索配置')
+    showSearchForm.value = false
+    await loadSearch()
+  } catch (e) {
+    toastApiError(e, '保存失败')
+  } finally {
+    savingSearch.value = false
+  }
+}
+
+async function removeSearch() {
+  if (!confirm('删除联网搜索配置？删除后 Agent 将无法联网检索（内部数据与知识库问答不受影响）。')) return
+  try {
+    await deleteSearchConfig()
+    search.value = null
+    toast.success('已删除')
+    await loadSearch()
+  } catch (e) {
+    toastApiError(e, '删除失败')
+  }
+}
+
+async function checkSearch() {
+  testingSearch.value = true
+  searchTestMsg.value = ''
+  try {
+    const r = await testSearchConfig()
+    searchTestMsg.value = r.ok ? `连通正常（${r.latency_ms}ms · 命中 ${r.count} 条）` : `✗ ${r.error || '连通失败'}`
+  } catch (e) {
+    searchTestMsg.value = '✗ 请求失败，请稍后重试'
+    toastApiError(e, '检查失败')
+  } finally {
+    testingSearch.value = false
+  }
+}
+
 onMounted(() => {
   load()
   void loadRetrieval()
+  void loadSearch()
 })
 </script>
 
@@ -420,6 +506,66 @@ onMounted(() => {
       </div>
       <div v-else class="empty-tip">未配置 Rerank（可选项）：当前为单层向量检索，完全正常工作。</div>
     </section>
+
+    <!-- 联网搜索 · Tavily（系统级，管理员） -->
+    <section v-if="isAdmin" class="card">
+      <div class="card-head">
+        <div>
+          <h2>联网搜索 · Tavily（系统级）</h2>
+          <p class="muted">
+            让 Agent 在需要<strong>外部公开信息</strong>时联网检索（行业动态、竞品做法、公开资料、最新政策等）。
+            全校共用一套 Key。<strong>边界</strong>：联网结果只作外部事实补充，
+            本校的学员/课时/排课/收费/退费/请假政策一律以内部数据与知识库为准；
+            未配置即不联网（内部数据与知识库问答完全不受影响）。
+          </p>
+        </div>
+        <div class="cfg-actions">
+          <button v-if="search" class="link-btn" :disabled="testingSearch" @click="checkSearch">{{ testingSearch ? '检查中…' : '检查' }}</button>
+          <button v-if="search" class="link-btn" @click="showSearchForm = true">编辑</button>
+          <button v-else class="btn primary sm" @click="showSearchForm = true">配置联网搜索</button>
+          <button v-if="search" class="link-btn danger" @click="removeSearch">删除</button>
+        </div>
+      </div>
+      <div v-if="search" class="cfg-row def">
+        <div class="cfg-main">
+          <div class="cfg-head"><strong>Tavily Search</strong></div>
+          <div class="cfg-meta">
+            {{ search.base_url }} · {{ search.search_depth === 'advanced' ? '深度（2 credits/次）' : '基础（1 credit/次）' }}
+            · 每次最多 {{ search.max_results }} 条 · 语言 {{ search.language || '不限' }}
+            · {{ search.enabled ? '启用' : '停用' }}
+          </div>
+          <div v-if="searchTestMsg" class="test-line">{{ searchTestMsg }}</div>
+        </div>
+      </div>
+      <div v-else class="empty-tip">未配置联网搜索：Agent 不会联网检索（内部数据与知识库问答不受影响）。</div>
+    </section>
+
+    <div v-if="showSearchForm" class="overlay" @click.self="showSearchForm = false">
+      <div class="modal">
+        <h2>{{ search ? '编辑联网搜索配置' : '配置联网搜索（Tavily）' }}</h2>
+        <p class="muted" style="margin-bottom: 12px">
+          在 <a href="https://app.tavily.com" target="_blank" rel="noopener">app.tavily.com</a> 申请 API Key（形如 <code>tvly-…</code>），粘贴到下方即可启用。
+        </p>
+        <div class="form-grid">
+          <label>接口地址<input v-model="searchForm.base_url" placeholder="https://api.tavily.com" /></label>
+          <label>API Key<input v-model="searchForm.api_key" type="password" :placeholder="search ? '留空则不修改' : 'tvly-…'" /></label>
+          <label>搜索深度
+            <select v-model="searchForm.search_depth">
+              <option value="basic">基础（快，1 credit/次）</option>
+              <option value="advanced">深度（准，2 credit/次）</option>
+              <option value="fast">快速（1 credit/次）</option>
+            </select>
+          </label>
+          <label>每次最多返回条数<input v-model.number="searchForm.max_results" type="number" min="1" max="20" step="1" /></label>
+          <label>语言偏好（ISO 639-1，可留空）<input v-model="searchForm.language" placeholder="zh / en" /></label>
+          <label class="check"><input v-model="searchForm.enabled" type="checkbox" /> 启用联网搜索</label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showSearchForm = false">取消</button>
+          <button class="btn primary" :disabled="savingSearch" @click="saveSearch">{{ savingSearch ? '保存中…' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="showForm" class="overlay" @click.self="showForm = false">
       <div class="modal">

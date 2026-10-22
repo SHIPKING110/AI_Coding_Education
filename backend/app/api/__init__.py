@@ -23,6 +23,7 @@ from app.api.routers import (
     reports,
     retrieval_configs,
     schedules,
+    search_configs,
     students,
     system_settings,
     trials,
@@ -55,5 +56,6 @@ api_router.include_router(business.router)
 api_router.include_router(finance.router)
 api_router.include_router(llm_configs.router)
 api_router.include_router(retrieval_configs.router)
+api_router.include_router(search_configs.router)
 api_router.include_router(client.router)
 api_router.include_router(trials.router)
