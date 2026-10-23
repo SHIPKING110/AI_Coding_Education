@@ -25,6 +25,10 @@ from app.models.schedule import Attendance, AttendanceStatus, Schedule, Schedule
 from app.models.user import Role, User
 from app.services import agent_sql
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # 时间范围解析：把自然语言周期映射为 [start, end)
 # ---------------------------------------------------------------------------
@@ -1118,6 +1122,29 @@ def looks_like_ppt_edit(message: str) -> bool:
     return any(k in t for k in _PPT_EDIT_KEYWORDS)
 
 
+# PPT「续作/收尾」意图：用户催「出片/继续/给我下载/文件呢」但没带生成/编辑动词。
+# 这类话若不进 Skill 路径，模型只会空口「马上出片」却从不真正调用 run_skill_script——
+# 正是「说了出片却不出片」的根因。命中即放行 Skill 路径并强制真执行。
+_PPT_CONTINUE_KEYWORDS = (
+    "出片", "出图", "生成好", "好了吗", "好了没", "好了么", "文件呢", "文件在", "在哪下载",
+    "给我下载", "下载呢", "下载啊", "下载", "继续", "接着", "快点", "快点出", "开始做", "开始生成",
+    "转成ppt", "转成 ppt", "转pptx", "转 pptx", "导出",
+)
+
+
+def looks_like_ppt_continue(message: str) -> bool:
+    """是否是在「催出片/收尾/继续」的 PPT 续作意图（非首次生成、非编辑词）。
+
+    仅在会话具备 Skill 工具时作为 skill_mode 放行信号使用；作用是把
+    「出片把」「继续」「给我PPTx下载啊」这类话也拉进 Skill 路径，逼模型真正调用执行，
+    而不是只回一句「我马上出片」。
+    """
+    t = (message or "").strip()
+    if not t or len(t) > 40:  # 太长的一般是完整描述，走正常生成判定
+        return False
+    return any(k in t for k in _PPT_CONTINUE_KEYWORDS)
+
+
 def heuristic_skill_calls(db, user) -> list[dict]:
     """Skill 兜底：规划器零工具调用时，强制先读第一个可执行 Skill 的 SKILL.md。
 
@@ -1146,6 +1173,68 @@ def heuristic_skill_calls(db, user) -> list[dict]:
     except Exception:
         pass
     return []
+
+
+def auto_build_ppt(db, user) -> dict | None:
+    """确定性兜底：PPT 任务中模型只空口「马上出片」却没执行脚本时，直接替它跑一次出片。
+
+    条件（全部满足才动手，避免误触发）：
+      - 用户可用 Skill 里存在 ppt-master 适配版（含 scripts/ppt_oneshot.py）；
+      - 该 Skill 包内 projects/ 下能找到含 svg_output/*.svg 且**最近 60 分钟内**改过的项目
+        （时间窗防止误抓别的旧会话遗留的项目，缓解"串味"）；
+    动作：对「最近修改」的那个项目跑 `ppt_oneshot.py build <项目>`，返回 run_skill_script 的产物。
+    """
+    import time as _time
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    fresh_after = _time.time() - 60 * 60  # 只认最近 60 分钟内写过的项目
+
+    try:
+        collected = {str(x) for x in _ext.collected_skill_ids(db, user_id=user.id)}
+        rows: list = list(_ext.list_skills(db, owner_id=user.id))
+        for s in _ext.list_plaza_skills(db):
+            if str(s.id) in collected and all(str(x.id) != str(s.id) for x in rows):
+                rows.append(s)
+    except Exception:
+        return None
+    for s in rows:
+        if not s.enabled:
+            continue
+        files = [str(f) for f in (s.files or [])]
+        wrapper = next((f for f in files if f.endswith("scripts/ppt_oneshot.py")), None)
+        if not wrapper:
+            continue
+        # 定位有 svg_output/*.svg 且最近修改的项目（物化后文件在**使用者本人**目录）
+        try:
+            desk = _bundle.skill_dir(user.id, s.id)
+        except Exception:
+            continue
+        if not desk.exists():
+            continue
+        best = None
+        best_mtime = -1.0
+        for proj in (desk / "projects").glob("*"):
+            svg_dir = proj / "svg_output"
+            if svg_dir.is_dir() and any(svg_dir.glob("*.svg")):
+                try:
+                    mt = max(p.stat().st_mtime for p in svg_dir.glob("*.svg"))
+                except OSError:
+                    continue
+                if mt < fresh_after:
+                    continue  # 太旧：很可能是别的对话遗留的项目，跳过避免串味
+                if mt > best_mtime:
+                    best_mtime = mt
+                    best = proj
+        if best is None:
+            continue
+        rel_proj = str(best.relative_to(desk)).replace("\\", "/")
+        logger.info("自动出片兜底：对 %s 执行 build", rel_proj)
+        return execute_tool(
+            db, user, "run_skill_script",
+            {"skill": s.name, "path": wrapper, "args": ["build", rel_proj]},
+        )
+    return None
 
 
 def _heuristic_calls(message: str) -> list[dict]:
@@ -1194,5 +1283,6 @@ def _to_text(obj: Any) -> str:
 
 __all__ = [
     "TOOLS_SCHEMA", "parse_period", "looks_like_business", "looks_like_ppt_edit",
-    "looks_like_skill_task", "looks_like_web_search", "execute_tool",
+    "looks_like_ppt_continue", "looks_like_skill_task", "looks_like_web_search",
+    "auto_build_ppt", "execute_tool",
 ]

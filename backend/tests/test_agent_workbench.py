@@ -226,3 +226,89 @@ def test_attachment_block_no_image_no_ack():
 
     block = _attachment_block([{"name": "a.txt", "kind": "doc", "text": "x"}])
     assert "张图片" not in block
+
+def test_looks_like_ppt_continue_gate():
+    """问题3：催出片/继续/下载 等续作意图要能识别（否则模型只空口出片不执行）。"""
+    from app.services.agent_tools import looks_like_ppt_continue
+
+    assert looks_like_ppt_continue("出片把") is True
+    assert looks_like_ppt_continue("继续") is True
+    assert looks_like_ppt_continue("给我PPTx下载啊，") is True
+    assert looks_like_ppt_continue("文件呢") is True
+    assert looks_like_ppt_continue("生成好了吗") is True
+    assert looks_like_ppt_continue("今天天气不错我们聊点别的吧这件事之后再说") is False
+
+
+def test_auto_build_ppt_picks_fresh_project(factory, tmp_path, monkeypatch):
+    """问题3兜底：模型写了 svg 但没导出时，auto_build_ppt 能找到项目并跑 build 出片。"""
+    import time
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import skill_bundle, agent_tools
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        user = _mk_user(db, name="autobuild")
+        skill = ext.create_skill(
+            db, owner_id=user.id, name="ppt-master", description="",
+            content="", files=["manifests/x.txt"],
+        )
+        desk = skill_bundle.skill_dir(user.id, skill.id)
+        # 造一个适配版 wrapper + 一个有 svg_output 的项目
+        wrap_dir = desk / "ppt-master-main/skills/ppt-master/scripts"
+        wrap_dir.mkdir(parents=True, exist_ok=True)
+        (wrap_dir / "ppt_oneshot.py").write_text(
+            "import sys,os\n"
+            "proj=sys.argv[2]\n"
+            "os.makedirs(os.path.join(proj,'exports'),exist_ok=True)\n"
+            "open(os.path.join(proj,'exports','out.pptx'),'wb').write(b'PK\\x03\\x04fake')\n"
+            "print('ok')\n",
+            encoding="utf-8",
+        )
+        proj = desk / "projects" / "demo"
+        (proj / "svg_output").mkdir(parents=True, exist_ok=True)
+        (proj / "svg_output" / "01_cover.svg").write_text("<svg/>", encoding="utf-8")
+        # 登记 files 让 execute_tool 能找到 wrapper
+        files = [str(f) for f in (skill.files or [])]
+        files += ["ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"]
+        ext.update_skill(db, skill, files=files)
+
+        out = agent_tools.auto_build_ppt(db, user)
+        assert out is not None, "应找到项目并执行 build"
+        assert out.get("成功") is True, f"build 应成功: {out}"
+    finally:
+        db.close()
+
+
+def test_auto_build_ppt_skips_stale_project(factory, tmp_path, monkeypatch):
+    """问题2/3：太旧的项目（>60 分钟）不自动抓，避免串到别的旧会话。"""
+    import os
+    import time
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import skill_bundle, agent_tools
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        user = _mk_user(db, name="autobuild-stale")
+        skill = ext.create_skill(
+            db, owner_id=user.id, name="ppt-master", description="",
+            content="", files=["ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"],
+        )
+        desk = skill_bundle.skill_dir(user.id, skill.id)
+        wrap = desk / "ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"
+        wrap.parent.mkdir(parents=True, exist_ok=True)
+        wrap.write_text("print('ok')\n", encoding="utf-8")
+        proj = desk / "projects" / "old"
+        sd = proj / "svg_output"
+        sd.mkdir(parents=True, exist_ok=True)
+        old_svg = sd / "01_cover.svg"
+        old_svg.write_text("<svg/>", encoding="utf-8")
+        old = time.time() - 3 * 3600
+        os.utime(old_svg, (old, old))
+        out = agent_tools.auto_build_ppt(db, user)
+        assert out is None, "旧项目不应被自动抓取"
+    finally:
+        db.close()

@@ -309,6 +309,49 @@ const deckSlides = computed<DeckSlide[]>(() => {
 
 const todayStr = new Date().toISOString().slice(0, 10)
 
+/* —— 真实生成的 SVG 页（来自最近一次助手消息里 run_skill_script/write_skill_file 产出的 .svg 文件）
+   用于「大纲 ↔ 预览融合」：点某页可看该页真实 SVG 渲染 + 源码，和最终 pptx 完全一致。 —— */
+const svgPages = computed<{ name: string; url: string }[]>(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m.role !== 'assistant') continue
+    const pages: { name: string; url: string }[] = []
+    for (const t of toolsOf(m)) {
+      for (const f of parseFiles(t)) {
+        const nm = String(f['名'] ?? f.name ?? '')
+        const url = String(f['下载'] ?? f.url ?? '')
+        if (nm.toLowerCase().endsWith('.svg') && url) pages.push({ name: nm, url })
+      }
+    }
+    if (pages.length) {
+      // 按文件名排序（01_,02_…）即页序
+      pages.sort((a, b) => a.name.localeCompare(b.name))
+      return pages
+    }
+  }
+  return []
+})
+
+/* 每页展开态：点击大纲标题展开该页「预览/代码」 */
+const expandedPage = ref<number | null>(null)
+const pageView = ref<'preview' | 'code'>('preview')
+// 缓存已拉取的 svg 源码（按 url）
+const svgCodeCache = ref<Record<string, string>>({})
+async function openPage(i: number) {
+  expandedPage.value = expandedPage.value === i ? null : i
+  pageView.value = 'preview'
+  const p = svgPages.value[i]
+  if (p && !(p.url in svgCodeCache.value)) {
+    try {
+      const r = await fetch(p.url)
+      const txt = await r.text()
+      svgCodeCache.value = { ...svgCodeCache.value, [p.url]: txt }
+    } catch {
+      svgCodeCache.value = { ...svgCodeCache.value, [p.url]: '（无法加载 SVG 源码）' }
+    }
+  }
+}
+
 const latestSpec = computed(() => {
   // 多条消息的规格合并（新者优先）：大纲消息只有 outline，文案消息只有 sections
   const merged: NonNullable<ChatMessage['spec']> = {}
@@ -2814,64 +2857,43 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
           <p v-if="!outlineDraft.length" class="empty">暂无大纲：先在对话里走完大纲阶段，规格会自动同步到这里审核编辑。</p>
           <template v-else>
             <div class="ws-label-row">
-              <span class="ws-label">幻灯片预览（含封面，共 {{ deckSlides.length }} 页）</span>
-              <button class="mini-btn" @click="deckPreview = !deckPreview">{{ deckPreview ? '收起预览' : '展开预览' }}</button>
+              <span class="ws-label">大纲 · 点标题展开「真实预览 / SVG 代码」（共 {{ outlineDraft.length }} 页{{ svgPages.length ? `，已生成 ${svgPages.length} 页 SVG` : '' }}）</span>
             </div>
-            <div v-if="deckPreview" class="deck" :style="deckStyle as Record<string, string>">
-              <div v-for="(s, i) in deckSlides" :key="i" class="deck-slide" :class="s.kind">
-                <div v-if="s.kind === 'cover'" class="deck-cover">
-                  <span class="deck-kicker">{{ s.kicker }}</span>
-                  <b class="deck-title">{{ s.title }}</b>
-                  <span v-if="s.meta" class="deck-period">{{ s.meta }}</span>
-                  <span class="deck-date">{{ todayStr }}</span>
-                  <span class="deck-num">{{ i + 1 }} / {{ deckSlides.length }}</span>
-                </div>
-                <div v-else-if="s.kind === 'end'" class="deck-end">
-                  <b>谢谢观看</b>
-                  <span>{{ s.title }}</span>
-                  <span class="deck-num">{{ i + 1 }} / {{ deckSlides.length }}</span>
-                </div>
-                <div v-else class="deck-content">
-                  <div class="deck-top">
-                    <span class="deck-kicker">{{ s.kicker }}</span>
-                    <span class="deck-num">{{ i + 1 }} / {{ deckSlides.length }}</span>
-                  </div>
-                  <b class="deck-title sm">{{ s.title }}</b>
-                  <ul v-if="s.bullets.length" class="deck-bullets">
-                    <li v-for="(b, bi) in s.bullets.slice(0, 6)" :key="bi">{{ b }}</li>
-                  </ul>
-                  <p v-else class="deck-empty-note">（本页暂无要点，可在下方大纲编辑区补充备注）</p>
-                </div>
-              </div>
-            </div>
-            <div class="ws-label">大纲编辑（改完点下方"发送给 Agent 确认"）</div>
             <div class="ol-list">
-            <div v-for="(o, i) in outlineDraft" :key="o.id ?? i" class="ol-item">
-              <span class="ol-no">{{ i + 1 }}</span>
-              <div class="ol-fields">
-                <input v-model="o.title" class="ol-title" maxlength="80" @input="outlineDirty = true" />
-                <input v-model="o.note" class="ol-note" placeholder="备注（讲什么/用什么图，可空）" @input="outlineDirty = true" />
-              </div>
-              <div class="ol-ops">
-                <button title="上移" @click="outlineMove(i, -1)">↑</button>
-                <button title="下移" @click="outlineMove(i, 1)">↓</button>
-                <button title="删除" class="danger" @click="outlineDraft.splice(i, 1); outlineDirty = true">×</button>
+              <div v-for="(o, i) in outlineDraft" :key="o.id ?? i" class="ol-item ol-item--merge" :class="{ open: expandedPage === i }">
+                <div class="ol-head-row">
+                  <span class="ol-no">{{ i + 1 }}</span>
+                  <button class="ol-title-btn" :title="svgPages[i] ? '点击查看 SVG 预览 / 代码' : '（本页暂无 SVG，可编辑标题与备注）'" @click="openPage(i)">
+                    {{ o.title || `第 ${i + 1} 页` }}
+                    <span class="ol-chev">{{ expandedPage === i ? '▾' : '▸' }}</span>
+                  </button>
+                  <div class="ol-ops">
+                    <button title="上移" @click="outlineMove(i, -1)">↑</button>
+                    <button title="下移" @click="outlineMove(i, 1)">↓</button>
+                    <button title="删除" class="danger" @click="outlineDraft.splice(i, 1); outlineDirty = true">×</button>
+                  </div>
+                </div>
+                <div class="ol-fields">
+                  <input v-model="o.title" class="ol-title" maxlength="80" placeholder="标题" @input="outlineDirty = true" />
+                  <input v-model="o.note" class="ol-note" placeholder="备注（讲什么/用什么图，可空）" @input="outlineDirty = true" />
+                </div>
+                <div v-if="expandedPage === i" class="ol-expand">
+                  <div class="ol-expand-tabs">
+                    <button :class="{ on: pageView === 'preview' }" @click="pageView = 'preview'">预览</button>
+                    <button :class="{ on: pageView === 'code' }" :disabled="!svgPages[i]" @click="pageView = 'code'">SVG 代码</button>
+                  </div>
+                  <template v-if="svgPages[i]">
+                    <div v-if="pageView === 'preview'" class="ol-svg-preview">
+                      <img :src="svgPages[i].url" :alt="svgPages[i].name" />
+                    </div>
+                    <pre v-else class="ol-svg-code">{{ svgCodeCache[svgPages[i].url] || '加载中…' }}</pre>
+                  </template>
+                  <div v-else class="ol-expand-empty">
+                    本页还没有对应的 SVG 文件。请在对话里让 Agent「出片」，生成后这里会显示该页的真实预览与代码。
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-          <div v-if="sectionPreview.length" class="ws-label">已生成文案（{{ sectionPreview.length }}），可展开查看、直接改</div>
-          <div v-if="sectionPreview.length" class="sec-edit-list">
-            <div v-for="(s, i) in sectionPreview" :key="s.id ?? i" class="sec-edit-card">
-              <button class="sec-edit-head" @click="s.open = !s.open">
-                <b>{{ i + 1 }}. {{ s.title || '未命名页面' }}</b><span>{{ s.open ? '收起' : '展开' }}</span>
-              </button>
-              <div v-if="s.open" class="sec-edit-body">
-                <input v-model="s.title" class="kb-input" placeholder="页面标题" maxlength="80" @input="markSectionDirty" />
-                <textarea v-model="s.body" rows="4" class="kb-input" placeholder="本页文案要点" @input="markSectionDirty" />
-              </div>
-            </div>
-            <button class="btn primary sm" :disabled="streaming" @click="sendSectionsToAgent">文案发给 Agent 确认</button>
-          </div>
           <div v-if="outlineDraft.length" class="ws-foot">
             <button class="mini-btn" @click="outlineAdd">+ 加一页</button>
             <button class="btn primary sm" :disabled="streaming" @click="sendOutlineToAgent">发送给 Agent 确认</button>
@@ -3653,16 +3675,30 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .ws-foot { display: flex; gap: 8px; align-items: center; margin-top: auto; padding-top: 8px; position: sticky; bottom: 0; background: var(--surface); }
 .btn.sm { padding: 7px 14px; font-size: 12.5px; }
 .ol-list { display: flex; flex-direction: column; gap: 6px; }
-.ol-item { display: flex; gap: 8px; align-items: flex-start; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 7px 8px; }
+.ol-item { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 7px 8px; }
+.ol-item--merge.open { border-color: var(--brand); box-shadow: 0 2px 10px -4px rgba(97,95,255,.3); }
+.ol-head-row { display: flex; align-items: center; gap: 8px; }
+.ol-title-btn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; justify-content: space-between; text-align: left; border: none; background: transparent; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-1); padding: 2px 4px; border-radius: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ol-title-btn:hover { background: var(--bg-soft); color: var(--brand-strong); }
+.ol-chev { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
+.ol-expand { margin-top: 2px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.ol-expand-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.ol-expand-tabs button { border: 1px solid var(--line); background: var(--bg-soft); border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer; color: var(--ink-2); }
+.ol-expand-tabs button.on { background: var(--brand); color: #fff; border-color: var(--brand); }
+.ol-expand-tabs button:disabled { opacity: .45; cursor: not-allowed; }
+.ol-svg-preview { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
+.ol-svg-preview img { display: block; width: 100%; height: auto; }
+.ol-svg-code { max-height: 300px; overflow: auto; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 10px; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.ol-expand-empty { font-size: 12px; color: var(--ink-3); background: var(--bg-soft); border-radius: 8px; padding: 10px; }
 .ol-no { width: 20px; height: 20px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--brand-soft); color: var(--brand-strong); font-size: 11px; font-weight: 700; }
-.ol-fields { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ol-fields { display: flex; flex-direction: column; gap: 4px; }
 .ol-title { border: 1px solid transparent; border-radius: 6px; padding: 3px 6px; font-size: 12.5px; font-weight: 600; width: 100%; }
 .ol-title:hover, .ol-title:focus { border-color: var(--line); outline: none; }
 .ol-title:focus { border-color: var(--brand); }
 .ol-note { border: 1px solid transparent; border-radius: 6px; padding: 3px 6px; font-size: 11.5px; color: var(--ink-2); width: 100%; }
 .ol-note:hover, .ol-note:focus { border-color: var(--line); outline: none; }
 .ol-note:focus { border-color: var(--brand); }
-.ol-ops { display: flex; flex-direction: column; gap: 2px; }
+.ol-ops { display: flex; flex-direction: row; gap: 2px; flex-shrink: 0; }
 .ol-ops button { border: none; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 12px; line-height: 1.2; padding: 1px 4px; border-radius: 4px; }
 .ol-ops button:hover { background: var(--bg-soft); color: var(--brand-strong); }
 .ol-ops button.danger:hover { color: var(--danger); background: var(--danger-soft); }

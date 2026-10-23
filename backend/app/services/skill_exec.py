@@ -83,7 +83,11 @@ def _collect_outputs(owner_id, skill_id, dest: pathlib.Path, before: dict) -> li
         new_files.append((prio_suffix.get(p.suffix.lower(), 9), rel, p))
     new_files.sort(key=lambda x: (x[0], x[1]))
     produced: list = []
-    out_dir = dest / "_outputs"
+    # 按运行时间戳分目录，保证每次运行的下载链接只指向「本次」产物，绝不覆盖/串到历史运行
+    import time as _time
+
+    run_id = _time.strftime("%Y%m%d_%H%M%S")
+    out_dir = dest / "_outputs" / run_id
     for _, rel, p in new_files[:LOCAL_FETCH_MAX_FILES]:
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -93,7 +97,7 @@ def _collect_outputs(owner_id, skill_id, dest: pathlib.Path, before: dict) -> li
             continue
         produced.append({
             "name": safe,
-            "url": f"/uploads/skills/{owner_id}/{skill_id}/_outputs/{safe}",
+            "url": f"/uploads/skills/{owner_id}/{skill_id}/_outputs/{run_id}/{safe}",
             "bytes": p.stat().st_size,
         })
     return produced

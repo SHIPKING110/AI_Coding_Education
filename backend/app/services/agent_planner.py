@@ -106,7 +106,11 @@ def plan_and_run(
     """
     inv = _skill_inventory(db, user)
     if not agent_tools.looks_like_business(message):
-        if not (inv and (agent_tools.looks_like_skill_task(message) or agent_tools.looks_like_ppt_edit(message))):
+        if not (inv and (
+            agent_tools.looks_like_skill_task(message)
+            or agent_tools.looks_like_ppt_edit(message)
+            or agent_tools.looks_like_ppt_continue(message)
+        )):
             # 外部/时效性事实问题也需要规划器参与（由模型决定是否调 web_search）
             if not agent_tools.looks_like_web_search(message):
                 return PlanOutcome()
@@ -122,9 +126,15 @@ def plan_and_run(
     steps: list[Step] = []
     seen: set[str] = set()
     rounds = 0
+    # 是否属于「Skill 任务」（生成/编辑/催出片续作）：决定是否注入 Skill 清单与强制执行兜底。
+    is_skill_task = bool(inv) and (
+        agent_tools.looks_like_skill_task(message)
+        or agent_tools.looks_like_ppt_edit(message)
+        or agent_tools.looks_like_ppt_continue(message)
+    )
     # 规划消息：只带「系统角色 + 用户问题 + 各轮工具结果」，不带历史对话，省 token
     messages: list = [llm._sys_msg(llm.TOOL_PLANNER_SYS), llm._human_msg(message)]
-    if inv and agent_tools.looks_like_skill_task(message):
+    if is_skill_task:
         messages.append(llm._sys_msg(f"可用 Skill（用户已绑定，可用 run_skill_script 实际执行包内脚本，生成文件会取回下载链接）：\n{inv}"))
     planner_failed = False
 
@@ -172,7 +182,7 @@ def plan_and_run(
         # Skill 任务优先兜底（必须放业务分支之前：教师自配 Key 时 is_llm_configured() 为 False，
         # 原顺序会直接吞掉 Skill 路径，导致"零工具纯描述"）。
         # 强制先读 SKILL.md，再带着文档内容继续多轮规划，让模型真正去执行脚本。
-        if _skill_inventory(db, user) and agent_tools.looks_like_skill_task(message):
+        if is_skill_task:
             skill_calls = agent_tools.heuristic_skill_calls(db, user)[:calls_cap]
             if skill_calls:
                 logger.info("Skill 兜底：规划零工具，强制读 SKILL.md 后继续多轮规划")
@@ -222,6 +232,15 @@ def plan_and_run(
                         round_obs.append(f"· {name}：{compact_result(payload, result_chars)}")
                     if round_obs:
                         messages.append(llm._human_msg("工具结果：\n" + "\n".join(round_obs)))
+                # 自动出片兜底：读文档/写页之后模型仍没真正执行脚本 →
+                # 替它对已写好的项目跑一次 build，避免「说了出片却不出片」。
+                if not any(s.tool == "run_skill_script" and s.ok for s in steps):
+                    built = agent_tools.auto_build_ppt(db, user)
+                    if built is not None:
+                        steps.append(Step(tool="run_skill_script",
+                                          args={"auto": True}, ok=bool(built.get("成功")),
+                                          result=built if built.get("成功") else None,
+                                          error=None if built.get("成功") else str(built.get("错误") or built)))
                 block = _format_block(steps, block_chars, result_chars=result_chars)
                 return PlanOutcome(steps=steps, block=block, rounds=rounds, degraded=True)
         if planner_failed or not llm.is_llm_configured() or heuristic:
@@ -235,6 +254,15 @@ def plan_and_run(
         return PlanOutcome()
 
     block = _format_block(steps, block_chars, result_chars=result_chars)
+    # 自动出片兜底（主循环正常结束但没真正跑出文件时）：替模型对已写好的项目跑一次 build。
+    if is_skill_task and not any(s.tool == "run_skill_script" and s.ok for s in steps):
+        built = agent_tools.auto_build_ppt(db, user)
+        if built is not None:
+            steps.append(Step(tool="run_skill_script", args={"auto": True},
+                              ok=bool(built.get("成功")),
+                              result=built if built.get("成功") else None,
+                              error=None if built.get("成功") else str(built.get("错误") or built)))
+            block = _format_block(steps, block_chars, result_chars=result_chars)
     return PlanOutcome(steps=steps, block=block, rounds=rounds)
 
 

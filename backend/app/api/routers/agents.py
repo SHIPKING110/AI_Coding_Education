@@ -1047,11 +1047,13 @@ def conversation_chat(
     plan_outcome: agent_planner.PlanOutcome = agent_planner.PlanOutcome()
     has_skill_tools = bool(caps.get("skill_blocks"))
     _msg_stripped = message.strip()
-    # Skill 任务判定：既包括「生成/制作/跑脚本」，也包括 PPT「二次编辑」意图（加页/删页/改文字/调顺序…）。
-    # 后者若不纳入，用户说一句「加一页」就不会进 Skill 路径，模型只能凭空重写→崩在乱码上。
+    # Skill 任务判定：既包括「生成/制作/跑脚本」，也包括 PPT「二次编辑」意图（加页/删页/改文字/调顺序…），
+    # 以及「催出片/继续/下载」这类续作意图。后两者若不纳入，用户说「出片把」「继续」就不会进 Skill 路径，
+    # 模型只能凭空叙述「我马上出片」却从不真正执行——正是「说了出片不出片」的根因。
     skill_mode = has_skill_tools and bool(_msg_stripped) and (
         agent_tools.looks_like_skill_task(_msg_stripped)
-        or (conv.agent_id == "assistant" and agent_tools.looks_like_ppt_edit(_msg_stripped))
+        or agent_tools.looks_like_ppt_edit(_msg_stripped)
+        or agent_tools.looks_like_ppt_continue(_msg_stripped)
     )
     # PPT 二次编辑：把当前用户已有 Skill 包内的 .pptx 源文件路径注入上下文，让模型能「就地改」而不是重造。
     if skill_mode and agent_tools.looks_like_ppt_edit(_msg_stripped):
