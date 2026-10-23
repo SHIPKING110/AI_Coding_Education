@@ -13,6 +13,7 @@ from __future__ import annotations
 import pathlib
 import uuid
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -28,6 +29,47 @@ from app.services import agent_sql
 import logging
 
 logger = logging.getLogger(__name__)
+
+# 当前会话作用域：Skill 的 projects/ 工作区按会话隔离，避免不同对话串味（下载到别的会话 PPT）。
+# 规划层在开跑前 use_conversation(conv_id) 设置；工具内用它把 projects/ 路径改写到 conversations/<cid>/ 下。
+_CONV_SCOPE: ContextVar[str | None] = ContextVar("agent_conv_scope", default=None)
+
+
+def use_conversation(conv_id) -> None:
+    _CONV_SCOPE.set(str(conv_id) if conv_id else None)
+
+
+def _conv_prefix() -> str:
+    """会话隔离的 projects 子目录前缀（含尾斜杠）；无会话作用域时返回空。"""
+    cid = _CONV_SCOPE.get()
+    if not cid:
+        return ""
+    # 取短 id，避免路径过长
+    return "conversations/conv_" + str(cid).replace("-", "")[:12] + "/"
+
+
+def _scope_path(rel: str) -> str:
+    """把模型给的包内相对路径里以 projects/ 开头的部分，改写到当前会话子目录。
+
+    例：projects/demo/svg_output/01.svg → conversations/conv_xxx/projects/demo/svg_output/01.svg
+    非 projects/ 路径原样返回（脚本/资源/模板等不受影响）。
+    """
+    rel = (rel or "").replace("\\", "/").lstrip("/")
+    prefix = _conv_prefix()
+    if not prefix:
+        return rel
+    if rel == "projects" or rel.startswith("projects/"):
+        return prefix + rel
+    return rel
+
+
+def _unscope_path(rel: str) -> str:
+    """把内部会话作用域路径还原成「模型可见」的 projects/ 形式（用于列目录回显）。"""
+    prefix = _conv_prefix()
+    rel = (rel or "").replace("\\", "/")
+    if prefix and rel.startswith(prefix):
+        return rel[len(prefix):]
+    return rel
 
 # ---------------------------------------------------------------------------
 # 时间范围解析：把自然语言周期映射为 [start, end)
@@ -584,9 +626,18 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
         return {"错误": f"仅支持运行 .py/.js/.sh 脚本：{rel}"}
     sb = _ext.get_sandbox_setting(db, owner_id=user.id)
 
+    def _scope_arg(a) -> str:
+        """把参数里指向 projects/ 的路径改写到当前会话子目录（脚本路径本身不在此列）。"""
+        s = str(a)
+        norm = s.replace("\\", "/")
+        # 仅当整段就是一个 projects/... 路径时才改写（build/edit 的项目参数）
+        if norm == "projects" or norm.startswith("projects/"):
+            return _scope_path(norm)
+        return s
+
     def _call(r: str, a: list) -> dict:
         return _exec.dispatch(
-            user.id, target.id, r, a,
+            user.id, target.id, r, [_scope_arg(x) for x in a],
             provider=sb.provider if sb and sb.enabled else "local",
             endpoint=sb.endpoint if sb else "", token=sb.token if sb else "",
             timeout_s=sb.timeout_s if sb else 30,
@@ -678,7 +729,8 @@ def _tool_write_skill_file(db: Session, user: User, *, skill: str = "", path: st
     if target is None:
         return {"错误": f"找不到 Skill：{ref}"}
     dest = _bundle.skill_dir(user.id, target.id)
-    fp = (dest / rel).resolve()
+    scoped = _scope_path(rel)  # projects/ → conversations/conv_xxx/projects/（会话隔离）
+    fp = (dest / scoped).resolve()
     if dest.resolve() not in fp.parents:
         return {"错误": f"非法路径：{rel}"}
     try:
@@ -687,8 +739,8 @@ def _tool_write_skill_file(db: Session, user: User, *, skill: str = "", path: st
     except OSError as e:
         return {"错误": f"写入失败：{e}"}
     files = list(target.files or [])
-    if rel not in files:
-        files.append(rel)
+    if scoped not in files:
+        files.append(scoped)
         _ext.update_skill(db, target, files=files)
     return {"skill": target.name, "已写入": rel, "字节": len(body.encode("utf-8")),
             "提示": "文件已就位，可继续写其余页面，然后用 run_skill_script 跑该 Skill 的转换脚本生成 PPTX"}
@@ -707,15 +759,24 @@ def _tool_list_skill_files(db: Session, user: User, *, skill: str = "", path: st
     if target is None:
         return {"错误": f"找不到 Skill：{ref}"}
     dest = _bundle.skill_dir(user.id, target.id)
-    base = dest / prefix if prefix else dest
+    # projects/ 走会话隔离；其它目录（scripts/references/templates 等）原样
+    is_projects = prefix == "projects" or prefix.startswith("projects/")
+    scoped_prefix = _scope_path(prefix) if is_projects else prefix
+    base = dest / scoped_prefix if scoped_prefix else dest
     if not base.exists() or not base.is_dir():
-        # 兜底：把包内所有目录一级列一下，帮助模型导航
+        if is_projects:
+            # 会话内还没有 projects：返回空，提示可新建（不暴露别的会话项目）
+            return {"skill": target.name, "目录": (prefix + "/") if prefix else "（包根）",
+                    "子目录": [], "文件": [],
+                    "提示": "本会话暂无 projects 项目，可用 write_skill_file 新建（如 projects/xxx/...）"}
         tops = sorted({str(p.relative_to(dest)).replace("\\", "/").split("/")[0] for p in dest.iterdir()})[:30]
         return {"错误": f"目录不存在：{prefix or '/'}", "包内顶层": tops}
     dirs: list[str] = []
     files: list[str] = []
     for p in sorted(base.iterdir()):
         rel = str(p.relative_to(dest)).replace("\\", "/")
+        if is_projects:
+            rel = _unscope_path(rel)  # 回显为 projects/… 形式
         if p.is_dir():
             dirs.append(rel + "/")
         else:
@@ -737,13 +798,14 @@ def _tool_read_skill_file(db: Session, user: User, *, skill: str = "", path: str
     target, _avail = _resolve_skill_for_exec(db, user, ref)
     if target is None:
         return {"错误": f"找不到 Skill：{ref}"}
-    if rel not in list(target.files or []):
+    scoped = _scope_path(rel)  # projects/ 会话隔离
+    if scoped not in list(target.files or []):
         base = rel.rsplit("/", 1)[-1].lower()
         same = [f for f in (target.files or []) if str(f).rsplit("/", 1)[-1].lower() == base][:3]
         hint = f"（同名文件：{'、'.join(same)}，请用完整包内路径）" if same else ""
         return {"错误": f"{target.name} 包内无此文件：{rel}{hint}"}
     try:
-        text = _bundle.read_text_file(user.id, target.id, rel)
+        text = _bundle.read_text_file(user.id, target.id, scoped)
     except ValueError as e:
         return {"错误": str(e)}
     return {"skill": target.name, "文件": rel, "内容": text[:3000]}
@@ -1212,9 +1274,11 @@ def auto_build_ppt(db, user) -> dict | None:
             continue
         if not desk.exists():
             continue
+        # 只在**当前会话**作用域下的 projects 里找（避免串到别的会话）
+        proj_root = desk / _scope_path("projects")
         best = None
         best_mtime = -1.0
-        for proj in (desk / "projects").glob("*"):
+        for proj in proj_root.glob("*"):
             svg_dir = proj / "svg_output"
             if svg_dir.is_dir() and any(svg_dir.glob("*.svg")):
                 try:
@@ -1222,13 +1286,14 @@ def auto_build_ppt(db, user) -> dict | None:
                 except OSError:
                     continue
                 if mt < fresh_after:
-                    continue  # 太旧：很可能是别的对话遗留的项目，跳过避免串味
+                    continue  # 太旧：跳过
                 if mt > best_mtime:
                     best_mtime = mt
                     best = proj
         if best is None:
             continue
-        rel_proj = str(best.relative_to(desk)).replace("\\", "/")
+        # 还原为模型可见的 projects/… 路径；run_skill_script 会再按会话作用域改写
+        rel_proj = _unscope_path(str(best.relative_to(desk)).replace("\\", "/"))
         logger.info("自动出片兜底：对 %s 执行 build", rel_proj)
         return execute_tool(
             db, user, "run_skill_script",

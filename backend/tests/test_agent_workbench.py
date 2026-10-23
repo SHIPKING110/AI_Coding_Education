@@ -312,3 +312,17 @@ def test_auto_build_ppt_skips_stale_project(factory, tmp_path, monkeypatch):
         assert out is None, "旧项目不应被自动抓取"
     finally:
         db.close()
+
+def test_conversation_scoped_paths():
+    """会话隔离：projects/ 路径按会话改写到 conversations/conv_xxx/ 下，非 projects 原样。"""
+    from app.services import agent_tools as A
+
+    A.use_conversation("abcd-1234-5678-efgh")
+    assert A._scope_path("projects/demo/svg_output/01.svg").startswith("conversations/conv_")
+    assert "projects/demo" in A._scope_path("projects/demo/svg_output/01.svg")
+    assert A._scope_path("scripts/build.py") == "scripts/build.py"
+    scoped = A._scope_path("projects/x")
+    assert A._unscope_path(scoped) == "projects/x"
+    # 清除作用域后原样
+    A.use_conversation(None)
+    assert A._scope_path("projects/x") == "projects/x"

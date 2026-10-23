@@ -94,6 +94,7 @@ def plan_and_run(
     user: User,
     message: str,
     *,
+    conversation_id=None,
     max_rounds: int | None = None,
     max_calls: int | None = None,
     time_budget_ms: int | None = None,
@@ -103,7 +104,9 @@ def plan_and_run(
     - 非业务问题：直接返回空（不触发任何 LLM 调用）；
     - LLM 不可用或规划失败：降级为关键词启发式单轮路由；
     - 任何工具异常：记录错误并继续，不中断整体流程。
+    - conversation_id：设置会话作用域，使 Skill 的 projects/ 工作区按会话隔离。
     """
+    agent_tools.use_conversation(conversation_id)
     inv = _skill_inventory(db, user)
     if not agent_tools.looks_like_business(message):
         if not (inv and (
