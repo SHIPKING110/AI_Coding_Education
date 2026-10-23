@@ -148,3 +148,58 @@ def test_derive_spec_no_svg_returns_empty():
 
     steps = [Step(tool="my_schedule_overview", args={}, ok=True, result={})]
     assert _derive_spec_from_tools(PlanOutcome(steps=steps)) == {}
+
+
+def test_looks_like_ppt_edit_gate():
+    """PPT 二次编辑意图识别：加/删/改页/调顺序 → True；纯从零生成 → False。"""
+    from app.services.agent_tools import looks_like_ppt_edit
+
+    assert looks_like_ppt_edit("加一页，第二页放内容大纲") is True
+    assert looks_like_ppt_edit("把第 3 页删掉") is True
+    assert looks_like_ppt_edit("把封面标题改成家长会") is True
+    assert looks_like_ppt_edit("调一下页顺序") is True
+    assert looks_like_ppt_edit("换个风格") is True
+    # 纯生成（无编辑词）→ False
+    assert looks_like_ppt_edit("帮我做一个关于少儿编程的PPT") is False
+    assert looks_like_ppt_edit("生成一份家长会PPT") is False
+    assert looks_like_ppt_edit("") is False
+
+
+def test_existing_pptx_block_lists_sources(factory, tmp_path, monkeypatch):
+    """PPT 二次编辑：把已有 .pptx 源文件路径注入上下文，供「就地改」。"""
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import skill_bundle
+    from app.api.routers.agents import _existing_pptx_block
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        user = _mk_user(db, name="ppt-user")
+        skill = ext.create_skill(
+            db, owner_id=user.id, name="ppt-master", description="生成PPT",
+            content="", files=["projects/demo/out.pptx"],
+        )
+        d = skill_bundle.skill_dir(user.id, skill.id)
+        (d / "projects" / "demo").mkdir(parents=True, exist_ok=True)
+        (d / "projects" / "demo" / "out.pptx").write_bytes(b"PK\x03\x04fake")
+        block = _existing_pptx_block(db, user)
+        assert "projects/demo/out.pptx" in block
+        assert "Edit Native PPTX" in block
+    finally:
+        db.close()
+
+
+def test_existing_pptx_block_empty_without_pptx(factory, tmp_path, monkeypatch):
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.api.routers.agents import _existing_pptx_block
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        user = _mk_user(db, name="no-ppt")
+        ext.create_skill(db, owner_id=user.id, name="x", description="", content="hi", files=[])
+        assert _existing_pptx_block(db, user) == ""
+    finally:
+        db.close()

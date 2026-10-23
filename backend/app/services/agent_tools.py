@@ -623,6 +623,26 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
     out["stderr"] = str(result.get("stderr", ""))[:1200]
     if result.get("deps"):
         out["依赖"] = result["deps"]
+    # PPT 二次编辑支撑：把工作区里现成的 .pptx 源文件告诉模型，便于后续「编辑已有 PPT」而非重新生成。
+    # ppt-master 的 Edit Native PPTX 路由需要源 pptx 路径（pptx_to_svg.py --roundtrip <source.pptx>）。
+    try:
+        desk = _bundle.skill_dir(user.id, target.id)
+        existing_pptx = sorted(
+            str(p.relative_to(desk)).replace("\\", "/")
+            for p in desk.rglob("*.pptx")
+            if "_outputs/" not in str(p.relative_to(desk)).replace("\\", "/")
+        )[:6]
+        if existing_pptx:
+            out["已有PPT源文件"] = existing_pptx
+            out["二次编辑提示"] = (
+                "包内已存在 .pptx 源文件（见「已有PPT源文件」，路径相对包根）。"
+                "若用户要「修改/加页/删页/调顺序/换文字」而非整体重做，应走 ppt-master 的"
+                "「Edit Native PPTX」路由：先 pptx_to_svg.py \"<该pptx路径>\" ... --roundtrip 导入为可编辑工作区，"
+                "只改需要改的页，再用 svg_to_pptx.py --roundtrip 导出，保留原设计、只重建改动页。"
+                "不要重新从头生成整份。"
+            )
+    except Exception:
+        pass
     return out
 
 
@@ -1067,6 +1087,37 @@ def looks_like_web_search(message: str) -> bool:
     return any(k in t for k in _WEB_SEARCH_KEYWORDS)
 
 
+# PPT 二次编辑意图：命中后应进 Skill 路径（走 ppt-master 的 Edit Native PPTX 路由就地改），
+# 而不是让模型凭空重写整份（那正是之前「越改越乱」的诱因）。
+_PPT_EDIT_KEYWORDS = (
+    "加页", "加一页", "增加页", "新增页", "再加", "插入页", "添加页",
+    "删页", "删掉", "删除页", "去掉页", "移除页", "删一页", "去掉",
+    "改一下", "修改", "调整", "换成", "替换", "改成", "改这页", "改第",
+    "重排", "换顺序", "调顺序", "排序", "移到", "挪到", "顺序",
+    "这页", "第几页", "页码", "封面改", "标题改", "文字改", "字体", "配色", "换个风格",
+    "加一句", "加个", "补充一页", "精简", "删减", "合并页", "拆分页",
+)
+# 出现这些说明是「从零生成」，不算编辑（避免把「生成一份 PPT」误判成编辑）
+_PPT_GENERATE_HINTS = ("生成", "制作", "做一个", "做个", "新的", "从头", "重新做", "新建")
+
+
+def looks_like_ppt_edit(message: str) -> bool:
+    """是否像是在「二次编辑已有 PPT」（加/删/改页、调顺序、换风格…）而非从零生成。
+
+    仅在会话已具备 Skill 工具时有意义；作为 skill_mode 放行信号，
+    让「加一页」这类短指令也进 Skill 路径，交给模型按 Edit Native PPTX 路由就地修改。
+    """
+    t = (message or "").strip()
+    if not t:
+        return False
+    if any(g in t for g in _PPT_GENERATE_HINTS):
+        # 同时含编辑词时仍视为编辑（如「重新生成时多加一页」偏编辑）；纯生成信号则否
+        has_edit = any(k in t for k in _PPT_EDIT_KEYWORDS)
+        # 「换个风格/重排」这类即使带生成词也按编辑处理
+        return has_edit and any(k in t for k in ("换", "改", "加", "删", "调整", "重排"))
+    return any(k in t for k in _PPT_EDIT_KEYWORDS)
+
+
 def heuristic_skill_calls(db, user) -> list[dict]:
     """Skill 兜底：规划器零工具调用时，强制先读第一个可执行 Skill 的 SKILL.md。
 
@@ -1142,5 +1193,6 @@ def _to_text(obj: Any) -> str:
 
 
 __all__ = [
-    "TOOLS_SCHEMA", "parse_period", "looks_like_business", "execute_tool",
+    "TOOLS_SCHEMA", "parse_period", "looks_like_business", "looks_like_ppt_edit",
+    "looks_like_skill_task", "looks_like_web_search", "execute_tool",
 ]

@@ -106,7 +106,7 @@ def plan_and_run(
     """
     inv = _skill_inventory(db, user)
     if not agent_tools.looks_like_business(message):
-        if not (inv and agent_tools.looks_like_skill_task(message)):
+        if not (inv and (agent_tools.looks_like_skill_task(message) or agent_tools.looks_like_ppt_edit(message))):
             # 外部/时效性事实问题也需要规划器参与（由模型决定是否调 web_search）
             if not agent_tools.looks_like_web_search(message):
                 return PlanOutcome()

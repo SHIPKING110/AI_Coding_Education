@@ -385,6 +385,43 @@ def _attachment_block(attachments: list[dict]) -> str:
     return block
 
 
+def _existing_pptx_block(db, user) -> str:
+    """列出当前用户可用 Skill 包内已有的 .pptx 源文件，供「就地二次编辑」定位源文件。
+
+    出现条件：用户已有生成过 PPT（包内存在 projects/**/*.pptx 或 *_outputs/*.pptx）。
+    模型据此走 ppt-master 的 Edit Native PPTX 路由（pptx_to_svg --roundtrip → 改页 → svg_to_pptx --roundtrip），
+    保留原设计、只重建改动页，而不是从头重做。
+    """
+    try:
+        from app.crud import agent_ext as _ext
+        from app.services import skill_bundle as _bundle
+
+        found: list[tuple[str, str]] = []
+        for s in _ext.list_skills(db, owner_id=user.id):
+            if not s.enabled:
+                continue
+            has_pptx_file = any(str(f).lower().endswith(".pptx") for f in (s.files or []))
+            if not has_pptx_file:
+                continue
+            desk = _bundle.skill_dir(user.id, s.id)
+            for p in desk.rglob("*.pptx"):
+                rel = str(p.relative_to(desk)).replace("\\", "/")
+                found.append((s.name, rel))
+            if len(found) >= 8:
+                break
+        if not found:
+            return ""
+        lines = [f"- Skill「{n}」：{rel}" for n, rel in found[:8]]
+        return (
+            "【当前已有的 PPT 源文件（可用于二次编辑）】\n" + "\n".join(lines)
+            + "\n若用户本次是「修改/加页/删页/调顺序/换文字」，请基于上面的 .pptx 源文件走 ppt-master 的"
+            "「Edit Native PPTX」路由：pptx_to_svg.py \"<该路径>\" ... --roundtrip 导入 → 只改需要的页 → "
+            "svg_to_pptx.py ... --roundtrip 导出；不要重新从头生成整份。若用户要全新主题/整体重做，则走生成路由。"
+        )
+    except Exception:
+        return ""
+
+
 def _derive_spec_from_tools(plan_outcome) -> dict:
     """从 Skill 工具执行轨迹里提炼 PPT 规格（大纲 + 幻灯片预览），供工作区「大纲/成果」对齐。
 
@@ -1001,7 +1038,21 @@ def conversation_chat(
     # event_stream 里一边心跳报进度一边等，完工立刻推送执行链路，再组装 prompt 进模型。
     plan_outcome: agent_planner.PlanOutcome = agent_planner.PlanOutcome()
     has_skill_tools = bool(caps.get("skill_blocks"))
-    skill_mode = has_skill_tools and bool(message.strip()) and agent_tools.looks_like_skill_task(message.strip())
+    _msg_stripped = message.strip()
+    # Skill 任务判定：既包括「生成/制作/跑脚本」，也包括 PPT「二次编辑」意图（加页/删页/改文字/调顺序…）。
+    # 后者若不纳入，用户说一句「加一页」就不会进 Skill 路径，模型只能凭空重写→崩在乱码上。
+    skill_mode = has_skill_tools and bool(_msg_stripped) and (
+        agent_tools.looks_like_skill_task(_msg_stripped)
+        or (conv.agent_id == "assistant" and agent_tools.looks_like_ppt_edit(_msg_stripped))
+    )
+    # PPT 二次编辑：把当前用户已有 Skill 包内的 .pptx 源文件路径注入上下文，让模型能「就地改」而不是重造。
+    if skill_mode and agent_tools.looks_like_ppt_edit(_msg_stripped):
+        try:
+            pptx_block = _existing_pptx_block(db, user)
+            if pptx_block:
+                mem_block = (mem_block + "\n\n" + pptx_block).strip() if mem_block else pptx_block
+        except Exception:
+            pass
     plan_box: dict = {}
     plan_thread = None
     if (conv.agent_id == "assistant" or has_skill_tools) and message.strip():
