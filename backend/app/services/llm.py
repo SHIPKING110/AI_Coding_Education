@@ -190,11 +190,15 @@ def stream_text(system: str, prompt: str):
     """流式调用 LLM，逐段 yield 文本增量（供 SSE 对话式 PPT 定制使用）。
 
     未配置 LLM 时抛 LLMConfigError；调用异常时抛出，由调用方转为 SSE error 事件。
+    输出经 `_StreamSanitizer` 净化：模型偶发把「原生工具调用标记」（如
+    `<|tool▁calls▁begin|>` / `<｜｜DSML｜｜ …>` / `<function_calls>` 等）当普通文本吐出，
+    这类标记对用户是乱码、且会污染历史导致「越改越乱」。净化器跨 chunk 安全地剔除它们。
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
     _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI")
     model = _chat_model()
+    san = _StreamSanitizer()
     for chunk in model.stream([SystemMessage(content=system), HumanMessage(content=prompt)]):
         piece = getattr(chunk, "content", "") or ""
         if isinstance(piece, list):
@@ -202,7 +206,169 @@ def stream_text(system: str, prompt: str):
                 p.get("text", "") if isinstance(p, dict) else str(p) for p in piece
             )
         if piece:
-            yield piece
+            out = san.feed(piece)
+            if out:
+                yield out
+    tail = san.flush()
+    if tail:
+        yield tail
+
+
+# ---------------------------------------------------------------------------
+# 原生工具调用标记净化：防止模型把 function-call 特殊 token 当文本输出成乱码
+# ---------------------------------------------------------------------------
+
+# 已知「进入脏区」的开标记子串（半角 | 与全角 ｜ 都覆盖，大小写不敏感）
+_DIRTY_OPENERS = (
+    "<|tool\u2581calls\u2581begin|>", "<｜tool\u2581calls\u2581begin｜>",
+    "<|tool\u2581call\u2581begin|>", "<｜tool\u2581call\u2581begin｜>",
+    "<|tool\u2581calls\u2581begin", "<｜tool\u2581calls\u2581begin",
+    "<||DSML||", "<｜｜DSML｜｜", "<|｜DSML｜｜", "<｜|DSML|｜",
+    "<function_calls>", "<tool_call>", "<invoke ", "<invoke>",
+)
+# 「退出脏区」的闭标记子串
+_DIRTY_CLOSERS = (
+    "<|tool\u2581calls\u2581end|>", "<｜tool\u2581calls\u2581end｜>",
+    "<|tool\u2581call\u2581end|>", "<｜tool\u2581call\u2581end｜>",
+    "<|tool\u2581calls\u2581end", "<｜tool\u2581calls\u2581end",
+    "</||DSML||>", "</｜｜DSML｜｜>", "</function_calls>", "</tool_call>",
+    "</invoke>", "</parameter>", "<|end|>", "<｜end｜>",
+)
+
+
+def _toolcall_patterns():
+    """兜底正则：处理「成对闭合」的 XML 风格块（无跨行脏区时也能清）。"""
+    import re
+
+    return [
+        re.compile(r"<[|｜][\s\S]*?[|｜]>"),
+        re.compile(r"<function_calls>[\s\S]*?</function_calls>"),
+        re.compile(r"<tool_call>[\s\S]*?</tool_call>"),
+    ]
+
+
+def _find_any(text: str, needles: tuple[str, ...], start: int) -> tuple[int, str]:
+    """在 text[start:] 里找 needles 中最早出现的，返回 (index, needle)；无则 (-1, "")。"""
+    low = text.lower()
+    best_idx, best_n = -1, ""
+    for n in needles:
+        i = low.find(n.lower(), start)
+        if i != -1 and (best_idx == -1 or i < best_idx):
+            best_idx, best_n = i, n
+    return best_idx, best_n
+
+
+def _could_be_partial_opener(text: str) -> str:
+    """若 text 末尾可能是某个开标记的前缀（尚未完整），返回需保留的后缀。"""
+    for opener in _DIRTY_OPENERS:
+        lo = opener.lower()
+        # 末尾 ≤ len(opener) 的片段是否为 opener 的前缀
+        for k in range(1, min(len(lo), len(text)) + 1):
+            if text[-k:].lower() == lo[:k]:
+                return text[-k:]
+    return ""
+
+
+class _StreamSanitizer:
+    """流式净化器：识别原生工具调用「脏区」并整段吞掉。
+
+    机制：
+      - 看到开标记（`<|tool▁calls▁begin|>` / `<｜｜DSML｜｜…` / `<function_calls>` 等）→ 进入脏区；
+      - 脏区内所有内容丢弃，直到看到闭标记 → 退出脏区；
+      - 每次 feed 后，若 buffer 末尾是「未完成的开/闭标记前缀」，则保留到下一 chunk，
+        避免跨 chunk 把标记拆两半漏出去。
+    """
+
+    def __init__(self):
+        self._buf = ""
+        self._in_dirty = False
+
+    def feed(self, piece: str) -> str:
+        self._buf += piece
+        return self._drain(final=False)
+
+    def flush(self) -> str:
+        out = self._drain(final=True)
+        # 收尾仍在脏区：丢弃残余（未闭合的半截标记/JSON）宁可不出
+        self._buf = ""
+        return out
+
+    def _drain(self, *, final: bool) -> str:
+        data = self._buf
+        out: list[str] = []
+        i = 0
+        n = len(data)
+        while i < n:
+            if self._in_dirty:
+                idx, _ = _find_any(data, _DIRTY_CLOSERS, i)
+                if idx == -1:
+                    # 未遇到闭标记：整段丢弃；但尾部可能是闭标记前缀时保留
+                    if not final:
+                        keep = _tail_partial(data[i:], _DIRTY_CLOSERS)
+                        self._buf = data[n - len(keep):] if keep else ""
+                    else:
+                        self._buf = ""
+                    return "".join(out)
+                # 关闭标记结束处（闭标记可能是前缀子集，找最长匹配）
+                self._in_dirty = False
+                i = idx + _matched_len(data, idx, _DIRTY_CLOSERS)
+                continue
+            # 不在脏区：找下一个开标记
+            idx, needle = _find_any(data, _DIRTY_OPENERS, i)
+            if idx == -1:
+                # 无开标记：尾部若是开标记前缀则保留到下一轮
+                tail = "" if final else _could_be_partial_opener(data[i:])
+                if tail:
+                    out.append(data[i:n - len(tail)])
+                    self._buf = data[n - len(tail):]
+                    return "".join(out)
+                out.append(data[i:])
+                self._buf = ""
+                return "".join(out)
+            # 输出开标记之前的干净文本
+            out.append(data[i:idx])
+            # 进入脏区：开标记本身可能是更长闭标记前缀，按实际长度跳过
+            self._in_dirty = True
+            i = idx + _matched_len(data, idx, _DIRTY_OPENERS)
+        self._buf = "" if final else self._buf
+        return "".join(out)
+
+
+def _matched_len(text: str, idx: int, needles: tuple[str, ...]) -> int:
+    """在 idx 处匹配最长的 needle 长度（大小写不敏感）。"""
+    low = text.lower()
+    best = 1
+    for nd in needles:
+        if low.startswith(nd.lower(), idx):
+            best = max(best, len(nd))
+    return best
+
+
+def _tail_partial(text: str, needles: tuple[str, ...]) -> str:
+    """返回 text 末尾可能是任一 needle 前缀的最长后缀（用于脏区内保留闭标记前缀）。"""
+    for k in range(min(24, len(text)), 0, -1):
+        tail = text[-k:].lower()
+        for nd in needles:
+            if nd.lower().startswith(tail):
+                return text[-k:]
+    return ""
+
+
+def strip_toolcall_markup(text: str) -> str:
+    """非流式净化：剔除原生工具调用标记及其脏区内容（历史清洗/持久化前用）。"""
+    if not text:
+        return text
+    try:
+        import re as _re
+
+        s = _StreamSanitizer()
+        clean = s.feed(text) + s.flush()
+        for pat in _toolcall_patterns():
+            clean = pat.sub("", clean)
+        clean = _re.sub(r"\n{3,}", "\n\n", clean).strip()
+        return clean
+    except Exception:
+        return text
 
 
 def plan_tool_calls(message: str, tools: list[dict]) -> list[dict]:

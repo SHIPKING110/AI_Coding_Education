@@ -46,7 +46,9 @@ def build_memory_context(
     except Exception:
         pass
     return {
-        "recent": [{"role": m.role, "content": m.content} for m in recent],
+        "recent": [
+            {"role": m.role, "content": _clean_history(m.content)} for m in recent
+        ],
         "summary": summary_row.summary if summary_row else "",
         "long_term": [
             {k: m[k] for k in ("key", "value", "category", "strength_tier", "confidence", "use_count")}
@@ -54,6 +56,18 @@ def build_memory_context(
         ],
         "working": working,
     }
+
+
+def _clean_history(content: str) -> str:
+    """清洗历史消息文本：剔除原生工具调用标记，避免把乱码回灌给模型形成污染循环。"""
+    if not content:
+        return content
+    try:
+        from app.services.llm import strip_toolcall_markup
+
+        return strip_toolcall_markup(content)
+    except Exception:
+        return content
 
 
 _CATEGORY_LABEL = {"preference": "偏好", "fact": "事实", "experience": "经验"}

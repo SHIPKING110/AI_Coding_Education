@@ -97,7 +97,9 @@ def conversation_messages(conv_id: uuid.UUID, db: Session = Depends(get_db), use
         },
         "items": [
             {
-                "id": str(m.id), "role": m.role, "content": m.content,
+                "id": str(m.id), "role": m.role,
+                # 历史里可能残留旧版本的工具调用标记乱码：读取时统一净化
+                "content": llm.strip_toolcall_markup(m.content) if m.role == "assistant" else m.content,
                 "citations": m.citations, "options": m.options, "spec": m.spec,
             }
             for m in msgs
@@ -123,11 +125,15 @@ def read_shared_conversation(token: str, db: Session = Depends(get_db)):
     if conv is None:
         raise HTTPException(status_code=404, detail="分享链接无效或已失效")
     msgs = agent_crud.list_messages(db, conversation_id=conv.id)
+    # 历史里可能残留旧版本产生的原生工具调用标记（乱码）：分享页统一净化
     return {
         "title": conv.title,
         "agent_id": conv.agent_id,
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
-        "items": [{"role": m.role, "content": m.content} for m in msgs],
+        "items": [
+            {"role": m.role, "content": llm.strip_toolcall_markup(m.content) if m.role == "assistant" else m.content}
+            for m in msgs
+        ],
     }
 
 
@@ -331,15 +337,23 @@ _DOC_SUFFIXES = {".txt", ".md", ".markdown", ".pdf", ".docx"}
 def _attachment_block(attachments: list[dict]) -> str:
     """随消息上传的附件 → 注入对话上下文。
 
-    文档抽取正文（节选）供模型直接参考；图片仅登记（当前模型为文本模型，图片以文件名/链接标注）。
+    文档抽取正文（节选）供模型直接参考；图片登记文件名 + 可被 Skill 引用的绝对路径，
+    并提示：如需把图片放进 PPT，可先用 write_skill_file 思路 / 让 Skill 脚本读取该路径，
+    或把图片写进 Skill 包内资源目录再生成。这样「上传图片 + ppt-master」可以配合使用。
     """
     if not attachments:
         return ""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    upload_root = str(Path(settings.UPLOAD_DIR).resolve())
     lines: list[str] = []
+    image_hints: list[str] = []
     for a in attachments:
         if not isinstance(a, dict):
             continue
         name = str(a.get("name") or "未命名附件")
+        url = str(a.get("url") or "")
         if str(a.get("kind")) == "doc":
             text = str(a.get("text") or "").strip()
             if text:
@@ -347,13 +361,62 @@ def _attachment_block(attachments: list[dict]) -> str:
             else:
                 lines.append(f"- 用户上传了文档《{name}》（未能解析出文本，请按文件名理解用途）")
         else:
-            lines.append(f"- 用户上传了图片《{name}》")
+            # 把 /uploads/... 映射到磁盘绝对路径，供 Skill 脚本读取/嵌入
+            disk_path = ""
+            if url.startswith("/uploads/"):
+                disk_path = str(Path(upload_root) / url[len("/uploads/"):])
+            lines.append(
+                f"- 用户上传了图片《{name}》"
+                + (f"（磁盘路径：{disk_path}，可直接在 Skill 脚本中读取并插入 PPT/文档）" if disk_path else "")
+            )
+            if disk_path:
+                image_hints.append(disk_path)
     if not lines:
         return ""
-    return (
+    block = (
         "【用户随消息上传的附件】\n" + "\n".join(lines)
         + "\n请优先结合上述附件内容完成用户的请求；附件内容优先于历史对话。"
     )
+    if image_hints:
+        block += (
+            "\n【附件图片可用于生成产物】若用户希望把这些图片放进 PPT/文档：可让 Skill 脚本直接读取上面的"
+            "磁盘路径并插入；或用 write_skill_file 把图片相关引用/说明写入 Skill 包内，再由 run_skill_script 生成。"
+        )
+    return block
+
+
+def _derive_spec_from_tools(plan_outcome) -> dict:
+    """从 Skill 工具执行轨迹里提炼 PPT 规格（大纲 + 幻灯片预览），供工作区「大纲/成果」对齐。
+
+    当模型用 ppt-master 之类的 Skill 生成 PPT 时，正文通常不含 ```json 大纲，
+    但工具会：
+      - write_skill_file 逐页写入 svg（每页一个 .svg 源文件）→ 可据文件名/顺序还原大纲；
+      - run_skill_script 产出的 pptx 页数 → 校验大纲页数与成品一致。
+    这里把「写入了哪些页」还原成 outline（标题取自 svg 文件名），并附 slides 预览结构，
+    让「大纲」的每一页都对得上「成果」里实际生成的幻灯片，SVG 页也能在前端预览。
+    """
+    svg_pages: list[dict] = []
+    seen: set[str] = set()
+    for s in plan_outcome.steps:
+        if s.tool == "write_skill_file" and s.ok:
+            path = str((s.args or {}).get("path") or "")
+            if path.lower().endswith(".svg") and path not in seen:
+                seen.add(path)
+                fname = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                # 文件名多为 "01_cover" / "02_outline" 这类：去掉序号前缀得到标题
+                import re as _re
+
+                title = _re.sub(r"^\d+[_\-\s]*", "", fname).strip() or fname
+                svg_pages.append({"id": f"p{len(svg_pages) + 1}", "title": title,
+                                  "kind": "content", "file": path})
+    if not svg_pages:
+        return {}
+    # 按文件名前缀排序不稳定，这里保持写入顺序（write 顺序即页序）
+    outline = [
+        {"id": p["id"], "title": p["title"], "kind": ("cover" if i == 0 else "content")}
+        for i, p in enumerate(svg_pages)
+    ]
+    return {"outline": outline, "slides": svg_pages}
 
 
 def _tool_trace(plan_outcome) -> list[dict]:
@@ -1091,8 +1154,17 @@ def conversation_chat(
             yield _frame({"error": llm.friendly_llm_error(e)})
             return
         # 持久化助手回复 + 异步增量提炼长期记忆（不阻塞流式）
+        # 先净化：剔除模型偶发吐出的原生工具调用标记，避免乱码入库、污染后续历史
+        full = llm.strip_toolcall_markup(full)
         options = agent_chat.extract_options(full)
         spec = agent_chat.extract_spec(full)
+        # Skill 路径兜底：模型用 run_skill_script 生成 PPT 时，通常不会在正文里输出 ```json 大纲，
+        # 导致工作区「大纲/成果」不同步、SVG 预览丢失。这里从工具执行结果里提炼大纲回填 spec，
+        # 让「大纲」与「成果」始终对齐（大纲里的每一页都能对应到已生成的幻灯片）。
+        if not spec.get("outline") and plan_outcome.steps:
+            derived = _derive_spec_from_tools(plan_outcome)
+            if derived:
+                spec = {**derived, **spec}
         final_stage = _infer_stage(conv.agent_id, stage, options, spec)
         # 工具调用轨迹：随 citations 持久化（免迁移），前端在气泡下方可收起展开
         tool_trace = _tool_trace(plan_outcome)

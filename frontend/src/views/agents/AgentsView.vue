@@ -2233,6 +2233,21 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 </div>
                 <div class="bubble">
                   <div v-html="renderMarkdown(m.content)" />
+                  <div v-if="(m.attachments ?? []).length" class="msg-atts">
+                    <a
+                      v-for="a in (m.attachments ?? [])"
+                      :key="a.id"
+                      class="att-chip sent"
+                      :href="a.url"
+                      target="_blank"
+                      rel="noopener"
+                      :title="a.name"
+                    >
+                      <img v-if="isImgAtt(a)" :src="a.url" class="att-thumb" alt="" />
+                      <span v-else class="att-doc">📄</span>
+                      <span class="att-name">{{ a.name }}</span>
+                    </a>
+                  </div>
                   <div v-if="msgFiles(m).length" class="dl-banner">
                     <div class="dl-banner-title">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
@@ -3883,6 +3898,12 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .plus-btn:hover, .plus-btn.on { border-color: var(--brand); color: var(--brand-strong); transform: rotate(45deg); }
 .plus-btn svg { width: 17px; height: 17px; }
 .plus-menu { position: absolute; left: 0; bottom: 42px; z-index: 120; display: flex; flex-direction: column; gap: 4px; width: 250px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 6px; }
+/* 悬停桥：补上按钮与菜单之间的 8px 空隙，鼠标移向菜单项时不会误触 mouseleave 而收起（不影响点击） */
+.plus-menu::after { content: ""; position: absolute; left: 0; right: 0; bottom: -10px; height: 12px; }
+/* 已发送消息里的附件徽标 */
+.msg-atts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.att-chip.sent { text-decoration: none; cursor: pointer; }
+.att-chip.sent:hover { border-color: var(--brand); }
 .plus-item { display: flex; gap: 10px; align-items: center; border: none; background: transparent; text-align: left; cursor: pointer; padding: 8px 10px; border-radius: 9px; }
 .plus-item:hover:not(:disabled) { background: var(--bg-soft); }
 .plus-item:disabled { opacity: .5; cursor: not-allowed; }

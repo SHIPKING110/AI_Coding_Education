@@ -523,6 +523,44 @@ def _locate_script(target, hint_path: str) -> str | None:
     return next((f for f in files if f.rsplit("/", 1)[-1] == base), None)
 
 
+def _resolve_skill_for_exec(db: Session, user: User, ref: str):
+    """解析可执行的 Skill（含广场收录），并把文件包物化到使用者自己的目录。
+
+    收录场景的关键（见 ADR-0013）：Skill 文件包按「作者 owner_id/skill_id」落盘在**作者目录**，
+    收录者目录里没有这份文件。若按收录者 id 找目录，执行必然找不到脚本——表现就是
+    「收录后看得见 Skill、也能出计划，但一执行就失败、产不出 PPT」。
+    这里统一处理：解析到真实 Skill 行后，把包复制到使用者目录（物化），
+    之后执行/写文件/取产物都在使用者目录完成：
+      - 发布者与所有收录者效果完全一致（同一个 skill，任何人跑出来一样）；
+      - 使用者写入的中间产物不污染作者目录；
+      - 产物下载链接按使用者维度隔离，作者目录保持干净。
+
+    返回 (skill_row, 可用名称列表)；找不到时 skill_row 为 None。
+    """
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    target = _ext.resolve_skill_for_user(db, user_id=user.id, skill_ref=ref)
+    avail = [
+        s.name for s in _ext.list_skills(db, owner_id=user.id)
+        if s.enabled
+    ]
+    if target is None:
+        # 收集失败时仍给出候选名，便于模型自我纠正
+        for s in _ext.list_plaza_skills(db):
+            avail.append(f"{s.name}(广场)")
+        return None, avail
+    if not target.enabled:
+        return None, avail
+    if str(target.owner_id) != str(user.id):
+        # 广场收录：物化到使用者目录
+        try:
+            _bundle.materialize_bundle(target.owner_id, target.id, user.id, target.id)
+        except Exception:
+            pass
+    return target, avail
+
+
 def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: str = "", args: list | None = None) -> dict:
     """执行用户 Skill 包内脚本（走用户沙箱配置：本地/百炼；产物自动取回给下载链接）。"""
     from app.crud import agent_ext as _ext
@@ -532,15 +570,9 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
     rel = (path or "").strip().replace("\\", "/")
     if not ref or not rel:
         return {"错误": "需提供 skill（Skill 名或 id）与 path（包内脚本路径）"}
-    skills = [s for s in _ext.list_skills(db, owner_id=user.id) if s.enabled]
-    target = None
-    for s in skills:
-        sid = str(s.id)
-        if ref == sid or ref == sid[:8] or ref in (s.name or ""):
-            target = s
-            break
+    target, avail = _resolve_skill_for_exec(db, user, ref)
     if target is None:
-        return {"错误": f"找不到启用的 Skill：{ref}（可用：{('、'.join(s.name for s in skills[:10])) or '无'}）"}
+        return {"错误": f"找不到启用的 Skill：{ref}（可用：{('、'.join(avail[:10])) or '无'}）"}
     if rel not in list(target.files or []):
         cands = [f for f in (target.files or []) if str(f).lower().endswith((".py", ".js", ".sh"))]
         return {"错误": f"{target.name} 包内无此文件：{rel}（可执行：{'、'.join(cands[:10]) or '无'}）"}
@@ -618,12 +650,7 @@ def _tool_write_skill_file(db: Session, user: User, *, skill: str = "", path: st
         return {"错误": "content 不能为空"}
     if len(body.encode("utf-8")) > 512 * 1024:
         return {"错误": "单文件上限 512KB"}
-    target = None
-    for s in _ext.list_skills(db, owner_id=user.id):
-        sid = str(s.id)
-        if ref == sid or ref == sid[:8] or ref in (s.name or ""):
-            target = s
-            break
+    target, _avail = _resolve_skill_for_exec(db, user, ref)
     if target is None:
         return {"错误": f"找不到 Skill：{ref}"}
     dest = _bundle.skill_dir(user.id, target.id)
@@ -652,12 +679,7 @@ def _tool_list_skill_files(db: Session, user: User, *, skill: str = "", path: st
     if not ref:
         return {"错误": "需提供 skill（Skill 名或 id）"}
     prefix = (path or "").strip().replace("\\", "/").strip("/")
-    target = None
-    for s in _ext.list_skills(db, owner_id=user.id):
-        sid = str(s.id)
-        if ref == sid or ref == sid[:8] or ref in (s.name or ""):
-            target = s
-            break
+    target, _avail = _resolve_skill_for_exec(db, user, ref)
     if target is None:
         return {"错误": f"找不到 Skill：{ref}"}
     dest = _bundle.skill_dir(user.id, target.id)
@@ -688,12 +710,7 @@ def _tool_read_skill_file(db: Session, user: User, *, skill: str = "", path: str
     rel = (path or "").strip().replace("\\", "/")
     if not ref or not rel:
         return {"错误": "需提供 skill（Skill 名或 id）与 path（包内文件路径）"}
-    target = None
-    for s in _ext.list_skills(db, owner_id=user.id):
-        sid = str(s.id)
-        if ref == sid or ref == sid[:8] or ref in (s.name or ""):
-            target = s
-            break
+    target, _avail = _resolve_skill_for_exec(db, user, ref)
     if target is None:
         return {"错误": f"找不到 Skill：{ref}"}
     if rel not in list(target.files or []):
@@ -1058,7 +1075,15 @@ def heuristic_skill_calls(db, user) -> list[dict]:
     try:
         from app.crud import agent_ext as _ext
 
-        for s in _ext.list_skills(db, owner_id=user.id):
+        collected = {
+            str(x) for x in _ext.collected_skill_ids(db, user_id=user.id)
+        }
+        rows: list = list(_ext.list_skills(db, owner_id=user.id))
+        if collected:
+            for s in _ext.list_plaza_skills(db):
+                if str(s.id) in collected and all(str(x.id) != str(s.id) for x in rows):
+                    rows.append(s)
+        for s in rows:
             if not s.enabled:
                 continue
             files = [str(f) for f in (s.files or [])]

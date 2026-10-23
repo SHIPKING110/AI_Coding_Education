@@ -1,0 +1,150 @@
+# -*- coding: utf-8 -*-
+"""Agent 工作台四项优化回归测试：
+1) 广场收录 Skill 可被收录者解析/执行（物化到使用者目录，效果与发布者一致）；
+2) 原生工具调用标记净化（二次编辑不再吐乱码）；
+3) Skill 生成 PPT 时从工具轨迹提炼大纲（大纲/成果对齐、SVG 页可预览）。
+"""
+
+import uuid
+
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+
+import app.models.agent_ext  # noqa: F401  确保建表
+from app.core.database import Base
+
+TEST_DB = "child_code_test_agent_workbench"
+
+
+@pytest.fixture(scope="module")
+def factory():
+    from app.core.config import get_settings
+
+    base = get_settings().DATABASE_URL.rsplit("/", 1)[0]
+    admin_engine = create_engine(base + "/postgres", isolation_level="AUTOCOMMIT")
+    with admin_engine.connect() as c:
+        c.execute(text(f"DROP DATABASE IF EXISTS {TEST_DB} WITH (FORCE)"))
+        c.execute(text(f"CREATE DATABASE {TEST_DB}"))
+    admin_engine.dispose()
+    engine = create_engine(base + f"/{TEST_DB}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    yield Session
+    engine.dispose()
+
+
+def _mk_user(db, role="teacher", name="张三"):
+    from app.models.user import User
+
+    u = User(id=uuid.uuid4(), role=role, username=f"u-{uuid.uuid4().hex[:8]}", name=name, password_hash="x")
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def test_plaza_skill_collect_and_materialize(factory, tmp_path, monkeypatch):
+    """收录者能解析到作者的广场 Skill，并把文件包物化到自己目录（效果与作者一致）。"""
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import skill_bundle, agent_tools
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        author = _mk_user(db, name="zhang")
+        user = _mk_user(db, name="teacher2")
+        # 作者建 Skill（含脚本），发布到广场，落盘文件包到作者目录
+        skill = ext.create_skill(
+            db, owner_id=author.id, name="ppt-master", description="生成PPT",
+            content="", files=["SKILL.md", "scripts/build.py"],
+        )
+        d = skill_bundle.skill_dir(author.id, skill.id)
+        (d / "SKILL.md").write_text("# ppt-master\n入口 scripts/build.py", encoding="utf-8")
+        (d / "scripts").mkdir(exist_ok=True)
+        (d / "scripts" / "build.py").write_text("print('ok')", encoding="utf-8")
+        ext.set_skill_visibility(db, skill, "plaza")
+
+        # 收录者：未收录时 resolve 不到（除非广场可见，这里广场可见也应能解析）
+        ext.collect_skill(db, user_id=user.id, skill_id=skill.id)
+        resolved = ext.resolve_skill_for_user(db, user_id=user.id, skill_ref="ppt-master")
+        assert resolved is not None and resolved.id == skill.id
+        assert str(resolved.owner_id) == str(author.id)  # 真实 owner 是作者
+
+        # 通过工具层解析 + 物化：文件应复制到使用者目录
+        target, _avail = agent_tools._resolve_skill_for_exec(db, user, "ppt-master")
+        assert target is not None
+        user_dir = skill_bundle.skill_dir(user.id, skill.id)
+        assert (user_dir / "SKILL.md").exists(), "物化后使用者目录应有 SKILL.md"
+        assert (user_dir / "scripts" / "build.py").exists(), "物化后使用者目录应有脚本"
+        assert skill_bundle.is_materialized(user.id, skill.id)
+    finally:
+        db.close()
+
+
+def test_plaza_skill_inventory_visible_to_collector(factory, tmp_path, monkeypatch):
+    """规划器清单对收录者可见广场 Skill（否则模型根本不会去调用它）。"""
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import agent_planner
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        author = _mk_user(db, name="zhang")
+        user = _mk_user(db, name="t3")
+        skill = ext.create_skill(
+            db, owner_id=author.id, name="ppt-master", description="生成PPT",
+            content="", files=["SKILL.md", "scripts/build.py"],
+        )
+        ext.set_skill_visibility(db, skill, "plaza")
+        ext.collect_skill(db, user_id=user.id, skill_id=skill.id)
+        inv = agent_planner._skill_inventory(db, user)
+        assert "ppt-master" in inv
+        assert "scripts/build.py" in inv
+    finally:
+        db.close()
+
+
+def test_sanitizer_strips_toolcall_markup():
+    """二次编辑乱码根因修复：原生工具调用标记被剔除（含跨 chunk 流式）。"""
+    from app.services.llm import strip_toolcall_markup, _StreamSanitizer
+
+    assert strip_toolcall_markup("好的。<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name=Bash") == "好的。"
+    assert strip_toolcall_markup("正文<|tool\u2581calls\u2581begin|>garbage<|tool\u2581calls\u2581end|>结尾") == "正文结尾"
+    assert strip_toolcall_markup('结果：\n<|tool\u2581calls\u2581begin|>\n{"x":1}\n<|tool\u2581calls\u2581end|>\n请查收') == "结果：\n\n请查收"
+    assert strip_toolcall_markup("纯文本 a<b 正常") == "纯文本 a<b 正常"
+
+    s = _StreamSanitizer()
+    parts = ["好的，<|tool", "\u2581calls\u2581begin|>garbage<|tool\u2581calls", "\u2581end|>结束"]
+    out = "".join(s.feed(p) for p in parts) + s.flush()
+    assert out == "好的，结束", f"got {out!r}"
+
+
+def test_derive_spec_from_tools_builds_outline():
+    """Skill 用 write_skill_file 逐页写 svg → 提炼大纲，使大纲每页对应成品、svg 页可预览。"""
+    from app.services.agent_planner import PlanOutcome, Step
+    from app.api.routers.agents import _derive_spec_from_tools
+
+    steps = [
+        Step(tool="write_skill_file", args={"skill": "ppt-master", "path": "projects/demo/svg/01_cover.svg"}, ok=True, result={}),
+        Step(tool="write_skill_file", args={"skill": "ppt-master", "path": "projects/demo/svg/02_outline.svg"}, ok=True, result={}),
+        Step(tool="write_skill_file", args={"skill": "ppt-master", "path": "projects/demo/svg/03_content.svg"}, ok=True, result={}),
+        Step(tool="run_skill_script", args={"skill": "ppt-master", "path": "scripts/build.py"}, ok=True, result={"生成文件": [{"名": "demo.pptx"}]}),
+    ]
+    spec = _derive_spec_from_tools(PlanOutcome(steps=steps))
+    assert len(spec["outline"]) == 3
+    assert spec["outline"][0]["kind"] == "cover"
+    assert spec["outline"][0]["title"] == "cover"
+    assert spec["outline"][1]["title"] == "outline"
+    assert len(spec["slides"]) == 3
+
+
+def test_derive_spec_no_svg_returns_empty():
+    """没有写 svg 的工具轨迹 → 不臆造大纲（保持原有 json 解析结果）。"""
+    from app.services.agent_planner import PlanOutcome, Step
+    from app.api.routers.agents import _derive_spec_from_tools
+
+    steps = [Step(tool="my_schedule_overview", args={}, ok=True, result={})]
+    assert _derive_spec_from_tools(PlanOutcome(steps=steps)) == {}

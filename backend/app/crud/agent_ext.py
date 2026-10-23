@@ -260,6 +260,50 @@ def delete_skill(db: Session, row: AgentSkill) -> None:
 
 # ---------------- 全局设置 ----------------
 
+def resolve_skill_for_user(
+    db: Session, *, user_id, skill_ref: str
+) -> AgentSkill | None:
+    """把「用户视角的 skill 引用」解析为真实的 Skill 行。
+
+    收录场景的关键：Skill 文件包按「作者 owner_id/skill_id」落盘在**作者目录**，
+    收录者本人目录下并没有这份文件。若按收录者 id 定位目录，执行必然找不到脚本
+    （表现：收录后能看见 Skill、也能生成计划，但一执行就失败、产不出 PPT）。
+
+    解析顺序：
+    1. 本人名下（自建/自发布）；
+    2. 本人已收录且作者仍在广场上架的（跨 owner 引用，文件读作者目录）；
+    3. 广场上任意可见的（管理员等场景直接按 id 引用）。
+
+    返回的 row 带真实 owner_id，调用方据此定位文件目录。
+    """
+    ref = (skill_ref or "").strip()
+    if not ref:
+        return None
+    # 1) 本人名下
+    own = list(
+        db.scalars(select(AgentSkill).where(AgentSkill.owner_id == user_id)).all()
+    )
+    for s in own:
+        if ref == str(s.id) or ref == str(s.id)[:8] or ref in (s.name or ""):
+            return s
+    # 2) 已收录（作者仍在广场上架才有效）
+    collected_ids = {
+        str(x) for x in db.scalars(
+            select(AgentSkillCollection.skill_id).where(AgentSkillCollection.user_id == user_id)
+        ).all()
+    }
+    if collected_ids:
+        for s in db.scalars(select(AgentSkill).where(AgentSkill.id.in_(list(collected_ids)))).all():
+            if getattr(s, "visibility", "private") == "plaza" and s.enabled:
+                if ref == str(s.id) or ref == str(s.id)[:8] or ref in (s.name or ""):
+                    return s
+    # 3) 广场可见
+    for s in list_plaza_skills(db):
+        if ref == str(s.id) or ref == str(s.id)[:8] or ref in (s.name or ""):
+            return s
+    return None
+
+
 def get_global_setting(db: Session, *, owner_id) -> AgentGlobalSetting | None:
     return db.scalars(select(AgentGlobalSetting).where(AgentGlobalSetting.owner_id == owner_id)).first()
 
@@ -287,6 +331,7 @@ __all__ = [
     "list_skills", "get_skill", "get_skill_any", "create_skill", "update_skill", "delete_skill",
     "set_skill_visibility", "list_plaza_skills",
     "collected_skill_ids", "is_skill_collected", "collect_skill", "uncollect_skill",
+    "resolve_skill_for_user",
     "get_global_setting", "upsert_global_setting",
     "get_sandbox_setting", "upsert_sandbox_setting",
 ]

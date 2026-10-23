@@ -188,3 +188,89 @@ def remove_bundle(owner_id, skill_id) -> None:
 
     dest = skill_dir(owner_id, skill_id)
     shutil.rmtree(dest, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# 收录物化：把「作者目录」里的 Skill 文件包复制到「使用者目录」
+# ---------------------------------------------------------------------------
+
+_MARKER = ".materialized.json"
+
+
+def _read_marker(dest: pathlib.Path) -> dict:
+    try:
+        import json
+
+        return json.loads((dest / _MARKER).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def materialize_bundle(src_owner_id, src_skill_id, dst_owner_id, dst_skill_id) -> dict:
+    """把 Skill 文件包从作者目录复制到使用者目录（收录/首次使用）。
+
+    为什么必须物化：Skill 包按「作者 owner_id/skill_id」落盘在**作者目录**，收录者目录里
+    并没有这份文件。若按收录者 id 定位目录，执行必然找不到脚本——表现就是
+    「收录后看得见 Skill、也能出计划，但一执行就失败、产不出 PPT」。
+    物化后，执行/写文件/取产物都在使用者自己的目录里完成：
+    - 发布者与所有收录者行为一致（同一个 skill，任何人效果相同）；
+    - 使用者写入的中间产物（如手写 SVG 源文件）不会污染作者目录；
+    - 产物下载链接按使用者维度隔离。
+
+    返回 {"materialized": bool, "synced": bool}。
+    """
+    import json
+    import shutil
+
+    if str(src_owner_id) == str(dst_owner_id) and str(src_skill_id) == str(dst_skill_id):
+        return {"materialized": False, "synced": False}
+    src = skill_dir(src_owner_id, src_skill_id)
+    dst = skill_dir(dst_owner_id, dst_skill_id)
+    marker = _read_marker(dst)
+    src_files = sorted(
+        str(p.relative_to(src)).replace("\\", "/")
+        for p in src.rglob("*")
+        if p.is_file() and not str(p.relative_to(src)).startswith(_MARKER)
+    )
+    # 已物化且来源未变 → 跳过（避免每次调用都全量复制）
+    if marker.get("src") == f"{src_owner_id}/{src_skill_id}" and marker.get("files") == src_files:
+        return {"materialized": True, "synced": False}
+    # 清掉历史物化内容后重建（作者更新了包：以作者为准整体刷新）
+    for child in dst.iterdir():
+        if child.name == _MARKER:
+            continue
+        try:
+            shutil.rmtree(child) if child.is_dir() else child.unlink()
+        except OSError:
+            pass
+    copied = 0
+    for rel in src_files:
+        s = src / rel
+        t = dst / rel
+        try:
+            t.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(s, t)
+            copied += 1
+        except OSError:
+            continue
+    try:
+        (dst / _MARKER).write_text(
+            json.dumps({"src": f"{src_owner_id}/{src_skill_id}", "files": src_files}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return {"materialized": True, "synced": True, "copied": copied}
+
+
+def is_materialized(dst_owner_id, dst_skill_id) -> bool:
+    """使用者目录里是否已有物化副本。"""
+    try:
+        dest = skill_dir(dst_owner_id, dst_skill_id)
+        marker = _read_marker(dest)
+        if marker.get("src"):
+            return True
+        # 兼容早期：无 marker 但目录内有实际文件 → 视为已就位
+        return any(p.is_file() and p.name != _MARKER for p in dest.rglob("*"))
+    except Exception:
+        return False

@@ -52,12 +52,24 @@ def _elapsed_ms(t0: float) -> float:
 
 
 def _skill_inventory(db, user) -> str:
-    """用户已启用的 Skill 及可执行脚本清单（供规划器选 run_skill_script 用）。"""
+    """用户可用的 Skill 及可执行脚本清单（供规划器选 run_skill_script 用）。
+
+    范围 = 本人名下 ∪ 已收录的广场 Skill（作者仍在架才有效）——
+    收录者与发布者看到同一份清单、跑同一份文件包，效果一致（见 ADR-0013）。
+    """
     try:
         from app.crud import agent_ext as _ext
 
+        collected = {
+            str(x) for x in _ext.collected_skill_ids(db, user_id=user.id)
+        }
+        rows: list = list(_ext.list_skills(db, owner_id=user.id))
+        if collected:
+            for s in _ext.list_plaza_skills(db):
+                if str(s.id) in collected and all(str(x.id) != str(s.id) for x in rows):
+                    rows.append(s)
         lines = []
-        for s in _ext.list_skills(db, owner_id=user.id):
+        for s in rows:
             if not s.enabled:
                 continue
             files = [str(f) for f in (s.files or [])]
