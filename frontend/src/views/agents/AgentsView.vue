@@ -929,6 +929,12 @@ function retryLast() {
 }
 
 async function send(preset?: { text: string; stage?: string }) {
+  // 附件仍在后台上传时禁止发送：否则 pendingAttachments 此刻为空，附件会被静默丢弃，
+  // 用户只看到一句纯文字、Agent 也拿不到图片——这正是「上传了图片却没传进对话」的根源之一。
+  if (uploadingAttachment.value && !preset) {
+    attachError.value = '图片/文档还在上传，请稍候再发送…'
+    return
+  }
   const text = preset?.text ?? input.value.trim()
   const atts = preset ? [] : [...pendingAttachments.value]
   if ((!text && !atts.length) || !activeConv.value || streaming.value) return
@@ -1334,6 +1340,16 @@ function sortedCitationsOf(m: { citations?: Record<string, unknown> | null }): R
 function attachmentsOf(m: { citations?: Record<string, unknown> | null }): ChatAttachment[] {
   const arr = (m.citations as { attachments?: unknown } | null)?.attachments
   return Array.isArray(arr) ? (arr as ChatAttachment[]) : []
+}
+
+/** 消息附件：优先取 message.attachments（本地刚发送），回退 citations.attachments（历史重载），去重合并。 */
+function msgAtts(m: { attachments?: ChatAttachment[]; citations?: Record<string, unknown> | null }): ChatAttachment[] {
+  const local = Array.isArray(m.attachments) ? m.attachments : []
+  const fromCit = attachmentsOf(m)
+  if (!local.length) return fromCit
+  if (!fromCit.length) return local
+  const seen = new Set(local.map((a) => a.id))
+  return [...local, ...fromCit.filter((a) => !seen.has(a.id))]
 }
 
 function isImgAtt(a: ChatAttachment): boolean {
@@ -2233,9 +2249,9 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                 </div>
                 <div class="bubble">
                   <div v-html="renderMarkdown(m.content)" />
-                  <div v-if="(m.attachments ?? []).length" class="msg-atts">
+                  <div v-if="msgAtts(m).length" class="msg-atts">
                     <a
-                      v-for="a in (m.attachments ?? [])"
+                      v-for="a in msgAtts(m)"
                       :key="a.id"
                       class="att-chip sent"
                       :href="a.url"

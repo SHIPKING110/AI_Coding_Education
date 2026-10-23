@@ -203,3 +203,26 @@ def test_existing_pptx_block_empty_without_pptx(factory, tmp_path, monkeypatch):
         assert _existing_pptx_block(db, user) == ""
     finally:
         db.close()
+
+def test_attachment_block_acknowledges_images():
+    """图片附件块：明确告知图片数量+文件名+磁盘路径，并要求回复确认收到（避免「看不见图」）。"""
+    from app.api.routers.agents import _attachment_block
+
+    block = _attachment_block([
+        {"name": "课堂照片.jpg", "kind": "image", "url": "/uploads/chat/c1/a.jpg"},
+        {"name": "课件.pdf", "kind": "doc", "url": "/uploads/chat/c1/b.pdf", "text": "课件正文内容"},
+    ])
+    assert "课堂照片.jpg" in block
+    assert "已收到" in block or "收到这" in block
+    assert "磁盘路径" in block
+    assert "课件正文内容" in block  # 文档正文仍注入
+    # 图片数量提示
+    assert "1 张图片" in block or "1 张" in block
+
+
+def test_attachment_block_no_image_no_ack():
+    """仅文档时不应出现「图片须回应」的强指令。"""
+    from app.api.routers.agents import _attachment_block
+
+    block = _attachment_block([{"name": "a.txt", "kind": "doc", "text": "x"}])
+    assert "张图片" not in block

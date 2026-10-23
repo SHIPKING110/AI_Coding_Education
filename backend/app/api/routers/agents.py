@@ -373,10 +373,18 @@ def _attachment_block(attachments: list[dict]) -> str:
                 image_hints.append(disk_path)
     if not lines:
         return ""
+    img_count = sum(1 for a in attachments if isinstance(a, dict) and str(a.get("kind")) != "doc")
     block = (
         "【用户随消息上传的附件】\n" + "\n".join(lines)
         + "\n请优先结合上述附件内容完成用户的请求；附件内容优先于历史对话。"
     )
+    if img_count:
+        block += (
+            f"\n【重要·须回应附件】用户本次上传了 {img_count} 张图片。"
+            "请在回答开头用一句话明确告知「已收到这 N 张图片」并复述图片文件名，"
+            "让用户确知附件已被接收；若当前模型无法直接识别图像内容，要如实说明「无法查看图片细节，"
+            "请补充文字描述或用图片文件名指代」，不要假装看不见、也不要编造图片内容。"
+        )
     if image_hints:
         block += (
             "\n【附件图片可用于生成产物】若用户希望把这些图片放进 PPT/文档：可让 Skill 脚本直接读取上面的"
