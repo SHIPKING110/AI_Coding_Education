@@ -31,3 +31,4 @@ backend/data/
 
 # 生产环境配置（含密码，切勿提交）
 .env.prod
+backend/seed_skills/*.zip
