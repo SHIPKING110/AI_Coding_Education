@@ -38,9 +38,11 @@ DESCRIPTION = "PPT 生成与二次编辑（兼容适配版·一步出片/就地�
 FASTLANE = (
     "> ⚡ **本工作台快速通道（优先使用）**：生成 PPT 直接用封装脚本一步出片，"
     "不必逐条执行下方多阶段交互流程（确认UI/模板候选/图片获取在工作台不可用）：\n"
-    "> 1) 每页写成 SVG 放进 `<项目>/svg_output/`（01_cover.svg 顺序即页序，用 write_skill_file 写入）；\n"
+    "> 1) 每页写成 SVG 放进 `<项目>/svg_output/`，**文件名前缀序号即页序**（01_cover.svg、02_...、03_...，务必连续且唯一）；\n"
     "> 2) `python3 \"${SKILL_DIR}/scripts/ppt_oneshot.py\" build <项目>`（质量门禁+导出，产物自动回链）；\n"
-    "> 3) 二次编辑：`ppt_oneshot.py edit <源.pptx> <工作区>` → 改 svg_output/ → `ppt_oneshot.py export <工作区>`。\n\n---\n\n"
+    "> 3) 二次编辑：`ppt_oneshot.py edit <源.pptx> <工作区>` 导入 → 改动 `svg_output/` 里的页 → `ppt_oneshot.py export <工作区>`。\n"
+    "> **增页/删页/调序的铁律**：改完 `svg_output/` 后，必须按最终页序重命名所有文件为 01_ 02_ 03_…（连续、唯一、两位序号）；"
+    "导出严格按文件名排序，出现重复序号（如两个 02_）会导致顺序错乱。\n\n---\n\n"
 )
 
 
@@ -95,11 +97,14 @@ def _inject_adapter(zip_bytes: bytes) -> bytes:
         sk = os.path.join(root, "SKILL.md")
         if os.path.isfile(sk):
             txt = open(sk, encoding="utf-8").read()
-            if "本工作台快速通道" not in txt:
-                idx = txt.find("---", txt.find("---") + 3)
-                at = idx + 3 if idx != -1 else 0
-                txt = txt[:at] + "\n\n" + FASTLANE + txt[at:]
-                open(sk, "w", encoding="utf-8").write(txt)
+            # 幂等替换：先剥掉旧的快速通道块（含分隔符），再插最新版，保证重跑能升级提示词
+            import re as _re
+
+            txt = _re.sub(r"> ⚡ \*\*本工作台快速通道.*?---\n\n", "", txt, count=1, flags=_re.S)
+            idx = txt.find("---", txt.find("---") + 3)
+            at = idx + 3 if idx != -1 else 0
+            txt = txt[:at] + "\n\n" + FASTLANE + txt[at:]
+            open(sk, "w", encoding="utf-8").write(txt)
         out = io.BytesIO()
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             for dirpath, _, files in os.walk(tmp):
