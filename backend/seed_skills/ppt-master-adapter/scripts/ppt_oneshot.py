@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,70 @@ SKILL_ROOT = _find_skill_root()
 SCRIPTS = SKILL_ROOT / "scripts"
 PY = sys.executable
 
+_NUM_PREFIX = re.compile(r"^(\d+)[_\-\s]*(.*)$")
+
+
+def _normalize_svg_order(project: Path) -> None:
+    """导出前把 svg_output/*.svg 规范为「连续唯一」的两位序号前缀，保证页序确定。
+
+    为什么需要：svg_to_pptx 严格按文件名排序导出。模型增/删/调序时若没重排序号，
+    会出现重号（如两个 02_）——此时顺序退化为「数字相同再按整串字母序」，等于碰运气。
+    本函数按「数字前缀（缺失视为最大）→ 文件名」排序后统一重编号为 01_ 02_ 03_…
+    （保留原描述后缀），既消除重号，又让导出顺序与模型文件名语义一致。
+
+    局限（诚实说明）：它只保证「确定 + 无重号」，不猜模型意图——真正的页序仍取决于
+    模型给的前缀数字（SKILL.md 快速通道已要求重排序号）。二者配合才稳。
+    """
+    svg_dir = project / "svg_output"
+    if not svg_dir.is_dir():
+        return
+    files = [p for p in svg_dir.iterdir() if p.is_file() and p.suffix.lower() == ".svg"]
+    if len(files) <= 1:
+        return
+
+    def _key(p: Path):
+        m = _NUM_PREFIX.match(p.name)
+        num = int(m.group(1)) if m else 10 ** 9
+        return (num, p.name.lower())
+
+    ordered = sorted(files, key=_key)
+    nums = []
+    has_dup = False
+    for p in ordered:
+        m = _NUM_PREFIX.match(p.name)
+        n = int(m.group(1)) if m else -1
+        nums.append(n)
+    seen = set()
+    for n in nums:
+        if n in seen:
+            has_dup = True
+        seen.add(n)
+    is_consecutive = nums == list(range(1, len(nums) + 1))
+
+    if is_consecutive and not has_dup:
+        return  # 已经规范，无需改
+
+    # 需要重排：按当前排序结果重新连续编号（先改到临时名避免命名冲突）
+    plan = []
+    for i, p in enumerate(ordered):
+        stem = p.stem  # 文件名去扩展名，如 "02_syllabus"
+        m = _NUM_PREFIX.match(stem)
+        slug = (m.group(2) if m and m.group(2) else stem).strip("_- ") or stem
+        new_name = f"{i + 1:02d}_{slug}.svg"
+        plan.append((p, new_name))
+
+    tmp_pairs = []
+    for p, new_name in plan:
+        tmp = svg_dir / (".renumber_" + p.name)
+        p.rename(tmp)
+        tmp_pairs.append((tmp, svg_dir / new_name))
+    for tmp, dest in tmp_pairs:
+        tmp.rename(dest)
+
+    print("[已自动重排页序] 检测到 SVG 序号重复/断号，已按当前顺序重编号为 01..N：")
+    for _, dn in plan:
+        print("  ->", dn)
+
 
 def _run(args):
     p = subprocess.run([PY, *args], cwd=str(SKILL_ROOT), capture_output=True, text=True)
@@ -56,6 +121,7 @@ def _newest_pptx(project):
 
 def cmd_build(args):
     project = Path(args.project).resolve()
+    _normalize_svg_order(project)
     qc = [str(SCRIPTS / "svg_quality_checker.py"), str(project),
           "--quick-generate", "--canonical-authoring", "--stage", "final", "--json"]
     code, out = _run(qc)
