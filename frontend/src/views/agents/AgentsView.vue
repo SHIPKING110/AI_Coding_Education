@@ -314,27 +314,29 @@ const deckSlides = computed<DeckSlide[]>(() => {
 
 const todayStr = new Date().toISOString().slice(0, 10)
 
-/* —— 真实生成的 SVG 页（来自最近一次助手消息里 run_skill_script/write_skill_file 产出的 .svg 文件）
-   用于「大纲 ↔ 预览融合」：点某页可看该页真实 SVG 渲染 + 源码，和最终 pptx 完全一致。 —— */
+/* —— 真实生成的 SVG 页（合并最近几次助手消息里出现的 .svg 产物）：
+   一次二次编辑通常只重写改动页，最新一轮工具结果可能只带「变更页」。
+   所以这里从最新消息往前扫，**按页名去重、以最新 url 为准**，拼出完整一套——
+   既保证「改过的页同步到最新」，又不会因为只回传变更页导致整套缺页。 —— */
 const svgPages = computed<{ name: string; url: string }[]>(() => {
+  const byName = new Map<string, string>()
   for (let i = messages.value.length - 1; i >= 0; i--) {
     const m = messages.value[i]
     if (m.role !== 'assistant') continue
-    const pages: { name: string; url: string }[] = []
     for (const t of toolsOf(m)) {
       for (const f of parseFiles(t)) {
         const nm = String(f['名'] ?? f.name ?? '')
         const url = String(f['下载'] ?? f.url ?? '')
-        if (nm.toLowerCase().endsWith('.svg') && url) pages.push({ name: nm, url })
+        if (nm.toLowerCase().endsWith('.svg') && url && !byName.has(nm)) {
+          byName.set(nm, url) // 从新到旧：首次出现即最新，后续旧消息同名页不覆盖
+        }
       }
     }
-    if (pages.length) {
-      // 按文件名排序（01_,02_…）即页序
-      pages.sort((a, b) => a.name.localeCompare(b.name))
-      return pages
-    }
   }
-  return []
+  if (!byName.size) return []
+  return [...byName.entries()]
+    .map(([name, url]) => ({ name, url }))
+    .sort((a, b) => a.name.localeCompare(b.name))
 })
 
 /* 每页展开态：点击大纲标题展开该页「预览/代码」 */

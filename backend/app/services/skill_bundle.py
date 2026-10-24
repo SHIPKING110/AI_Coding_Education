@@ -66,6 +66,55 @@ def skill_dir(owner_id, skill_id) -> pathlib.Path:
     return base
 
 
+def cleanup_conversation(owner_id, conv_id, output_urls=None) -> int:
+    """删除一个会话时，清理它在各 Skill 下的会话隔离工作区 + 关联产物。
+
+    - 会话隔离目录：每个 skill 下 conversations/conv_<cid12>/ 整目录删除；
+    - 产物文件：调用方传入该会话消息里出现过的产物下载 url（/uploads/skills/<o>/<s>/_outputs/<run>/<f>），
+      解析出 <skill>/<run> 目录后整目录删除（一次运行一个目录，删该会话自己的产物，不误删他人的）。
+    返回删除的顶层路径数。尽力而为，任何异常静默跳过。
+    """
+    import re as _re
+    import shutil as _sh
+
+    removed = 0
+    conv_key = "conv_" + str(conv_id).replace("-", "")[:12]
+    try:
+        base = pathlib.Path(get_settings_dir())
+        skills_root = base / "skills" / str(owner_id)
+        if skills_root.is_dir():
+            for sdir in skills_root.iterdir():
+                if not sdir.is_dir():
+                    continue
+                cd = sdir / "conversations" / conv_key
+                if cd.is_dir():
+                    _sh.rmtree(cd, ignore_errors=True)
+                    removed += 1
+                # 兜底：conversations 下可能因不同短 id 截断产生相近目录，按前缀再清一次
+            convroot = None
+            # 清理 _outputs：按传入 url 精确到 <run> 目录
+            for url in output_urls or []:
+                m = _re.search(r"/uploads/skills/([^/]+)/([^/]+)/_outputs/([^/]+)/", str(url))
+                if not m:
+                    continue
+                o_id, s_id, run = m.group(1), m.group(2), m.group(3)
+                if str(o_id) != str(owner_id):
+                    continue
+                run_dir = skills_root / s_id / "_outputs" / run
+                if run_dir.is_dir():
+                    _sh.rmtree(run_dir, ignore_errors=True)
+                    removed += 1
+    except Exception:
+        pass
+    return removed
+
+
+def get_settings_dir() -> str:
+    from app.core.config import get_settings
+
+    return get_settings().UPLOAD_DIR
+
+
 def _safe_name(name: str) -> str | None:
     p = pathlib.PurePosixPath(name.replace("\\", "/"))
     if p.is_absolute() or ".." in p.parts:

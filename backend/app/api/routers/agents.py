@@ -43,6 +43,13 @@ class ConversationUpdate(BaseModel):
 
 @router.get("")
 def list_agents(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    # 默认 Agent 供给：每个教师/管理员账号默认有一个「PPT生成助手」（幂等，已存在则跳过）
+    try:
+        from app.services import agent_provision
+
+        agent_provision.ensure_default_ppt_agent(db, user)
+    except Exception:
+        pass
     return {"items": agent_registry.list_for_owner(db, user.id)}
 
 
@@ -871,7 +878,30 @@ def remove_conversation(conv_id: uuid.UUID, db: Session = Depends(get_db), user:
     conv = agent_crud.get_conversation(db, conv_id=conv_id, owner_id=user.id)
     if conv is None:
         raise HTTPException(status_code=404, detail="会话不存在")
+    # 先收集该会话产出文件的下载 url（在删消息前），用于连带清理 _outputs 产物
+    output_urls: list[str] = []
+    try:
+        msgs = agent_crud.list_messages(db, conversation_id=conv.id, limit=500)
+        import re as _re
+
+        for m in msgs:
+            if not isinstance(m.citations, dict):
+                continue
+            for t in (m.citations.get("tools") or []):
+                for f in (t.get("files") or []) if isinstance(t, dict) else []:
+                    u = f.get("url") if isinstance(f, dict) else None
+                    if u:
+                        output_urls.append(u)
+    except Exception:
+        pass
     agent_crud.delete_conversation(db, conv)
+    # 清理该会话的隔离工作区（conversations/conv_xxx）+ 产出文件（_outputs/run），不留垃圾
+    try:
+        from app.services import skill_bundle
+
+        skill_bundle.cleanup_conversation(user.id, conv_id, output_urls=output_urls)
+    except Exception:
+        pass
     return {"ok": True}
 
 

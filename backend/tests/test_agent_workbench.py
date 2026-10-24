@@ -504,3 +504,52 @@ def test_qc_errors_only():
     assert fn('{"summary":{"errors":1}}') is False
     assert fn('[ERROR] bad') is False
     assert fn('all good') is True
+
+def test_ensure_default_ppt_agent_idempotent(factory, tmp_path, monkeypatch):
+    """A1：教师账号默认自动获得「PPT生成助手」，绑定广场适配版；幂等不重复建。"""
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import agent_provision
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        # 管理员发布广场适配版
+        admin = _mk_user(db, name="adm-prov", role="admin")
+        adapter = ext.create_skill(db, owner_id=admin.id, name="ppt-master", description="", files=["x"])
+        ext.update_skill(db, adapter, files=["ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"])
+        ext.set_skill_visibility(db, adapter, "plaza")
+        # 教师
+        t = _mk_user(db, name="teach-prov", role="teacher")
+        made1 = agent_provision.ensure_default_ppt_agent(db, t)
+        made2 = agent_provision.ensure_default_ppt_agent(db, t)
+        assert made1 is True and made2 is False, "首次建、二次不应重复"
+        agents = [a for a in ext.list_custom_agents(db, owner_id=t.id) if a.name == "PPT生成助手"]
+        assert len(agents) == 1
+        assert str(adapter.id) in [str(x) for x in (agents[0].skill_ids or [])], "应绑定适配版"
+        assert ext.is_skill_collected(db, user_id=t.id, skill_id=adapter.id), "应自动收录"
+    finally:
+        db.close()
+
+
+def test_cleanup_conversation_removes_scoped_dirs(factory, tmp_path, monkeypatch):
+    """A2：删除会话时清理其会话隔离目录 + _outputs 产物。"""
+    from app.core.config import get_settings
+    from app.services import skill_bundle
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    owner = "00000000-0000-0000-0000-000000000001"
+    skill = "11111111-1111-1111-1111-111111111111"
+    conv = "abcdef12-3456-7890-abcd-ef1234567890"
+    d = skill_bundle.skill_dir(owner, skill)
+    scope = d / "conversations" / "conv_abcdef123456"
+    (scope / "projects" / "p1" / "svg_output").mkdir(parents=True, exist_ok=True)
+    (scope / "projects" / "p1" / "svg_output" / "01.svg").write_text("<svg/>", encoding="utf-8")
+    outd = d / "_outputs" / "20260101_000000"
+    outd.mkdir(parents=True, exist_ok=True)
+    (outd / "deck.pptx").write_bytes(b"x")
+    url = f"/uploads/skills/{owner}/{skill}/_outputs/20260101_000000/deck.pptx"
+    n = skill_bundle.cleanup_conversation(owner, conv, output_urls=[url])
+    assert n >= 2
+    assert not scope.exists(), "会话隔离目录应删除"
+    assert not outd.exists(), "产物目录应删除"

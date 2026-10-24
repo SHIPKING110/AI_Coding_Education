@@ -535,19 +535,36 @@ def dispatch(owner_id, skill_id, rel: str, args: list, *, provider: str = "local
     沙箱失败（配置缺失/建实例失败）自动回退本地：保证"先跑通"，沙箱接口原样保留、随时切回。
     """
     if (provider or "local") == "bailian" and (workspace_id or "").strip():
+        # 大技能包（如 ppt-master 近千个参考/脚本文件）不适合整包上传远程沙箱：
+        # 远程有文件数配额、入口脚本容易被挤掉导致失败回退，且产物落到共享目录、丢失会话隔离。
+        # 大包直接本地执行——与管理员一致、稳定、隔离。小包仍走远程沙箱。
+        _bundled_big = False
         try:
-            result = run_remote_sdk(
-                owner_id, skill_id, rel, args if isinstance(args, list) else [],
-                endpoint=endpoint, token=token or "", timeout_s=timeout_s or 30,
-                workspace_id=workspace_id or "", region=region or "cn-beijing",
-                template_code=template_code or "",
-            )
-            result["provider"] = "bailian"
-            return result
-        except ValueError as e:
-            import logging as _log
+            from app.services.skill_bundle import skill_dir as _sd, get_settings_dir as _gsd  # noqa: F401
+            _root = _sd(owner_id, skill_id)
+            _cnt = 0
+            for _p in _root.rglob("*"):
+                if _p.is_file():
+                    _cnt += 1
+                    if _cnt > REMOTE_MAX_FILES:
+                        _bundled_big = True
+                        break
+        except Exception:
+            _bundled_big = False
+        if not _bundled_big:
+            try:
+                result = run_remote_sdk(
+                    owner_id, skill_id, rel, args if isinstance(args, list) else [],
+                    endpoint=endpoint, token=token or "", timeout_s=timeout_s or 30,
+                    workspace_id=workspace_id or "", region=region or "cn-beijing",
+                    template_code=template_code or "",
+                )
+                result["provider"] = "bailian"
+                return result
+            except ValueError as e:
+                import logging as _log
 
-            _log.getLogger(__name__).warning("百炼沙箱不可用，回退本地执行：%s", e)
+                _log.getLogger(__name__).warning("百炼沙箱不可用，回退本地执行：%s", e)
     if (provider or "") == "aliyun_fc":
         raise ValueError("自建函数沙箱已下线，请在沙箱配置区改用“阿里云百炼”")
     result = run_script(owner_id, skill_id, rel, args if isinstance(args, list) else [], timeout_s=timeout_s)
