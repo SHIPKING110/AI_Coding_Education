@@ -69,8 +69,18 @@ def _scope_path(rel: str) -> str:
 
     例：projects/demo/svg_output/01.svg → conversations/conv_xxx/projects/demo/svg_output/01.svg
     非 projects/ 路径原样返回（脚本/资源/模板等不受影响）。
+    容忍模型常见的 `./projects/...`、反斜杠、前导斜杠等写法。
     """
-    rel = (rel or "").replace("\\", "/").lstrip("/")
+    rel = (rel or "").replace("\\", "/")
+    # 归一化开头的 ./ 与前导斜杠（容忍 .//、/./ 等）
+    while True:
+        changed = False
+        if rel.startswith("./"):
+            rel = rel[2:]; changed = True
+        if rel.startswith("/"):
+            rel = rel[1:]; changed = True
+        if not changed:
+            break
     prefix = _conv_prefix()
     if not prefix:
         return rel
@@ -646,9 +656,14 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
     sb = _ext.get_sandbox_setting(db, owner_id=user.id)
 
     def _scope_arg(a) -> str:
-        """把参数里指向 projects/ 的路径改写到当前会话子目录（脚本路径本身不在此列）。"""
+        """把参数里指向 projects/ 的路径改写到当前会话子目录（脚本路径本身不在此列）。
+
+        容忍 `./projects/...`、反斜杠、前导斜杠等模型常见写法（否则 build 会跑到未隔离的根目录而失败）。
+        """
         s = str(a)
-        norm = s.replace("\\", "/")
+        norm = s.replace("\\", "/").lstrip("/")
+        while norm.startswith("./"):
+            norm = norm[2:]
         # 仅当整段就是一个 projects/... 路径时才改写（build/edit 的项目参数）
         if norm == "projects" or norm.startswith("projects/"):
             return _scope_path(norm)

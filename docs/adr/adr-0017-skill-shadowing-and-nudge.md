@@ -42,3 +42,25 @@
 - 正向：教师与管理员效果一致（都用适配版）；短确认句也能真出片；旧版不再遮蔽。
 - 边界：若用户名下确有**多个都能用的同名 skill**，按「有效绑定 > 广场」优先；仍未彻底删除旧版，
   建议运维清理教师名下冗余旧 ppt-master（脚本可后续提供）。
+
+## 附录（2026-10-24 复测加深）：出片真正失败的三层根因 + 修复
+
+复测发现「说了出片不出片」在生产里不止"门控"，还有出片脚本层的硬失败，逐层修：
+
+1. **同名遮蔽（已修，见上）**：教师 zhang 自留旧版 `e7d71aa7` 遮蔽适配版 → 用残缺旧版。
+   修：`resolve_skill_for_user` 按名字解析优先「可用 + 白名单内」，读 `_ALLOWED_SKILLS` 口径一致。
+2. **路径前缀 `./` 未归一（已修）**：模型常传 `./projects/x`，旧 `_scope_path/_scope_arg` 只认 `projects/`
+   开头 → 没改写到会话隔离目录 → build 跑到不存在的根目录而失败。
+   修：`_scope_path/_scope_arg` 归一化 `.//`、前导斜杠、反斜杠；`ppt_oneshot.cmd_build` 增加
+   `_resolve_project` 回退（`projects/X` 不存在就找 `conversations/*/projects/X`）。
+3. **质量门禁过严 + 非法颜色（已修，最致命）**：
+   - 模型生成的 SVG 常含非法颜色（如 `stroke='#33island'`）→ 质量检查 error → build 直接失败不出片；
+   - 即便只有 warning（passed:0, errors:0）也被拦。
+   修：`ppt_oneshot.cmd_build` 导出前 `_sanitize_svg_colors` 规范化非法颜色；质量门禁改为
+   **仅 error 才阻断，warning 放行**（`_qc_errors_only`）；导出不再叠 `--enable-dangerous-nonconforming`
+   （与 `--quick-generate` 冲突）。
+
+**真实验证**：教师 zhang 经工作台 `run_skill_script` 执行 `ppt_oneshot.py build` → `成功=True`、
+产出 `.pptx`（此前 exit 1、无文件）。管理员与教师现走同一适配版、同一稳定链路。
+
+> 注：日志里「百炼沙箱不可用，回退本地执行」是沙箱配置提示，不影响最终本地出片成功。

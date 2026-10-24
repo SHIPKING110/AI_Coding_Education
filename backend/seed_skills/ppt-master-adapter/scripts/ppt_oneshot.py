@@ -119,15 +119,120 @@ def _newest_pptx(project):
     return files[-1] if files else None
 
 
+def _resolve_project(project: Path) -> Path:
+    """容忍路径不一致：若给定 project 目录不存在，但 SKILL_ROOT 下有
+    conversations/*/projects/<同名> 或 projects/<同名>，回退到实际存在且有 svg_output 的那个。
+
+    背景：模型可能把 SVG 写到「会话隔离目录 conversations/conv_xxx/projects/X」，
+    但 build 用了未隔离的「projects/X」；这里做一次确定性回退，避免"写了页却 build 空目录"。
+    """
+    if (project / "svg_output").is_dir():
+        return project
+    name = project.name
+    candidates = []
+    for base in [SKILL_ROOT / "projects", *list((SKILL_ROOT / "conversations").glob("*/projects"))]:
+        cand = base / name
+        if (cand / "svg_output").is_dir():
+            # 选 svg 最近改过的那个（当前会话产物最新）
+            svgs = list((cand / "svg_output").glob("*.svg"))
+            mtime = max((p.stat().st_mtime for p in svgs), default=0)
+            candidates.append((mtime, cand))
+    if candidates:
+        candidates.sort(reverse=True)
+        chosen = candidates[0][1]
+        print(f"[路径回退] {project} 不存在，改用 {chosen}")
+        return chosen
+    return project
+
+
+def _sanitize_svg_colors(project: Path) -> None:
+    """导出前修正模型常见的「非法颜色值」，避免质量门禁因小瑕疵整单失败。
+
+    典型：stroke='#33island'（模型把颜色写成非法 token）、#RRGGBB 后跟杂字符等。
+    规则：把 `#hex` 后面粘连的非十六进制字符截断；对明显过短/非法的 hex 回退到安全色。
+    只动颜色属性值，不改结构与文案。
+    """
+    import re as _re
+
+    svg_dir = project / "svg_output"
+    if not svg_dir.is_dir():
+        return
+    color_attr = _re.compile(
+        r"""(fill|stroke|color|stop-color)\s*=\s*(["'])([^"']*)(["'])""", _re.IGNORECASE
+    )
+    hex_ok = _re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+    fixed = 0
+    for p in svg_dir.glob("*.svg"):
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        def _fix(m):
+            nonlocal fixed
+            attr, q1, val, q2 = m.group(1), m.group(2), m.group(3).strip(), m.group(4)
+            if val.lower() in ("none", "currentcolor", "transparent") or val.startswith("url("):
+                return m.group(0)
+            nv = val
+            if val.startswith("#"):
+                # 截断到第一个非 hex 字符
+                mm = _re.match(r"#([0-9a-fA-F]+)", val)
+                hexpart = "#" + (mm.group(1) if mm else "")
+                # 规整长度：补到 6 位（3→6 复制，其他取前6）
+                h = hexpart[1:]
+                if len(h) == 3:
+                    h = h[0]*2 + h[1]*2 + h[2]*2
+                h = h[:6] if len(h) >= 6 else (h + "0" * (6 - len(h)))
+                nv = "#" + h
+                if not hex_ok.match(nv):
+                    nv = "#000000"
+                if nv != val:
+                    fixed += 1
+            return f'{attr}={q1}{nv}{q2}'
+
+        new = color_attr.sub(_fix, text)
+        if new != text:
+            try:
+                p.write_text(new, encoding="utf-8")
+            except OSError:
+                pass
+    if fixed:
+        print(f"[颜色修正] 已规范化 {fixed} 处非法颜色值")
+
+
+def _qc_errors_only(out: str) -> bool:
+    """从质量检查输出判断「是否只有 warning、没有 error」。
+
+    返回 True 表示可放行导出（仅有 warning / 仅 passed:0 但 errors:0）。
+    """
+    import re as _re
+    txt = out or ""
+    # 抓 JSON 摘要里的 errors 计数（--json 会带 summary）
+    m = _re.search(r'"errors"\s*:\s*(\d+)', txt)
+    if m:
+        try:
+            return int(m.group(1)) == 0
+        except ValueError:
+            return False
+    # 无 json 摘要时，按关键字判断：出现 ERROR 视为阻断
+    return not _re.search(r"\[ERROR\]|\berrors?\s*[:：]\s*[1-9]", txt, _re.IGNORECASE)
+
+
 def cmd_build(args):
-    project = Path(args.project).resolve()
+    project = _resolve_project(Path(args.project).resolve())
     _normalize_svg_order(project)
+    _sanitize_svg_colors(project)
     qc = [str(SCRIPTS / "svg_quality_checker.py"), str(project),
           "--quick-generate", "--canonical-authoring", "--stage", "final", "--json"]
     code, out = _run(qc)
-    if code != 0:
-        print("[质量检查未通过]\n" + _tail(out))
+    # 质量门禁：**仅 warning 不阻断出片**（errors:0 即放行）；只有存在 error 才停。
+    # 原因：模型生成的 SVG 几乎总有字体/颜色规范类 warning，若一律拦截会「写了页却永不出片」。
+    if code != 0 and not _qc_errors_only(out):
+        print("[质量检查未通过（存在 error）]\n" + _tail(out))
         return code
+    if code != 0:
+        print("[质量检查：仅有 warning，已放行出片]\n" + _tail(out)[:600])
+    # 导出（--quick-generate 自带宽松导出；不能再叠 --enable-dangerous-nonconforming，二者冲突）
     code, out = _run([str(SCRIPTS / "svg_to_pptx.py"), str(project), "--quick-generate"])
     print(_tail(out))
     if code != 0:

@@ -463,3 +463,44 @@ def test_resolve_by_name_prefers_usable_adapter(factory, tmp_path, monkeypatch):
         agent_tools.use_allowed_skills(None)
     finally:
         db.close()
+
+def test_scope_path_handles_dot_and_backslash():
+    """问题2：模型给 ./projects/... 或 projects\\... 也要正确改写到会话子目录（否则 build 跑空）。"""
+    from app.services import agent_tools as A
+    A.use_conversation("0e55ce5a-523b-4158-a64c-b83950ae81d1")
+    pfx = A._conv_prefix()
+    assert A._scope_path("projects/x").startswith(pfx)
+    assert A._scope_path("./projects/x") == pfx + "projects/x"
+    assert A._scope_path(".//projects/x") == pfx + "projects/x"
+    assert A._scope_path("projects\\x\\y") == pfx + "projects/x/y"
+    A.use_conversation(None)
+
+def test_sanitize_svg_colors_fixes_invalid():
+    """问题1/2：模型写出非法颜色(如 #33island) 时，build 前自动修正，避免质量门禁整单失败。"""
+    import re, tempfile
+    from pathlib import Path
+    src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
+    m = re.search(r"def _sanitize_svg_colors.*?(?=\ndef cmd_build)", src, re.S)
+    ns = {"Path": Path, "print": print}
+    exec(m.group(0), ns)
+    fn = ns["_sanitize_svg_colors"]
+    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    f = d/"svg_output/01_cover.svg"
+    f.write_text('<svg><rect stroke="#33island" fill="#FFF"/><text fill="#GGG">x</text></svg>', encoding="utf-8")
+    fn(d)
+    out = f.read_text(encoding="utf-8")
+    # 非法颜色被改成合法 hex；#FFF 保留(3->6)；不再有 island/GGG
+    assert "island" not in out and "GGG" not in out
+    assert "#33" in out.lower() or "#330" in out.lower() or "#000000" in out
+    assert "#ffffff" in out.lower()
+
+def test_qc_errors_only():
+    from pathlib import Path
+    import re
+    src=open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py",encoding="utf-8").read()
+    m=re.search(r"def _qc_errors_only.*?(?=\ndef cmd_build)", src, re.S)
+    ns={"print":print}; exec(m.group(0),ns); fn=ns["_qc_errors_only"]
+    assert fn('{"summary":{"errors":0,"warnings":2,"passed":0}}') is True
+    assert fn('{"summary":{"errors":1}}') is False
+    assert fn('[ERROR] bad') is False
+    assert fn('all good') is True
