@@ -377,3 +377,55 @@ def test_agent_effective_skills_only_bound():
     glob = []
     allowed = [str(x) for x in (per_skill + glob)]
     assert allowed == [], "空绑定应得空白名单（不再默认放行全部自有 Skill）"
+
+def test_effective_skill_ids_self_heals_by_name(factory, tmp_path, monkeypatch):
+    """权限：绑定的旧 id 指向「他人私有、本人不可用」的同名 skill → 按名字自愈到本人可用的同名 skill。
+
+    复现真实场景：admin 的 Agent 绑定的是 zhang 的私有 ppt-master（e7d71aa7，本人不可用），
+    但 admin 自己有同名可用 ppt-master（适配版）→ 生效应自愈到本人那个，PPT 路径不误伤。
+    """
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import agent_registry
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        admin = _mk_user(db, name="admin-sh")
+        zhang = _mk_user(db, name="zhang-sh")
+        # zhang 的私有 ppt-master（本人 admin 不可用）
+        z_skill = ext.create_skill(db, owner_id=zhang.id, name="ppt-master", description="", content="", files=["a.py"])
+        ext.update_skill(db, z_skill, files=["ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"])
+        # admin 自己的同名可用 ppt-master
+        a_skill = ext.create_skill(db, owner_id=admin.id, name="ppt-master", description="", files=["b.py"])
+        ext.update_skill(db, a_skill, files=["ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"])
+        # admin 的 Agent 错绑到 zhang 的私有 id
+        agent_id = f"custom_{uuid.uuid4().hex[:8]}_7"
+        ext.create_custom_agent(db, owner_id=admin.id, agent_id=agent_id, name="PPT生成助手", skill_ids=[str(z_skill.id)])
+        ids = agent_registry.effective_skill_ids(db, admin.id, agent_id)
+        assert str(a_skill.id) in ids, "应自愈到本人可用的同名 ppt-master"
+        assert str(z_skill.id) not in ids, "不应引用他人私有 skill"
+    finally:
+        db.close()
+
+
+def test_effective_skill_ids_normal_binding(factory, tmp_path, monkeypatch):
+    """正常绑定：勾选的本人可用 skill 出现在生效清单，未勾选的不出现。"""
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import agent_registry
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        user = _mk_user(db, name="normalbind")
+        s1 = ext.create_skill(db, owner_id=user.id, name="ppt-master", description="", content="", files=["x.py"])
+        ext.update_skill(db, s1, files=["ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"])
+        s2 = ext.create_skill(db, owner_id=user.id, name="other", description="", content="hi", files=[])
+        agent_id = f"custom_{uuid.uuid4().hex[:8]}_8"
+        ext.create_custom_agent(db, owner_id=user.id, agent_id=agent_id, name="A", skill_ids=[str(s1.id)])
+        ids = agent_registry.effective_skill_ids(db, user.id, agent_id)
+        assert str(s1.id) in ids
+        assert str(s2.id) not in ids
+    finally:
+        db.close()

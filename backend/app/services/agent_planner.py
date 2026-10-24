@@ -111,19 +111,14 @@ def plan_and_run(
     - conversation_id：设置会话作用域，使 Skill 的 projects/ 工作区按会话隔离。
     """
     agent_tools.use_conversation(conversation_id)
-    # 权限界定：求出「当前 Agent 生效可用的 Skill id」（per-agent 绑定 ∪ 全局默认），
+    # 权限界定：求出「当前 Agent 生效可用的 Skill id」（per-agent 绑定 ∪ 全局默认，含 id 漂移同名自愈），
     # 没勾选的 Skill 不进清单、也不能被 run_skill_script / 自动出片兜底调用。
     try:
-        from app.crud import agent_ext as _ext
-
         allowed: list[str] | None = None
         if agent_id:
-            glob = _ext.get_global_setting(db, owner_id=user.id)
-            per_skill: list = []
-            c = _ext.get_custom_agent(db, owner_id=user.id, agent_id=agent_id)
-            if c is not None:
-                per_skill = list(c.skill_ids or [])
-            allowed = [str(x) for x in (per_skill + list((glob.default_skill_ids if glob else []) or []))]
+            from app.services import agent_registry as _reg
+
+            allowed = _reg.effective_skill_ids(db, user.id, agent_id)
         agent_tools.use_allowed_skills(allowed)
     except Exception:
         agent_tools.use_allowed_skills(None)
