@@ -265,41 +265,72 @@ def resolve_skill_for_user(
 ) -> AgentSkill | None:
     """把「用户视角的 skill 引用」解析为真实的 Skill 行。
 
-    收录场景的关键：Skill 文件包按「作者 owner_id/skill_id」落盘在**作者目录**，
-    收录者本人目录下并没有这份文件。若按收录者 id 定位目录，执行必然找不到脚本
-    （表现：收录后能看见 Skill、也能生成计划，但一执行就失败、产不出 PPT）。
+    解析顺序（按「可用性」优先，而非盲选本人名下）：
+    1. 精确 id（完整/前8位）：跨 owner 直接命中；
+    2. 按**名字**匹配时，**优先命中真正可用/已授权**的那个（见 _usable），
+       避免用户「名下有个不可用的旧同名 skill」遮蔽了真正能用的适配版；
+    3. 否则回落到本人名下同名、已收录、广场同名。
 
-    解析顺序：
-    1. 本人名下（自建/自发布）；
-    2. 本人已收录且作者仍在广场上架的（跨 owner 引用，文件读作者目录）；
-    3. 广场上任意可见的（管理员等场景直接按 id 引用）。
-
-    返回的 row 带真实 owner_id，调用方据此定位文件目录。
+    「可用」定义：enabled + 有实质内容(content/files) +（本人名下 或 广场上架）。
+    这样教师即使自留一份旧版同名词，也不会遮蔽已收录的适配版。
     """
     ref = (skill_ref or "").strip()
     if not ref:
         return None
-    # 1) 本人名下
-    own = list(
-        db.scalars(select(AgentSkill).where(AgentSkill.owner_id == user_id)).all()
-    )
-    for s in own:
-        if ref == str(s.id) or ref == str(s.id)[:8] or ref in (s.name or ""):
-            return s
-    # 2) 已收录（作者仍在广场上架才有效）
+
+    own = list(db.scalars(select(AgentSkill).where(AgentSkill.owner_id == user_id)).all())
     collected_ids = {
         str(x) for x in db.scalars(
             select(AgentSkillCollection.skill_id).where(AgentSkillCollection.user_id == user_id)
         ).all()
     }
-    if collected_ids:
-        for s in db.scalars(select(AgentSkill).where(AgentSkill.id.in_(list(collected_ids)))).all():
-            if getattr(s, "visibility", "private") == "plaza" and s.enabled:
-                if ref == str(s.id) or ref == str(s.id)[:8] or ref in (s.name or ""):
-                    return s
-    # 3) 广场可见
-    for s in list_plaza_skills(db):
-        if ref == str(s.id) or ref == str(s.id)[:8] or ref in (s.name or ""):
+    plaza = list_plaza_skills(db)
+    own_ids = {str(s.id) for s in own}
+
+    def _usable(s) -> bool:
+        if s is None or not s.enabled:
+            return False
+        sid = str(s.id)
+        if sid not in own_ids and getattr(s, "visibility", "private") != "plaza":
+            return False
+        return bool((s.content or "").strip()) or bool(s.files)
+
+    # 当前 Agent 白名单（若设置）：优先命中「既可用、又在白名单内」的 skill。
+    try:
+        from app.services import agent_tools as _at
+
+        _allow = _at._ALLOWED_SKILLS.get()  # frozenset | None
+    except Exception:
+        _allow = None
+
+    def _ok(s) -> bool:
+        return _usable(s) and (_allow is None or str(s.id) in _allow)
+
+    def _matches(s) -> bool:
+        return ref == str(s.id) or ref == str(s.id)[:8] or ref in (s.name or "")
+
+    # 候选池：本人名下 ∪ 已收录(广场上架) ∪ 广场可见
+    pool: list = list(own)
+    for s in plaza:
+        if str(s.id) not in {str(x.id) for x in pool}:
+            if str(s.id) in collected_ids or any(_matches(x) for x in [s]):
+                pool.append(s)
+
+    # 1) 精确 id 优先（可用且在允许范围）
+    for s in pool:
+        if (ref == str(s.id) or ref == str(s.id)[:8]) and _ok(s):
+            return s
+    # 2) 名字匹配：优先「可用且在白名单」的（避免旧同名/未授权遮蔽真正可用的适配版）
+    for s in pool:
+        if ref in (s.name or "") and _ok(s):
+            return s
+    # 3) 名字匹配：退一步只看可用（无白名单时的兼容）
+    for s in pool:
+        if ref in (s.name or "") and _usable(s):
+            return s
+    # 4) 兜底：精确 id / 名字（哪怕不可用，交给上层给明确错误）
+    for s in pool:
+        if _matches(s):
             return s
     return None
 

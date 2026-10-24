@@ -429,3 +429,37 @@ def test_effective_skill_ids_normal_binding(factory, tmp_path, monkeypatch):
         assert str(s2.id) not in ids
     finally:
         db.close()
+
+def test_resolve_by_name_prefers_usable_adapter(factory, tmp_path, monkeypatch):
+    """问题3：用户名下有个"不可用的旧同名 skill"时，按名字解析应优先命中"可用的适配版"，
+    不能被旧版遮蔽（否则教师用残缺旧版、效果更差）。"""
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        # zhang：自留旧版 ppt-master（无 wrapper，files 至少非空以模拟"存在"）
+        zhang = _mk_user(db, name="zhang-rn")
+        old = ext.create_skill(db, owner_id=zhang.id, name="ppt-master", description="old", content="x", files=["a.txt"])
+        # admin 发布适配版到广场；zhang 收录
+        admin = _mk_user(db, name="admin-rn", role="admin")
+        adapter = ext.create_skill(db, owner_id=admin.id, name="ppt-master", description="adapter", files=["b.py"])
+        ext.update_skill(db, adapter, files=["ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"])
+        ext.set_skill_visibility(db, adapter, "plaza")
+        ext.collect_skill(db, user_id=zhang.id, skill_id=adapter.id)
+
+        # 无白名单：按名字解析，应命中"可用"的——这里旧版可用(content=x)，但适配版也有 wrapper
+        # 关键断言：当旧版"不可用"（禁用）时，必须解析到适配版
+        ext.update_skill(db, old, enabled=False)
+        r = ext.resolve_skill_for_user(db, user_id=zhang.id, skill_ref="ppt-master")
+        assert r is not None and str(r.id) == str(adapter.id), "应解析到可用的适配版，而非被禁用的旧版"
+
+        # 带 allowlist：zhang 的 PPT 助手只授权了适配版
+        from app.services import agent_tools
+        agent_tools.use_allowed_skills([str(adapter.id)])
+        t, _ = agent_tools._resolve_skill_for_exec(db, zhang, "ppt-master")
+        assert t is not None and str(t.id) == str(adapter.id), "白名单下应命中适配版"
+        agent_tools.use_allowed_skills(None)
+    finally:
+        db.close()

@@ -1055,6 +1055,20 @@ def conversation_chat(
         or agent_tools.looks_like_ppt_edit(_msg_stripped)
         or agent_tools.looks_like_ppt_continue(_msg_stripped)
     )
+    # 会话粘性：本会话「近几轮已经在做 PPT/用 Skill」时，把「可以给我了吗/确认/好的/开始吧」这类
+    # 短确认句也纳入 Skill 路径，避免它们被当成普通闲聊、模型只空口应「好」却不真正出片。
+    if not skill_mode and has_skill_tools and _msg_stripped and len(_msg_stripped) <= 16:
+        try:
+            recent = agent_crud.recent_messages(db, conversation_id=conv.id, limit=6)
+            for m in recent:
+                if m.role != "assistant" or not isinstance(m.citations, dict):
+                    continue
+                _tools = [t.get("tool") for t in (m.citations.get("tools") or []) if isinstance(t, dict)]
+                if any(t in ("write_skill_file", "run_skill_script") for t in _tools):
+                    skill_mode = True
+                    break
+        except Exception:
+            pass
     # PPT 二次编辑：把当前用户已有 Skill 包内的 .pptx 源文件路径注入上下文，让模型能「就地改」而不是重造。
     if skill_mode and agent_tools.looks_like_ppt_edit(_msg_stripped):
         try:
