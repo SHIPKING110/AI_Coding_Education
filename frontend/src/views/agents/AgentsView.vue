@@ -222,11 +222,16 @@ async function openConversation(id: string) {
   messages.value = []
   outlineDirty.value = false
   sectionDirty.value = false
+  // 工作区三块 Tab 的产出必须与「当前会话」严格一致：切会话即清空，避免残留上个任务的大纲/素材/成果。
+  outlineDraft.value = []
   sectionPreview.value = []
   pptResult.value = null
   wsError.value = ''
   pptTitle.value = ''
+  pptTheme.value = 'brand'
   material.value = []
+  expandedPage.value = null
+  svgCodeCache.value = {}
   if (!conv) return
   selectedAgent.value = conv.agent_id
   const res = await getConversationMessages(id)
@@ -433,7 +438,6 @@ function deriveOutlineFromMessages(msgs: { role?: string; raw?: string }[]): { i
 function syncOutlineDraft() {
   if (outlineDirty.value) return
   const ol = latestSpec.value?.outline ?? []
-  // 新规格没有大纲时保留旧草稿（文案/排版阶段只带 sections，不能把工作区清空）
   if (ol.length) {
     outlineDraft.value = ol.map((o, i) => ({
       id: String(o.id ?? `p${i + 1}`), title: String(o.title ?? `第 ${i + 1} 页`),
@@ -442,7 +446,8 @@ function syncOutlineDraft() {
   } else {
     // 对话驱动：从最新的 assistant 消息里识别结构化大纲（Skill 生成 PPT 大纲也能实时同步）
     const derived = deriveOutlineFromMessages(messages.value)
-    if (derived.length) outlineDraft.value = derived
+    // 当前会话没有大纲时**清空**（不保留上个会话残留）：始终以本会话实际内容为准
+    outlineDraft.value = derived
   }
   const secs = latestSpec.value?.sections ?? []
   if (secs.length && !sectionDirty.value) {
@@ -452,6 +457,8 @@ function syncOutlineDraft() {
       body: Array.isArray(s.body) ? (s.body as unknown[]).map((x) => String(x)).join('\n') : String((s.body ?? '') as unknown),
       open: false,
     }))
+  } else if (!secs.length && !sectionDirty.value) {
+    sectionPreview.value = []
   }
   if (!pptTitle.value && activeConv.value) pptTitle.value = activeConv.value.title
   const t = latestSpec.value?.theme

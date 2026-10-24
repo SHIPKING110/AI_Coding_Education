@@ -34,9 +34,25 @@ logger = logging.getLogger(__name__)
 # 规划层在开跑前 use_conversation(conv_id) 设置；工具内用它把 projects/ 路径改写到 conversations/<cid>/ 下。
 _CONV_SCOPE: ContextVar[str | None] = ContextVar("agent_conv_scope", default=None)
 
+# 当前 Agent 生效可用的 Skill id 白名单：None=不限制（兼容旧调用）；set=仅这些 id 可用。
+# 规划层按「per-agent 绑定 ∪ 全局默认」求出后设置，确保「没勾选的 Skill 不会被规划/执行」。
+_ALLOWED_SKILLS: ContextVar[frozenset[str] | None] = ContextVar("agent_allowed_skills", default=None)
+
 
 def use_conversation(conv_id) -> None:
     _CONV_SCOPE.set(str(conv_id) if conv_id else None)
+
+
+def use_allowed_skills(ids) -> None:
+    """设置当前 Agent 生效可用的 Skill id 集合（None 表示不限制）。"""
+    _ALLOWED_SKILLS.set(frozenset(str(x) for x in ids) if ids is not None else None)
+
+
+def _skill_allowed(skill_id) -> bool:
+    allow = _ALLOWED_SKILLS.get()
+    if allow is None:
+        return True
+    return str(skill_id) in allow
 
 
 def _conv_prefix() -> str:
@@ -597,6 +613,9 @@ def _resolve_skill_for_exec(db: Session, user: User, ref: str):
             avail.append(f"{s.name}(广场)")
         return None, avail
     if not target.enabled:
+        return None, avail
+    # 权限界定：该 Skill 必须是「当前 Agent 生效绑定」的，否则拒绝（没勾选就不能用）。
+    if not _skill_allowed(target.id):
         return None, avail
     if str(target.owner_id) != str(user.id):
         # 广场收录：物化到使用者目录
@@ -1226,6 +1245,8 @@ def heuristic_skill_calls(db, user) -> list[dict]:
         for s in rows:
             if not s.enabled:
                 continue
+            if not _skill_allowed(s.id):
+                continue
             files = [str(f) for f in (s.files or [])]
             if not any(f.lower().endswith((".py", ".js", ".sh")) for f in files):
                 continue
@@ -1262,6 +1283,9 @@ def auto_build_ppt(db, user) -> dict | None:
         return None
     for s in rows:
         if not s.enabled:
+            continue
+        # 权限界定：只对「当前 Agent 生效绑定」的 Skill 做出片兜底
+        if not _skill_allowed(s.id):
             continue
         files = [str(f) for f in (s.files or [])]
         wrapper = next((f for f in files if f.endswith("scripts/ppt_oneshot.py")), None)

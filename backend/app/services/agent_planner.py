@@ -72,6 +72,9 @@ def _skill_inventory(db, user) -> str:
         for s in rows:
             if not s.enabled:
                 continue
+            # 权限界定：只列出「当前 Agent 生效绑定」的 Skill（没勾选的不进清单）
+            if not agent_tools._skill_allowed(s.id):
+                continue
             files = [str(f) for f in (s.files or [])]
             scripts = sorted(
                 (f for f in files if f.lower().endswith((".py", ".js", ".sh"))),
@@ -95,6 +98,7 @@ def plan_and_run(
     message: str,
     *,
     conversation_id=None,
+    agent_id: str | None = None,
     max_rounds: int | None = None,
     max_calls: int | None = None,
     time_budget_ms: int | None = None,
@@ -107,6 +111,22 @@ def plan_and_run(
     - conversation_id：设置会话作用域，使 Skill 的 projects/ 工作区按会话隔离。
     """
     agent_tools.use_conversation(conversation_id)
+    # 权限界定：求出「当前 Agent 生效可用的 Skill id」（per-agent 绑定 ∪ 全局默认），
+    # 没勾选的 Skill 不进清单、也不能被 run_skill_script / 自动出片兜底调用。
+    try:
+        from app.crud import agent_ext as _ext
+
+        allowed: list[str] | None = None
+        if agent_id:
+            glob = _ext.get_global_setting(db, owner_id=user.id)
+            per_skill: list = []
+            c = _ext.get_custom_agent(db, owner_id=user.id, agent_id=agent_id)
+            if c is not None:
+                per_skill = list(c.skill_ids or [])
+            allowed = [str(x) for x in (per_skill + list((glob.default_skill_ids if glob else []) or []))]
+        agent_tools.use_allowed_skills(allowed)
+    except Exception:
+        agent_tools.use_allowed_skills(None)
     inv = _skill_inventory(db, user)
     if not agent_tools.looks_like_business(message):
         if not (inv and (

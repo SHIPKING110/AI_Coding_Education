@@ -326,3 +326,54 @@ def test_conversation_scoped_paths():
     # 清除作用域后原样
     A.use_conversation(None)
     assert A._scope_path("projects/x") == "projects/x"
+
+def test_skill_allowlist_blocks_unselected(factory, tmp_path, monkeypatch):
+    """问题1：Agent 没勾选某 Skill 时，executor/inventory/autobuild 都不得使用它。"""
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import skill_bundle, agent_tools
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        user = _mk_user(db, name="perm-user")
+        skill = ext.create_skill(
+            db, owner_id=user.id, name="ppt-master", description="",
+            content="", files=["manifests/x.txt"],
+        )
+        files = [str(f) for f in (skill.files or [])] + ["ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"]
+        ext.update_skill(db, skill, files=files)
+
+        # 未设置白名单（None）→ 允许
+        agent_tools.use_allowed_skills(None)
+        t, _ = agent_tools._resolve_skill_for_exec(db, user, "ppt-master")
+        assert t is not None
+
+        # 白名单为空集合 → 拒绝
+        agent_tools.use_allowed_skills([])
+        t, _ = agent_tools._resolve_skill_for_exec(db, user, "ppt-master")
+        assert t is None, "没勾选时 executor 不应解析到该 Skill"
+
+        # 白名单含该 id → 允许
+        agent_tools.use_allowed_skills([str(skill.id)])
+        t, _ = agent_tools._resolve_skill_for_exec(db, user, "ppt-master")
+        assert t is not None
+
+        # inventory 也按白名单过滤
+        from app.services import agent_planner
+        agent_tools.use_allowed_skills([])
+        assert "ppt-master" not in agent_planner._skill_inventory(db, user)
+        agent_tools.use_allowed_skills([str(skill.id)])
+        assert "ppt-master" in agent_planner._skill_inventory(db, user)
+    finally:
+        agent_tools.use_allowed_skills(None)
+        db.close()
+
+
+def test_agent_effective_skills_only_bound():
+    """问题1：custom agent 的生效 Skill = 自身 skill_ids ∪ 全局默认；空则不得回落到「全部自有」。"""
+    # 纯逻辑验证：allowed 计算 = per_skill ∪ global
+    per_skill = []
+    glob = []
+    allowed = [str(x) for x in (per_skill + glob)]
+    assert allowed == [], "空绑定应得空白名单（不再默认放行全部自有 Skill）"

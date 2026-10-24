@@ -1087,11 +1087,11 @@ def conversation_chat(
                     if skill_mode:
                         # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
                         out = agent_planner.plan_and_run(
-                            sdb, suser, _msg, conversation_id=conv.id,
+                            sdb, suser, _msg, conversation_id=conv.id, agent_id=conv.agent_id,
                             max_rounds=16, max_calls=30, time_budget_ms=600000,
                         )
                     else:
-                        out = agent_planner.plan_and_run(sdb, suser, _msg, conversation_id=conv.id)
+                        out = agent_planner.plan_and_run(sdb, suser, _msg, conversation_id=conv.id, agent_id=conv.agent_id)
                     plan_box["outcome"] = out
                     logger.info("plan done agent=%s skill_mode=%s steps=%s",
                                 conv.agent_id, skill_mode, [s.tool for s in out.steps])
