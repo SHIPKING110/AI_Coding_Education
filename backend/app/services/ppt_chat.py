@@ -285,13 +285,23 @@ def layout_prompt(material: dict, outline: list[dict], sections: list[dict], use
 
 
 def chat_prompt(material: dict, user_message: str, outline: list[dict], sections: list[dict]) -> str:
+    ol = json.dumps(outline, ensure_ascii=False) if outline else "（暂无）"
+    sec = json.dumps(sections, ensure_ascii=False) if sections else "（暂无文案）"
     return (
         f"报告素材：\n{context_text(material)}\n\n"
-        f"当前大纲：{json.dumps(outline, ensure_ascii=False)}\n"
-        f"当前文案：{json.dumps(sections, ensure_ascii=False)}\n"
+        f"当前大纲：{ol}\n"
+        f"当前文案：{sec}\n"
         f"用户消息：{user_message}\n\n"
-        "请针对用户消息给出简洁、可执行的回答（Markdown）。若涉及大纲/文案/主题/新增页面的调整，"
-        "请把结果放进 ```json 代码块（可含 outline / sections / theme / options）。\n"
+        "【回答要求】\n"
+        "1) 先判断用户要做的是「新起一套 PPT」「改现有 PPT」还是「普通问答/闲聊」：\n"
+        "   - 新起 PPT：**必须给出细致方案**——先用 2-3 句讲清定位与结构思路，"
+        "然后**逐页列出**每页标题 + 这页讲什么/放什么图（几页就列几行），再说明你将据此生成；"
+        "禁止只回一句「我来做/稍等/先检查一下」这类空话。\n"
+        "   - 改现有 PPT：明确说明改了哪几页、改成什么，并展示/给出最新成品。\n"
+        "   - 普通问答：简洁作答即可。\n"
+        "2) 若本轮已经生成了 PPT 文件，结尾务必给出成品页数与**下载链接**（Markdown 链接），"
+        "不要只说「已生成」而不给链接。\n"
+        "3) 涉及大纲/文案/主题/新增页的调整，把结构化结果放进 ```json 代码块（可含 outline / sections / theme / options）。\n"
         f"{_OPTIONS_HINT}"
     )
 

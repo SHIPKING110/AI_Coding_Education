@@ -160,7 +160,7 @@ def plan_and_run(
         if len(steps) >= calls_cap or _elapsed_ms(t0) > budget_ms:
             break
         try:
-            _, calls = llm.tool_step(messages, agent_tools.TOOLS_SCHEMA)
+            _, calls = llm.tool_step(messages, agent_tools.tool_schema_for(is_skill_task))
         except Exception:
             planner_failed = True
             break

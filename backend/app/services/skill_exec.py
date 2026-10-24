@@ -20,7 +20,10 @@ import subprocess
 ALLOWED_RUN = {".py": None, ".js": "node", ".sh": "bash"}
 TIMEOUT_S = 300
 MAX_OUT = 64 * 1024
-LOCAL_FETCH_MAX_FILES = 8
+# 产物回收上限：一次 build 往往同时产出 pptx + 每一页 svg（15~20 页很常见）。
+# 旧值 8 会把大 deck 的 SVG 预览截断（8 页+ 只剩 7 页可预览），
+# 这里放宽到足以覆盖「pptx + 全套单页 svg」；字节上限也相应调大。
+LOCAL_FETCH_MAX_FILES = 40
 LOCAL_FETCH_MAX_BYTES = 32 * 1024 * 1024
 
 

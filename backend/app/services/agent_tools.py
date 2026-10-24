@@ -1122,6 +1122,22 @@ TOOLS_SCHEMA: list[dict] = [
     },
 ]
 
+# 「系统业务数据」类工具：查班级/学员/排课/考勤/评估/教学统计 + 直连 SQL。
+# 做 PPT/内容创作时这些与正文无关，放进规划器只会诱导模型乱查、拖慢出片、污染内容，
+# 因此在「明确的 Skill 生成任务」下把它们从规划器工具集中剔除（web_search 与文件/脚本工具保留）。
+_BUSINESS_TOOL_NAMES = frozenset({
+    "my_schedule_overview", "my_teaching_stats", "list_my_classes",
+    "find_students", "student_progress", "class_evaluation_overview",
+    "sql_query", "sql_list_tables", "sql_describe_table", "sql_describe",
+})
+
+
+def tool_schema_for(skill_task: bool) -> list[dict]:
+    """按场景裁剪工具集：Skill 生成任务剔除业务数据工具，减少跑偏与拖沓。"""
+    if not skill_task:
+        return TOOLS_SCHEMA
+    return [t for t in TOOLS_SCHEMA if (t.get("function", {}).get("name") not in _BUSINESS_TOOL_NAMES)]
+
 
 def execute_tool(db: Session, user: User, name: str, args: dict) -> dict:
     """按名执行工具（参数做白名单过滤，防止模型塞入未声明参数）。"""
@@ -1386,7 +1402,7 @@ def _to_text(obj: Any) -> str:
 
 
 __all__ = [
-    "TOOLS_SCHEMA", "parse_period", "looks_like_business", "looks_like_ppt_edit",
+    "TOOLS_SCHEMA", "tool_schema_for", "parse_period", "looks_like_business", "looks_like_ppt_edit",
     "looks_like_ppt_continue", "looks_like_skill_task", "looks_like_web_search",
     "auto_build_ppt", "execute_tool",
 ]

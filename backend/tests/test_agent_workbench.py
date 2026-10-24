@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Agent 工作台四项优化回归测试：
 1) 广场收录 Skill 可被收录者解析/执行（物化到使用者目录，效果与发布者一致）；
 2) 原生工具调用标记净化（二次编辑不再吐乱码）；
@@ -553,3 +553,51 @@ def test_cleanup_conversation_removes_scoped_dirs(factory, tmp_path, monkeypatch
     assert n >= 2
     assert not scope.exists(), "会话隔离目录应删除"
     assert not outd.exists(), "产物目录应删除"
+
+def test_tool_schema_for_skill_task_excludes_business():
+    """PPT跑偏/拖沓：Skill 生成任务剔除业务数据工具，只留 skill/web_search/文件工具。"""
+    from app.services import agent_tools
+    names = [t["function"]["name"] for t in agent_tools.tool_schema_for(True)]
+    assert "run_skill_script" in names and "write_skill_file" in names and "web_search" in names
+    for biz in ("my_teaching_stats", "list_my_classes", "find_students", "sql_query"):
+        assert biz not in names, f"Skill 任务不应含业务工具 {biz}"
+    # 非 skill 任务保留全部
+    assert len(agent_tools.tool_schema_for(False)) == len(agent_tools.TOOLS_SCHEMA)
+
+
+def test_derive_spec_attaches_svg_urls_by_name():
+    """svg↔大纲对齐：_derive_spec 按文件名把每页 svg 下载 url 挂到 slides/outline。"""
+    from app.api.routers.agents import _derive_spec_from_tools
+    from app.services.agent_planner import Step, PlanOutcome
+
+    steps = [
+        Step(tool="write_skill_file", args={"path": "projects/x/svg_output/01_cover.svg"}, ok=True, result={}),
+        Step(tool="write_skill_file", args={"path": "projects/x/svg_output/02_value.svg"}, ok=True, result={}),
+        Step(tool="run_skill_script", args={}, ok=True, result={"生成文件": [
+            {"名": "01_cover.svg", "下载": "/u/01_cover.svg"},
+            {"名": "02_value.svg", "下载": "/u/02_value.svg"},
+            {"名": "x.pptx", "下载": "/u/x.pptx"},
+        ]}),
+    ]
+    spec = _derive_spec_from_tools(PlanOutcome(steps=steps))
+    assert len(spec["outline"]) == 2
+    assert spec["outline"][0]["url"] == "/u/01_cover.svg"
+    assert spec["outline"][1]["url"] == "/u/02_value.svg"
+    assert spec["slides"][0]["title"] == "cover"
+
+
+def test_synthesize_ppt_summary_includes_download():
+    """空回复兜底：合成交付说明含页数、逐页标题、pptx 下载链接。"""
+    from app.api.routers.agents import _synthesize_ppt_summary
+    from app.services.agent_planner import Step, PlanOutcome
+
+    steps = [
+        Step(tool="write_skill_file", args={"path": "projects/x/svg_output/01_cover.svg"}, ok=True, result={}),
+        Step(tool="run_skill_script", args={}, ok=True, result={"生成文件": [
+            {"名": "deck_2026.pptx", "下载": "/u/deck.pptx"},
+            {"名": "01_cover.svg", "下载": "/u/01_cover.svg"},
+        ]}),
+    ]
+    text, has = _synthesize_ppt_summary(PlanOutcome(steps=steps))
+    assert has and "deck.pptx" in text and "1 页" in text
+

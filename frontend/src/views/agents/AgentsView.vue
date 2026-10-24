@@ -314,11 +314,24 @@ const deckSlides = computed<DeckSlide[]>(() => {
 
 const todayStr = new Date().toISOString().slice(0, 10)
 
-/* —— 真实生成的 SVG 页（合并最近几次助手消息里出现的 .svg 产物）：
-   一次二次编辑通常只重写改动页，最新一轮工具结果可能只带「变更页」。
-   所以这里从最新消息往前扫，**按页名去重、以最新 url 为准**，拼出完整一套——
-   既保证「改过的页同步到最新」，又不会因为只回传变更页导致整套缺页。 —— */
+/* —— 真实生成的 SVG 页：优先用 spec.slides 里「按文件名精确对齐到每页」的 url，
+   这样大纲第 i 页 ↔ 它自己的那页 SVG，不再依赖两个数组的脆弱下标对齐；
+   兜底再扫工具轨迹里的 .svg 产物（跨消息按名去重、以最新为准）。 —— */
 const svgPages = computed<{ name: string; url: string }[]>(() => {
+  // 1) 首选：最新 spec 的 slides/outline 已带 url，按大纲顺序返回
+  const ol = latestSpec.value?.outline ?? []
+  const slides = latestSpec.value?.slides ?? []
+  const fromSpec: { name: string; url: string }[] = []
+  const srcList = ol.length ? ol : slides
+  for (const o of srcList) {
+    const u = String((o as Record<string, unknown>).url ?? '')
+    if (u && u.toLowerCase().includes('.svg')) {
+      const f = String((o as Record<string, unknown>).file ?? u)
+      fromSpec.push({ name: f, url: u })
+    }
+  }
+  if (fromSpec.length) return fromSpec
+  // 2) 兜底：扫工具轨迹产物（旧会话 / 无 spec 时）
   const byName = new Map<string, string>()
   for (let i = messages.value.length - 1; i >= 0; i--) {
     const m = messages.value[i]

@@ -443,32 +443,94 @@ def _derive_spec_from_tools(plan_outcome) -> dict:
     当模型用 ppt-master 之类的 Skill 生成 PPT 时，正文通常不含 ```json 大纲，
     但工具会：
       - write_skill_file 逐页写入 svg（每页一个 .svg 源文件）→ 可据文件名/顺序还原大纲；
-      - run_skill_script 产出的 pptx 页数 → 校验大纲页数与成品一致。
-    这里把「写入了哪些页」还原成 outline（标题取自 svg 文件名），并附 slides 预览结构，
-    让「大纲」的每一页都对得上「成果」里实际生成的幻灯片，SVG 页也能在前端预览。
+      - run_skill_script build 会把每页 svg 落到 _outputs（带下载 url）→ 用作每页真实预览。
+    这里把「写入了哪些页」还原成 outline（标题取自 svg 文件名），并把每页的下载 url
+    按**文件名**对齐挂到 slides 上，让「大纲」每一页都能点开对应真实 SVG（不靠脆弱的下标对齐）。
     """
+    import re as _re
+
+    # 1) build 产出的每页 svg 下载 url（按文件名索引，如 01_cover.svg → url）
+    svg_url_by_name: dict[str, str] = {}
+    for s in plan_outcome.steps:
+        if s.tool == "run_skill_script" and s.ok and isinstance(s.result, dict):
+            for f in (s.result.get("生成文件") or []):
+                if not isinstance(f, dict):
+                    continue
+                nm = str(f.get("名") or "")
+                url = str(f.get("下载") or "")
+                if nm.lower().endswith(".svg") and url:
+                    svg_url_by_name[nm] = url  # 后出现的覆盖前面的（更接近最新一次 build）
+
+    # 2) 按写入顺序还原每页（写顺序即页序）
     svg_pages: list[dict] = []
     seen: set[str] = set()
     for s in plan_outcome.steps:
-        if s.tool == "write_skill_file" and s.ok:
-            path = str((s.args or {}).get("path") or "")
-            if path.lower().endswith(".svg") and path not in seen:
-                seen.add(path)
-                fname = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-                # 文件名多为 "01_cover" / "02_outline" 这类：去掉序号前缀得到标题
-                import re as _re
-
-                title = _re.sub(r"^\d+[_\-\s]*", "", fname).strip() or fname
-                svg_pages.append({"id": f"p{len(svg_pages) + 1}", "title": title,
-                                  "kind": "content", "file": path})
+        if s.tool != "write_skill_file" or not s.ok:
+            continue
+        path = str((s.args or {}).get("path") or "")
+        if not path.lower().endswith(".svg") or path in seen:
+            continue
+        seen.add(path)
+        base = path.rsplit("/", 1)[-1]
+        fname = base.rsplit(".", 1)[0]
+        title = _re.sub(r"^\d+[_\-\s]*", "", fname).strip() or fname
+        svg_pages.append({
+            "id": f"p{len(svg_pages) + 1}",
+            "title": title,
+            "kind": "content",
+            "file": path,
+            "url": svg_url_by_name.get(base, ""),
+        })
     if not svg_pages:
         return {}
-    # 按文件名前缀排序不稳定，这里保持写入顺序（write 顺序即页序）
     outline = [
-        {"id": p["id"], "title": p["title"], "kind": ("cover" if i == 0 else "content")}
+        {"id": p["id"], "title": p["title"], "kind": ("cover" if i == 0 else "content"),
+         "url": p.get("url", "")}
         for i, p in enumerate(svg_pages)
     ]
     return {"outline": outline, "slides": svg_pages}
+
+
+def _synthesize_ppt_summary(plan_outcome) -> tuple[str, bool]:
+    """当模型正文过短/缺下载链接时，基于工具轨迹合成一段完整交付说明。
+
+    返回 (markdown, has_pptx)。内容：页数 + 逐页标题 + pptx 下载链接。
+    避免「空回复/输出不完整」——保证用户一定拿到「生成了什么、怎么下载」。
+    """
+    pptx_name = ""
+    pptx_url = ""
+    page_titles: list[str] = []
+    for s in plan_outcome.steps:
+        if s.tool == "run_skill_script" and s.ok and isinstance(s.result, dict):
+            for f in (s.result.get("生成文件") or []):
+                if not isinstance(f, dict):
+                    continue
+                nm = str(f.get("名") or "")
+                if nm.lower().endswith(".pptx") and f.get("下载"):
+                    pptx_name, pptx_url = nm, str(f.get("下载"))
+                elif nm.lower().endswith(".svg"):
+                    t = nm.rsplit(".", 1)[0]
+                    t = __import__("re").sub(r"^\d+[_\-\s]*", "", t).strip() or t
+                    if t not in page_titles:
+                        page_titles.append(t)
+        elif s.tool == "write_skill_file" and s.ok:
+            path = str((s.args or {}).get("path") or "")
+            if path.lower().endswith(".svg"):
+                t = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                t = __import__("re").sub(r"^\d+[_\-\s]*", "", t).strip() or t
+                if t not in page_titles:
+                    page_titles.append(t)
+    if not pptx_url and not page_titles:
+        return "", False
+    lines: list[str] = []
+    if page_titles:
+        lines.append(f"已生成 **{len(page_titles)} 页** 幻灯片：")
+        for i, t in enumerate(page_titles, 1):
+            lines.append(f"{i}. {t}")
+    if pptx_url:
+        lines.append("")
+        lines.append(f"📥 [下载 PPTX]({pptx_url})")
+    return "\n".join(lines), bool(pptx_url)
 
 
 def _tool_trace(plan_outcome) -> list[dict]:
@@ -1262,6 +1324,16 @@ def conversation_chat(
         # 持久化助手回复 + 异步增量提炼长期记忆（不阻塞流式）
         # 先净化：剔除模型偶发吐出的原生工具调用标记，避免乱码入库、污染后续历史
         full = llm.strip_toolcall_markup(full)
+        # 空/过短回复兜底：Skill 任务已真正产出文件，但模型正文过短或缺下载链接时，
+        # 用工具轨迹合成一段完整交付说明（页数+逐页标题+下载链接），杜绝「空回复/输出不完整」。
+        if plan_outcome.steps and any(
+            s.tool in ("write_skill_file", "run_skill_script") for s in plan_outcome.steps
+        ):
+            _syn, _has_pptx = _synthesize_ppt_summary(plan_outcome)
+            _txt = (full or "").strip()
+            _need = (len(_txt) < 120) or (_has_pptx and ".pptx" not in _txt and "下载" not in _txt)
+            if _need and _syn:
+                full = (full.rstrip() + "\n\n" + _syn) if _txt else _syn
         options = agent_chat.extract_options(full)
         spec = agent_chat.extract_spec(full)
         # Skill 路径兜底：模型用 run_skill_script 生成 PPT 时，通常不会在正文里输出 ```json 大纲，
