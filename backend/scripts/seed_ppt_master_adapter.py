@@ -1,4 +1,4 @@
-﻿"""把「ppt-master 兼容适配版」装成 Skill（幂等）。不依赖大 zip 入库——
+"""把「ppt-master 兼容适配版」装成 Skill（幂等）。不依赖大 zip 入库——
 运行时从**已有的上传版 ppt-master 包**就地构造适配版：
 
   1) 复制源包（缺省取广场/任意已上传的 ppt-master 包）；

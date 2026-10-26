@@ -102,6 +102,7 @@ def plan_and_run(
     max_rounds: int | None = None,
     max_calls: int | None = None,
     time_budget_ms: int | None = None,
+    history: list[tuple[str, str]] | None = None,
 ) -> PlanOutcome:
     """规划并执行只读业务工具，返回调用记录与注入文本块。
 
@@ -109,6 +110,9 @@ def plan_and_run(
     - LLM 不可用或规划失败：降级为关键词启发式单轮路由；
     - 任何工具异常：记录错误并继续，不中断整体流程。
     - conversation_id：设置会话作用域，使 Skill 的 projects/ 工作区按会话隔离。
+    - history：本会话最近几轮 (role, content)。规划器只带当前消息时，用户短确认句
+      （如「继续用深靛，按你的主题生成」）会丢失上下文，导致模型换主题/另起无关项目——
+      这正是「多轮续写跑偏出错片」的根因。这里把最近对话摘要一并带给规划器。
     """
     agent_tools.use_conversation(conversation_id)
     # 权限界定：求出「当前 Agent 生效可用的 Skill id」（per-agent 绑定 ∪ 全局默认，含 id 漂移同名自愈），
@@ -150,8 +154,25 @@ def plan_and_run(
         or agent_tools.looks_like_ppt_edit(message)
         or agent_tools.looks_like_ppt_continue(message)
     )
-    # 规划消息：只带「系统角色 + 用户问题 + 各轮工具结果」，不带历史对话，省 token
-    messages: list = [llm._sys_msg(llm.TOOL_PLANNER_SYS), llm._human_msg(message)]
+    # 规划消息：系统角色 + 最近几轮对话摘要 + 用户问题 + 各轮工具结果
+    # （多轮 Skill 续作必须有历史上下文，否则「继续用深靛」这类短确认句会被规划成新任务）
+    messages: list = [llm._sys_msg(llm.TOOL_PLANNER_SYS)]
+    if history:
+        lines = []
+        for role, content in history[-6:]:
+            txt = (content or "").strip().replace("\n", " ")
+            if not txt:
+                continue
+            who = "用户" if role == "user" else "助手"
+            lines.append(f"{who}：{txt[:400]}")
+        if lines:
+            messages.append(llm._sys_msg(
+                "【本会话最近对话（规划时必须延续，用户短回复通常是对上一轮的确认）】\n"
+                + "\n".join(lines)
+                + "\n规则：本轮任务若与上文是同一套 PPT 的续作（改风格/出片/加页），"
+                "必须沿用上文已定的主题与项目名，禁止换成无关主题或另起新项目。"
+            ))
+    messages.append(llm._human_msg(message))
     if is_skill_task:
         messages.append(llm._sys_msg(f"可用 Skill（用户已绑定，可用 run_skill_script 实际执行包内脚本，生成文件会取回下载链接）：\n{inv}"))
     planner_failed = False

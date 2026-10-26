@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Agent 工作台四项优化回归测试：
 1) 广场收录 Skill 可被收录者解析/执行（物化到使用者目录，效果与发布者一致）；
 2) 原生工具调用标记净化（二次编辑不再吐乱码）；
@@ -226,6 +226,92 @@ def test_attachment_block_no_image_no_ack():
 
     block = _attachment_block([{"name": "a.txt", "kind": "doc", "text": "x"}])
     assert "张图片" not in block
+
+def test_svg_page_title_picks_largest_text():
+    """大纲标题取真实页标题：SVG 内字号最大的文本，而不是文件名 slug。"""
+    from app.api.routers.agents import _svg_page_title
+
+    svg = (
+        '<svg viewBox="0 0 1280 720">'
+        '<text x="10" y="10" font-size="18">小字页脚</text>'
+        '<text x="10" y="100" font-size="56" font-weight="bold">Python 探险岛 · 第一关</text>'
+        '<text x="10" y="200" font-size="24">正文说明</text>'
+        '</svg>'
+    )
+    assert _svg_page_title(svg) == "Python 探险岛 · 第一关"
+    # 无 text 时返回空（调用方回退文件名）
+    assert _svg_page_title("<svg><rect/></svg>") == ""
+
+
+def test_derive_spec_uses_full_page_list_from_build():
+    """调整后续写：以 build 回执的整份页清单为准，未改动的旧页也进大纲（不再只剩本次写过的页）。"""
+    from app.services.agent_planner import PlanOutcome, Step
+    from app.api.routers.agents import _derive_spec_from_tools
+
+    svg = "<svg><text font-size='56'>变量是什么</text></svg>"
+    steps = [
+        Step(tool="write_skill_file", ok=True,
+             args={"skill": "ppt-master", "path": "projects/py-grade46-v2/svg_output/05_variable.svg",
+                   "content": svg}, result={}),
+        Step(tool="run_skill_script", ok=True,
+             args={"skill": "ppt-master", "path": "ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py",
+                   "args": ["build", "projects/py-grade46-v2"]},
+             result={
+                 "成功": True,
+                 "页清单": ["01_cover.svg", "02_map.svg", "05_variable.svg", "24_summary.svg"],
+                 "生成文件": [
+                     {"名": "01_cover.svg", "下载": "/u/01_cover.svg"},
+                     {"名": "02_map.svg", "下载": "/u/02_map.svg"},
+                     {"名": "05_variable.svg", "下载": "/u/05_variable.svg"},
+                     {"名": "24_summary.svg", "下载": "/u/24_summary.svg"},
+                     {"名": "deck.pptx", "下载": "/u/deck.pptx"},
+                 ],
+             }),
+    ]
+    spec = _derive_spec_from_tools(PlanOutcome(steps=steps))
+    titles = [o["title"] for o in spec["outline"]]
+    assert len(titles) == 4, titles  # 整份 4 页，而非只本轮写入的 1 页
+    assert titles[0] == "cover"
+    assert titles[2] == "变量是什么"  # 本轮写入页用真实标题
+    assert spec["outline"][2]["url"] == "/u/05_variable.svg"
+
+
+def test_conversation_ppt_block_lists_conv_project(factory, tmp_path, monkeypatch):
+    """二次编辑基线：本会话隔离目录里的项目/页数/成品要被列出，且不掺别的会话。"""
+    import uuid as _uuid
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
+    from app.services import skill_bundle
+    from app.api.routers.agents import _conversation_ppt_block
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        user = _mk_user(db, name="edit-base")
+        skill = ext.create_skill(db, owner_id=user.id, name="ppt-master", description="",
+                                 content="", files=["x.txt"])
+        conv_id = _uuid.uuid4()
+        prefix = "conversations/conv_" + str(conv_id).replace("-", "")[:12]
+        desk = skill_bundle.skill_dir(user.id, skill.id)
+        proj = desk / prefix / "projects" / "py-grade46-v2"
+        (proj / "svg_output").mkdir(parents=True)
+        for i in (1, 2, 3):
+            (proj / "svg_output" / f"{i:02d}_p{i}.svg").write_text("<svg/>", encoding="utf-8")
+        (proj / "exports").mkdir()
+        (proj / "exports" / "deck.pptx").write_bytes(b"PK\x03\x04")
+        # 另一个会话的项目：不能出现在本会话基线里
+        other = desk / "conversations/conv_ffffffffffff/projects/other"
+        (other / "svg_output").mkdir(parents=True)
+        (other / "svg_output" / "01_x.svg").write_text("<svg/>", encoding="utf-8")
+
+        block = _conversation_ppt_block(db, user, conv_id)
+        assert "projects/py-grade46-v2" in block and "3 页" in block
+        assert "deck.pptx" in block
+        assert "other" not in block
+        assert "禁止另起新项目" in block
+    finally:
+        db.close()
+
 
 def test_looks_like_ppt_continue_gate():
     """问题3：催出片/继续/下载 等续作意图要能识别（否则模型只空口出片不执行）。"""
@@ -475,6 +561,59 @@ def test_scope_path_handles_dot_and_backslash():
     assert A._scope_path("projects\\x\\y") == pfx + "projects/x/y"
     A.use_conversation(None)
 
+def test_sanitize_svg_fonts_removes_zero_placeholder():
+    """质量门禁阻断修复：font-size=0 的空白占位文本会让 DrawingML 判非法整单失败。
+    空白占位 → 整段移除；非空但字号过小 → 提升到 12px。"""
+    import re, tempfile
+    from pathlib import Path
+    src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
+    m = re.search(r"def _sanitize_svg_fonts.*?(?=\ndef _qc_errors_only)", src, re.S)
+    ns = {"Path": Path, "print": print}
+    exec(m.group(0), ns)
+    fn = ns["_sanitize_svg_fonts"]
+    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    f = d/"svg_output/16_end.svg"
+    f.write_text(
+        '<svg><text font-size="56">下节课见！</text>'
+        '<text x="640" font-size="0"> </text>'
+        '<text font-size=\'0.5\'>看不见的字</text>'
+        '<text font-size="24">正常</text></svg>',
+        encoding="utf-8",
+    )
+    fn(d)
+    out = f.read_text(encoding="utf-8")
+    assert 'font-size="0"' not in out, "空白占位应被整段移除"
+    assert "0.5" not in out and "12" in out, "过小字号应提升到 12"
+    assert "看不见的字" in out and "下节课见！" in out and "正常" in out
+
+def test_sanitize_pptx_role_ids_fixes_missing_ids():
+    """质量门禁自愈：data-pptx-role 元素缺 id（唯一常见 error）自动补齐，出片不再卡死。"""
+    import re, tempfile
+    from pathlib import Path
+    src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
+    m = re.search(r"def _sanitize_pptx_role_ids.*?(?=\ndef _qc_errors_only)", src, re.S)
+    ns = {"Path": Path, "print": print}
+    exec(m.group(0), ns)
+    fn = ns["_sanitize_pptx_role_ids"]
+    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    f = d/"svg_output/01_cover.svg"
+    f.write_text(
+        '<svg viewBox="0 0 1280 720">'
+        '<rect x="0" y="0" width="1280" height="720" fill="#000" data-pptx-role="background"/>'
+        '<rect x="0" y="0" width="1280" height="6" fill="#fff" data-pptx-role="decoration"/>'
+        '<rect x="5" y="5" width="10" height="10" fill="#111" data-pptx-role="decoration" id="keep-me"/>'
+        '<text id="t1">标题</text></svg>',
+        encoding="utf-8",
+    )
+    fn(d)
+    out = f.read_text(encoding="utf-8")
+    assert out.count('data-pptx-role="background"') == 1
+    assert 'id="role-background-1"' in out
+    assert out.count('data-pptx-role="decoration"') == 2
+    assert out.count('id="role-decoration-1"') == 1  # 只给缺 id 的那个补一次
+    assert 'id="keep-me"' in out
+    assert 'id="role-decoration-1"' in out
+
 def test_sanitize_svg_colors_fixes_invalid():
     """问题1/2：模型写出非法颜色(如 #33island) 时，build 前自动修正，避免质量门禁整单失败。"""
     import re, tempfile
@@ -493,6 +632,74 @@ def test_sanitize_svg_colors_fixes_invalid():
     assert "island" not in out and "GGG" not in out
     assert "#33" in out.lower() or "#330" in out.lower() or "#000000" in out
     assert "#ffffff" in out.lower()
+
+def test_sanitize_root_bounds_overlap_drops_smaller():
+    """质量门禁自愈：根级 <g> data-pptx-bounds 重叠（error）→ 移除较小那组声明，降级为 warning。"""
+    import re, tempfile
+    from pathlib import Path
+    src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
+    m = re.search(r"def _sanitize_root_bounds_overlap.*?(?=\ndef _qc_errors_only)", src, re.S)
+    ns = {"Path": Path, "print": print}
+    exec(m.group(0), ns)
+    fn = ns["_sanitize_root_bounds_overlap"]
+    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    f = d/"svg_output/06.svg"
+    f.write_text(
+        '<svg viewBox="0 0 1280 720">'
+        '<g id="big" data-pptx-bounds="0 0 800 600"><rect/></g>'
+        '<g id="small" data-pptx-bounds="600 300 200 100"><rect/></g>'
+        '<g id="apart" data-pptx-bounds="900 0 380 200"><rect/></g>'
+        '</svg>',
+        encoding="utf-8",
+    )
+    fn(d)
+    out = f.read_text(encoding="utf-8")
+    assert 'id="big" data-pptx-bounds="0 0 800 600"' in out  # 大组保留
+    assert 'id="small"' in out and 'data-pptx-bounds="600 300 200 100"' not in out  # 小组去掉声明
+    assert 'id="apart" data-pptx-bounds="900 0 380 200"' in out  # 不重叠不动
+
+def test_sanitize_svg_xml_fixes_unescaped_amp():
+    """质量门禁自愈：未转义 & / 控制字符导致 Invalid XML → 无损转义修复。"""
+    import re, tempfile
+    from pathlib import Path
+    src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
+    m = re.search(r"def _sanitize_svg_xml.*?(?=\ndef _sanitize_svg_overflow)", src, re.S)
+    ns = {"Path": Path, "print": print}
+    exec(m.group(0), ns)
+    fn = ns["_sanitize_svg_xml"]
+    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    f = d/"svg_output/01.svg"
+    f.write_text('<svg><text>A & B &amp; C</text><text>ctl\x08char</text></svg>', encoding="utf-8")
+    fn(d)
+    out = f.read_text(encoding="utf-8")
+    assert "A &amp; B &amp; C" in out  # 孤立 & 被转义，原本合法的 &amp; 不动
+    assert "\x08" not in out
+
+
+def test_sanitize_svg_overflow_clamps_into_viewbox():
+    """质量门禁自愈：元素越出画布（error）→ 坐标/尺寸回收到 viewBox 内。"""
+    import re, tempfile
+    from pathlib import Path
+    src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
+    m = re.search(r"def _sanitize_svg_overflow.*?(?=\ndef _qc_errors_only)", src, re.S)
+    ns = {"Path": Path, "print": print}
+    exec(m.group(0), ns)
+    fn = ns["_sanitize_svg_overflow"]
+    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    f = d/"svg_output/01.svg"
+    f.write_text(
+        '<svg viewBox="0 0 1280 720">'
+        '<rect x="-40" y="100" width="200" height="50" fill="#fff"/>'
+        '<rect x="1200" y="700" width="300" height="80" fill="#fff"/>'
+        '<text x="120" y="200" font-size="24">正常</text>'
+        '</svg>',
+        encoding="utf-8",
+    )
+    fn(d)
+    out = f.read_text(encoding="utf-8")
+    assert 'x="-40"' not in out and 'x="0"' in out          # 负坐标归零
+    assert 'width="300"' not in out                          # 超宽被截断
+    assert 'x="120" y="200"' in out                          # 合法元素不动
 
 def test_qc_errors_only():
     from pathlib import Path

@@ -700,8 +700,22 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
                  "退出码": result.get("code")}
     fnames = result.get("files") or []
     if fnames:
-        out["生成文件"] = [{"名": f["name"], "下载": f["url"], "字节": f["bytes"]} for f in fnames]
-        out["提示"] = "生成的文件已有下载链接，请把链接直接给用户，不要只描述内容"
+        # 交付件与诊断件分开：质量报告/校验 JSON 属于中间产物，不是用户要下载的成果。
+        # 混进「生成文件」会让前端把 svg_quality_report.json 当成品展示（用户只要 PPTX）。
+        _diag_suffix = (".report.json", "_report.json", "quality_report.json")
+        deliverables = [f for f in fnames
+                        if not str(f.get("name") or "").lower().endswith(_diag_suffix)]
+        diagnostics = [f for f in fnames
+                       if str(f.get("name") or "").lower().endswith(_diag_suffix)]
+        if deliverables:
+            out["生成文件"] = [{"名": f["name"], "下载": f["url"], "字节": f["bytes"]} for f in deliverables]
+            out["提示"] = "生成的文件已有下载链接，请把链接直接给用户，不要只描述内容"
+        if diagnostics:
+            out["诊断文件"] = [{"名": f["name"], "下载": f["url"]} for f in diagnostics]
+            if not deliverables:
+                out["提示"] = ("本次仅产出诊断报告（质量检查未通过或未生成成品）。"
+                               "报告里有 error 时，先按其提示修 SVG，再重新跑 build，"
+                               "不要把报告当成交付文件给用户。")
     if fixed is not None:
         out["自动前置"] = {
             "成功": fixed.get("ok", False),
@@ -710,6 +724,16 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
     out["脚本"] = rel
     out["stdout"] = str(result.get("stdout", ""))[:1200]
     out["stderr"] = str(result.get("stderr", ""))[:1200]
+    # build 回执 [PAGES]：成品包含的全部页（导出顺序）。后端据此刷新工作区大纲，
+    # 保证「调整后」大纲覆盖整份成品（含本次未改的旧页），而不是只剩本次写过的页。
+    try:
+        import re as _re_
+
+        m = _re_.search(r"\[PAGES\]([^\n]+)", str(result.get("stdout") or ""))
+        if m:
+            out["页清单"] = [x.strip() for x in m.group(1).split(",") if x.strip()]
+    except Exception:
+        pass
     if result.get("deps"):
         out["依赖"] = result["deps"]
     # PPT 二次编辑支撑：把工作区里现成的 .pptx 源文件告诉模型，便于后续「编辑已有 PPT」而非重新生成。

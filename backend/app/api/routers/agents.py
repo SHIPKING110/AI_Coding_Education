@@ -437,50 +437,175 @@ def _existing_pptx_block(db, user) -> str:
         return ""
 
 
+def _svg_page_title(content: str) -> str:
+    """从 SVG 源码提炼页面标题：取字号最大的 <text> 文本。
+
+    模型排版约定「标题字号最大」，比文件名 slug（cover/pain/solution）可读得多；
+    工作区大纲标题直接用真实页标题，不再显示英文文件名。
+    """
+    import re as _re
+
+    try:
+        txt = str(content or "")
+        best: tuple[str, float] = ("", -1.0)
+        for m in _re.finditer(r"<text\b([^>]*)>(.*?)</text>", txt, _re.S):
+            attrs, inner = m.group(1), m.group(2)
+            fs = _re.search(r"""font-size\s*=\s*["']([0-9.]+)""", attrs)
+            try:
+                size = float(fs.group(1)) if fs else 0.0
+            except ValueError:
+                size = 0.0
+            label = _re.sub(r"<[^>]+>", "", inner)
+            label = (label.replace("&amp;", "&").replace("&lt;", "<")
+                     .replace("&gt;", ">").replace("&quot;", '"').strip())
+            if label and size > best[1]:
+                best = (label, size)
+        return best[0][:40]
+    except Exception:
+        return ""
+
+
+def _conversation_ppt_block(db, user, conv_id) -> str:
+    """列出「本会话」已生成的 PPT 项目与成品，作为二次编辑的基线注入。
+
+    为什么需要：用户说「调整一下」时，模型不知道上一版在哪——只能另起项目重做，
+    造成「后续调整不能建立在第一版基础上」。这里按会话隔离目录（conversations/conv_x/）
+    精确列出本会话自己的项目、页数与最新成品，模型据此就地改页而不是重造。
+    """
+    try:
+        from app.crud import agent_ext as _ext
+        from app.services import skill_bundle as _bundle
+
+        prefix = "conversations/conv_" + str(conv_id).replace("-", "")[:12] + "/"
+        lines: list[str] = []
+        for s in _ext.list_skills(db, owner_id=user.id):
+            if not s.enabled:
+                continue
+            desk = _bundle.skill_dir(user.id, s.id)
+            conv_dir = desk / prefix / "projects"
+            if not conv_dir.is_dir():
+                continue
+            for proj in sorted(conv_dir.iterdir()):
+                svg_dir = proj / "svg_output"
+                if not (proj.is_dir() and svg_dir.is_dir()):
+                    continue
+                n_pages = len(list(svg_dir.glob("*.svg")))
+                if n_pages == 0:
+                    continue
+                pptx = sorted(proj.rglob("*.pptx"), key=lambda p: p.stat().st_mtime)
+                latest = pptx[-1] if pptx else None
+                rel = "projects/" + proj.name  # 模型可见路径（运行时自动会话改写）
+                seg = f"- 项目 `{rel}`（{n_pages} 页）"
+                if latest is not None:
+                    seg += f"，最新成品：{str(latest.relative_to(desk)).replace(chr(92), '/')}"
+                lines.append(f"- Skill「{s.name}」{seg}")
+            if len(lines) >= 6:
+                break
+        if not lines:
+            return ""
+        return (
+            "【本会话已生成的 PPT（二次编辑基线）】\n" + "\n".join(lines[:6])
+            + "\n若用户要求「在这基础上调整」（改字/换配色/加删页/调顺序），必须直接改上面"
+            "**本会话该项目**的 svg_output（先 list_skill_files 确认页文件，用 write_skill_file 覆盖改动的页，"
+            "未改页保持不动，处理后重新 build），禁止另起新项目或从头重写整份。"
+            "\n若用户明确说「重新做/换主题/新的一套」，才新建项目。"
+        )
+    except Exception:
+        return ""
+
+
 def _derive_spec_from_tools(plan_outcome) -> dict:
     """从 Skill 工具执行轨迹里提炼 PPT 规格（大纲 + 幻灯片预览），供工作区「大纲/成果」对齐。
 
     当模型用 ppt-master 之类的 Skill 生成 PPT 时，正文通常不含 ```json 大纲，
     但工具会：
-      - write_skill_file 逐页写入 svg（每页一个 .svg 源文件）→ 可据文件名/顺序还原大纲；
-      - run_skill_script build 会把每页 svg 落到 _outputs（带下载 url）→ 用作每页真实预览。
-    这里把「写入了哪些页」还原成 outline（标题取自 svg 文件名），并把每页的下载 url
-    按**文件名**对齐挂到 slides 上，让「大纲」每一页都能点开对应真实 SVG（不靠脆弱的下标对齐）。
+      - write_skill_file 逐页写入 svg（含 SVG 源码）→ 标题取页面内字号最大的文本（真实标题）；
+      - run_skill_script build 会把**整份** svg 落到 _outputs（带下载 url）→ 以它的文件清单为准，
+        保证「调整后的大纲」反映最终成品全部页（含本次未改动的页），而不是只有本次写过的页。
     """
     import re as _re
 
     # 1) build 产出的每页 svg 下载 url（按文件名索引，如 01_cover.svg → url）
+    #    同时记录**整份** svg 清单（含本次未改动的旧页）——调整后大纲要反映最终成品全部页。
     svg_url_by_name: dict[str, str] = {}
-    for s in plan_outcome.steps:
-        if s.tool == "run_skill_script" and s.ok and isinstance(s.result, dict):
-            for f in (s.result.get("生成文件") or []):
-                if not isinstance(f, dict):
-                    continue
-                nm = str(f.get("名") or "")
-                url = str(f.get("下载") or "")
-                if nm.lower().endswith(".svg") and url:
-                    svg_url_by_name[nm] = url  # 后出现的覆盖前面的（更接近最新一次 build）
+    built_svg_names: list[str] = []
 
-    # 2) 按写入顺序还原每页（写顺序即页序）
-    svg_pages: list[dict] = []
-    seen: set[str] = set()
+    def _sort_names(names: list[str]) -> list[str]:
+        def _k(n: str):
+            m = _re.match(r"^(\d+)", n)
+            return (int(m.group(1)) if m else 10 ** 9, n.lower())
+        return sorted(names, key=_k)
+
+    for s in plan_outcome.steps:
+        if s.tool != "run_skill_script" or not s.ok or not isinstance(s.result, dict):
+            continue
+        step_svg: list[str] = []
+        for f in (s.result.get("生成文件") or []):
+            if not isinstance(f, dict):
+                continue
+            nm = str(f.get("名") or "")
+            url = str(f.get("下载") or "")
+            if nm.lower().endswith(".svg"):
+                if url:
+                    svg_url_by_name[nm] = url  # 后出现的覆盖前面的（更接近最新一次 build）
+                step_svg.append(nm)
+        pages = s.result.get("页清单")
+        if isinstance(pages, list):
+            step_svg = [str(x) for x in pages if str(x).lower().endswith(".svg")]
+        if step_svg:
+            built_svg_names = _sort_names(step_svg)  # 最后一步 build 的整份清单为准
+
+    # 2) 本轮 write_skill_file 写过的页：记录源码与写入的包内路径
+    #    标题取 SVG 内字号最大的文本（真实页标题），不再用文件名 slug。
+    written: dict[str, dict] = {}  # base 文件名 → {path, url, title}
+    order: list[str] = []
     for s in plan_outcome.steps:
         if s.tool != "write_skill_file" or not s.ok:
             continue
-        path = str((s.args or {}).get("path") or "")
-        if not path.lower().endswith(".svg") or path in seen:
+        args = s.args or {}
+        path = str(args.get("path") or "")
+        if not path.lower().endswith(".svg"):
             continue
-        seen.add(path)
         base = path.rsplit("/", 1)[-1]
-        fname = base.rsplit(".", 1)[0]
-        title = _re.sub(r"^\d+[_\-\s]*", "", fname).strip() or fname
-        svg_pages.append({
-            "id": f"p{len(svg_pages) + 1}",
-            "title": title,
-            "kind": "content",
-            "file": path,
+        if base in written:
+            # 同一页本会话写过多次：位置取首次，内容/标题以最后写入为准
+            written[base]["path"] = path
+            written[base]["title"] = _svg_page_title(str(args.get("content") or "")) or written[base]["title"]
+            continue
+        order.append(base)
+        written[base] = {
+            "path": path,
             "url": svg_url_by_name.get(base, ""),
-        })
+            "title": _svg_page_title(str(args.get("content") or "")),
+        }
+
+    svg_pages: list[dict] = []
+    if built_svg_names:
+        # 3) 以 build 的整份清单为准（按文件名排序即页序）：本次没改的旧页也在内，
+        #    标题优先用本轮写入的源码提取，否则用旧页文件名（去序号）。
+        for base in built_svg_names:
+            info = written.get(base) or {}
+            stem = base.rsplit(".", 1)[0]
+            title = info.get("title") or _re.sub(r"^\d+[_\-\s]*", "", stem).strip() or stem
+            svg_pages.append({
+                "id": f"p{len(svg_pages) + 1}",
+                "title": title,
+                "kind": "content",
+                "file": info.get("path") or base,
+                "url": svg_url_by_name.get(base, ""),
+            })
+    else:
+        # 还没出片：按本轮写入顺序还原
+        for base in order:
+            info = written[base]
+            stem = base.rsplit(".", 1)[0]
+            svg_pages.append({
+                "id": f"p{len(svg_pages) + 1}",
+                "title": info.get("title") or _re.sub(r"^\d+[_\-\s]*", "", stem).strip() or stem,
+                "kind": "content",
+                "file": info.get("path") or base,
+                "url": svg_url_by_name.get(base, ""),
+            })
     if not svg_pages:
         return {}
     outline = [
@@ -514,10 +639,14 @@ def _synthesize_ppt_summary(plan_outcome) -> tuple[str, bool]:
                     if t not in page_titles:
                         page_titles.append(t)
         elif s.tool == "write_skill_file" and s.ok:
-            path = str((s.args or {}).get("path") or "")
+            args = s.args or {}
+            path = str(args.get("path") or "")
             if path.lower().endswith(".svg"):
-                t = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-                t = __import__("re").sub(r"^\d+[_\-\s]*", "", t).strip() or t
+                # 优先用 SVG 内真实页标题；提取不到再退回文件名
+                t = _svg_page_title(str(args.get("content") or ""))
+                if not t:
+                    t = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                    t = __import__("re").sub(r"^\d+[_\-\s]*", "", t).strip() or t
                 if t not in page_titles:
                     page_titles.append(t)
     if not pptx_url and not page_titles:
@@ -1147,21 +1276,40 @@ def conversation_chat(
         or agent_tools.looks_like_ppt_edit(_msg_stripped)
         or agent_tools.looks_like_ppt_continue(_msg_stripped)
     )
-    # 会话粘性：本会话「近几轮已经在做 PPT/用 Skill」时，把「可以给我了吗/确认/好的/开始吧」这类
-    # 短确认句也纳入 Skill 路径，避免它们被当成普通闲聊、模型只空口应「好」却不真正出片。
-    if not skill_mode and has_skill_tools and _msg_stripped and len(_msg_stripped) <= 16:
+    # 会话粘性：本会话「近几轮已经在做 PPT/用 Skill」时，把「可以给我了吗/确认/好的/开始吧」
+    # 以及「决定保留全部 24 页；要学生上机跟敲」这类**延续指令**也纳入 Skill 路径，
+    # 避免它们被当成普通闲聊、模型只空口应「好」却不真正执行（「空话不干活」根因）。
+    _FOLLOWUP_WORDS = (
+        "保留", "全部", "决定", "确定", "确认", "就用", "按照", "按这个", "按上面", "按你的",
+        "继续", "接着", "开始做", "开始生成", "出片", "跟敲", "上机", "就要", "可以了", "没问题",
+        "就这样", "改一下", "调整", "换成", "加一", "删掉", "补充",
+    )
+    if not skill_mode and has_skill_tools and _msg_stripped:
         try:
             recent = agent_crud.recent_messages(db, conversation_id=conv.id, limit=6)
+            had_tools = False
             for m in recent:
                 if m.role != "assistant" or not isinstance(m.citations, dict):
                     continue
                 _tools = [t.get("tool") for t in (m.citations.get("tools") or []) if isinstance(t, dict)]
                 if any(t in ("write_skill_file", "run_skill_script") for t in _tools):
-                    skill_mode = True
+                    had_tools = True
                     break
+            # 短确认句，或明显是在延续既有 PPT 任务的指令，都进执行链路
+            if had_tools and (len(_msg_stripped) <= 40
+                              or any(w in _msg_stripped for w in _FOLLOWUP_WORDS)):
+                skill_mode = True
         except Exception:
             pass
-    # PPT 二次编辑：把当前用户已有 Skill 包内的 .pptx 源文件路径注入上下文，让模型能「就地改」而不是重造。
+    # PPT 二次编辑：把「本会话已生成的 PPT（基线）+ 包内已有 pptx」注入上下文，
+    # 让模型能「就地改上一版」而不是重造；同时明确区分「接着调整」与「重新做」。
+    if skill_mode and has_skill_tools:
+        try:
+            conv_block = _conversation_ppt_block(db, user, conv.id)
+            if conv_block:
+                mem_block = (mem_block + "\n\n" + conv_block).strip() if mem_block else conv_block
+        except Exception:
+            pass
     if skill_mode and agent_tools.looks_like_ppt_edit(_msg_stripped):
         try:
             pptx_block = _existing_pptx_block(db, user)
@@ -1190,14 +1338,28 @@ def conversation_chat(
                     return
                 # 线程不继承 contextvar：在此重新压入教师个人模型配置，否则规划模型拿不到 Key
                 with _llm_ctx.use_llm(resolved):
+                    # 最近几轮对话：多轮 Skill 续作（「继续用深靛」「加页」）必须有上文，
+                    # 否则规划器会把短确认句当成新任务，跑到无关主题/旧项目上（错片根因）。
+                    hist: list[tuple[str, str]] = []
+                    try:
+                        for m in agent_crud.recent_messages(sdb, conversation_id=conv.id, limit=4):
+                            if m.role == "user" and (m.content or "").strip() == _msg:
+                                continue  # 当前这条消息单独作为本轮输入，避免重复
+                            hist.append((m.role, m.content))
+                    except Exception:
+                        hist = []
                     if skill_mode:
                         # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
                         out = agent_planner.plan_and_run(
                             sdb, suser, _msg, conversation_id=conv.id, agent_id=conv.agent_id,
                             max_rounds=16, max_calls=30, time_budget_ms=600000,
+                            history=hist,
                         )
                     else:
-                        out = agent_planner.plan_and_run(sdb, suser, _msg, conversation_id=conv.id, agent_id=conv.agent_id)
+                        out = agent_planner.plan_and_run(
+                            sdb, suser, _msg, conversation_id=conv.id, agent_id=conv.agent_id,
+                            history=hist,
+                        )
                     plan_box["outcome"] = out
                     logger.info("plan done agent=%s skill_mode=%s steps=%s",
                                 conv.agent_id, skill_mode, [s.tool for s in out.steps])

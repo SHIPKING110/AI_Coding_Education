@@ -100,6 +100,15 @@ const conversations = ref<ConversationOut[]>([])
 const selectedAgent = ref('')
 const activeConv = ref<ConversationOut | null>(null)
 const messages = ref<{ role: string; content: string; raw?: string; citations?: Record<string, unknown> | null; options?: ChatOption[] | null; spec?: ChatMessage['spec']; attachments?: ChatAttachment[] }[]>([])
+// 长用户消息折叠：超过阈值默认收起，点「展开全文」查看（避免长需求把上下文挤出屏幕）
+const expandedUserMsgs = ref<Record<number, boolean>>({})
+const USER_MSG_COLLAPSE_CHARS = 180
+function isLongUser(m: { role: string; content: string }): boolean {
+  return m.role === 'user' && (m.content ?? '').length > USER_MSG_COLLAPSE_CHARS
+}
+function userPreview(text: string): string {
+  return (text ?? '').slice(0, USER_MSG_COLLAPSE_CHARS).replace(/\n+$/, '') + ' …'
+}
 const streamBuf = ref('')
 const liveTools = ref<{ seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[]>([])
 const streaming = ref(false)
@@ -221,6 +230,7 @@ async function openConversation(id: string) {
   activeConv.value = conv
   messages.value = []
   outlineDirty.value = false
+  expandedUserMsgs.value = {}
   sectionDirty.value = false
   // 工作区三块 Tab 的产出必须与「当前会话」严格一致：切会话即清空，避免残留上个任务的大纲/素材/成果。
   outlineDraft.value = []
@@ -1103,7 +1113,13 @@ async function send(preset?: { text: string; stage?: string }) {
     if (timedOut) {
       error.value = '连接中断（90 秒无任何响应，含服务端心跳），已保留已生成的内容；可点重试继续'
     }
-    if (doneHasSpec && activeConv.value) {
+    // 本轮真正跑过 Skill（写页/出片）时，成品可能变了（调整页/重新出片）：
+    // 无论后端是否给出新 spec，都回拉一次消息，并以服务端 spec 为准强制同步大纲，
+    // 避免工作区大纲停留在第一版（页数/标题/SVG 不刷新）。
+    const ranSkill = (doneToolTrace ?? []).some(
+      (t) => t.tool === 'write_skill_file' || t.tool === 'run_skill_script',
+    )
+    if ((doneHasSpec || ranSkill) && activeConv.value) {
       // 新规格落库后回填（含 outline/sections），工作区随之更新
       try {
         const res = await getConversationMessages(activeConv.value.id)
@@ -1111,6 +1127,8 @@ async function send(preset?: { text: string; stage?: string }) {
           role: m.role, content: stripJsonBlocks(m.content), raw: m.content, citations: m.citations,
           options: m.options ?? null, spec: m.spec ?? null, attachments: attachmentsOf(m),
         }))
+        // Skill 出片后服务端回填的是「最新成品」规格：覆盖用户本地草稿，保证对齐最后一版
+        outlineDirty.value = false
       } catch {
         /* 保持本地消息 */
       }
@@ -2313,7 +2331,12 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" /></svg>
                 </div>
                 <div class="bubble">
-                  <div v-html="renderMarkdown(m.content)" />
+                  <div v-html="renderMarkdown(m.role === 'user' && isLongUser(m) && !expandedUserMsgs[i] ? userPreview(m.content) : m.content)" />
+                  <button
+                    v-if="m.role === 'user' && isLongUser(m)"
+                    class="msg-expand"
+                    @click="expandedUserMsgs[i] = !expandedUserMsgs[i]"
+                  >{{ expandedUserMsgs[i] ? '收起' : `展开全文（${m.content.length} 字）` }}</button>
                   <div v-if="msgAtts(m).length" class="msg-atts">
                     <a
                       v-for="a in msgAtts(m)"
@@ -3523,6 +3546,9 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .avatar.ai { color: #fff; background: var(--brand-gradient); }
 .avatar.ai svg { width: 15px; height: 15px; }
 .bubble { max-width: 78%; min-width: 0; padding: 10px 14px; border-radius: 14px; font-size: 13.5px; line-height: 1.68; overflow-wrap: anywhere; word-break: break-word; }
+.msg-expand { margin-top: 6px; border: none; background: transparent; color: rgba(255, 255, 255, 0.85); font-size: 12px; cursor: pointer; padding: 2px 0; text-decoration: underline; }
+.msg-expand:hover { color: #fff; }
+.msg.assistant .msg-expand { color: var(--brand-strong); }
 .bubble :deep(pre) { overflow-x: auto; max-width: 100%; }
 .bubble :deep(table) { display: block; overflow-x: auto; max-width: 100%; }
 .bubble :deep(img) { max-width: 100%; height: auto; }
