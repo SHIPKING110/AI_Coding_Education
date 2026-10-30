@@ -859,7 +859,53 @@ _PSEUDO_TOOL_NAMES = (
 # （模型原生 tool-call 语法被当正文吐出来的另一变体，常见于 Claude 风格）
 _TOOL_USE_BLOCK_RE = r"<tool_use>\s*<name>\s*([\w./-]+)\s*</name>\s*<arguments>\s*([\s\S]*?)\s*</arguments>\s*</tool_use>"
 _INVOKE_BLOCK_RE = r"<invoke\s+name=[\"']([\w./-]+)[\"']\s*>\s*<[\s\S]*?</invoke>"
+_TOOL_CALLS_BLOCK_RE = r"<tool\s+calls\b[^>]*>[\s\S]*?</tool\s+calls>"
+_TOOL_CALL_SELF_RE = r"<tool\s+call\b[^>]*/>"
 _PSEUDO_BLOCK_RE = None
+
+
+def _parse_tool_call_attrs(s: str) -> dict:
+    import re as _re
+
+    args: dict = {}
+    for m in _re.finditer(r'''(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,)]+))''', s or ""):
+        key = m.group(1)
+        val = m.group(2) if m.group(2) is not None else (
+            m.group(3) if m.group(3) is not None else m.group(4)
+        )
+        args[key] = val
+    return args
+
+
+def _extract_tool_calls_blocks(text: str) -> list[tuple[str, dict]]:
+    """解析 `<tool calls><tool call name(attr=...)/></tool calls>` 变体（自闭合轻量调用）。"""
+    import re as _re
+
+    out: list[tuple[str, dict]] = []
+    if not text:
+        return out
+    # 先取 wrapper 内部，再兜底扫全文
+    chunks = [m.group(1) for m in _re.finditer(r"<tool\s+calls\b[^>]*>([\s\S]*?)</tool\s+calls>", text, _re.I)]
+    if not chunks:
+        chunks = [text]
+    for chunk in chunks:
+        for m in _re.finditer(r"<tool\s+call\b\s*([A-Za-z_][\w.-]*)\s*\(([^)]*)\)\s*/?>", chunk, _re.I | _re.S):
+            name = m.group(1).strip().lower()
+            args = _parse_tool_call_attrs(m.group(2))
+            if name == "run_skill_script" and "script" in args and "path" not in args:
+                args["path"] = args.pop("script")
+            if name in _PSEUDO_TOOL_NAMES and (args.get("skill") or args.get("path")):
+                out.append((name, args))
+    # 去重
+    seen = set()
+    uniq = []
+    for n, a in out:
+        key = (n, a.get("path"))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append((n, a))
+    return uniq
 
 
 def _pseudo_block_re():
@@ -948,6 +994,12 @@ def _extract_pseudo_tool_blocks(text: str) -> list[tuple[str, dict]]:
         if key not in seen:
             seen.add(key)
             out.append((n, a))
+    # 再补 `<tool calls><tool call .../></tool calls>` 自闭合变体
+    for n, a in _extract_tool_calls_blocks(text):
+        key = (n, a.get("path"))
+        if key not in seen:
+            seen.add(key)
+            out.append((n, a))
     return out
 
 
@@ -960,6 +1012,8 @@ def _strip_pseudo_tool_blocks(text: str) -> str:
     clean = _pseudo_block_re().sub("", text)
     clean = _re.sub(_TOOL_USE_BLOCK_RE, "", clean, flags=_re.S)
     clean = _re.sub(_INVOKE_BLOCK_RE, "", clean, flags=_re.S)
+    clean = _re.sub(_TOOL_CALLS_BLOCK_RE, "", clean, flags=_re.S | _re.I)
+    clean = _re.sub(_TOOL_CALL_SELF_RE, "", clean, flags=_re.S | _re.I)
     clean = _re.sub(r"\n{3,}", "\n\n", clean).strip()
     return clean
 
@@ -999,6 +1053,8 @@ def _execute_rescue_blocks(db, user, conv_id, agent_id, blocks: list[tuple[str, 
 
     try:
         for name, args in blocks[:40]:
+            if name not in ("write_skill_file", "delete_skill_file", "run_skill_script"):
+                continue
             if total_chars > 2_000_000:
                 break
             content = args.get("content")
@@ -1030,7 +1086,7 @@ def _pptx_failure_notice(plan_outcome) -> str:
     pages = _build_error_pages(plan_outcome)
     where = f"（主要卡在：{'、'.join(pages)}）" if pages else ""
     return (
-        f"这一版**没有成功导出成品**{where}——自动修复两轮后仍有版式细节没通过校验"
+        f"这一版**没有成功导出成品**{where}——自动修复三轮后仍有版式细节没通过校验"
         "（常见是文字越界、分组滤镜、特殊字体样式）。源文件都保留了，没有丢。\n\n"
         "接下来可以这样选：\n"
         "1. 回复「**继续修复**」：我再自动修一轮并重新导出；\n"
@@ -1815,7 +1871,7 @@ def conversation_chat(
                         w in _msg_stripped.lower() for w in _ACTION_WORDS
                     )
                     if skill_mode and (_is_page_edit or _wants_deliverable or _confirm_action) \
-                            and not _mutated(out) and _attempts < 2:
+                            and not _mutated(out) and _attempts < 3:
                         logger.info("skill task planned no mutations → forced retry (edit=%s deliverable=%s confirm=%s conv=%s)",
                                     _is_page_edit, _wants_deliverable, _confirm_action, conv.id)
                         _attempts += 1
@@ -1838,7 +1894,7 @@ def conversation_chat(
                     # 不让用户反复说「出片」而系统一直不给结果。
                     if (
                         skill_mode
-                        and _attempts < 2
+                        and _attempts < 3
                         and not _has_pptx_result(out)
                         and any(st.tool == "run_skill_script" for st in out.steps)
                     ):
@@ -1953,7 +2009,7 @@ def conversation_chat(
                 prompt = (
                     prompt
                     + "\n\n【输出铁律】绝对不要在正文里书写任何工具调用语法或原始文件载荷——包括但不限于 "
-                    "<write_skill_file>、</write_skill_file>、<run_skill_script>、read_skill_file(...)、"
+                    "<write_skill_file>、</write_skill_file>、<run_skill_script>、<tool calls>、read_skill_file(...)、"
                     "```svg 代码块、path:/content:/skill: 这类字段。执行动作由系统工具完成；"
                     "你只需用**自然语言**告诉用户「做了什么、结果如何、下一步」：比如「已生成 22 页成品，"
                     "点下方下载」。若还需要执行动作，直接发起工具调用，不要用文字模拟。"

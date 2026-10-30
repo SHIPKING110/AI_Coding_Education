@@ -380,7 +380,7 @@ XML_TOOL_BLOCK_NAMES = (
 )
 _XML_BLOCK_OPENERS = tuple(f"<{n}>" for n in XML_TOOL_BLOCK_NAMES) + tuple(
     f"<{n} " for n in XML_TOOL_BLOCK_NAMES
-) + ("<invoke ", "<invoke>")
+) + ("<invoke ", "<invoke>", "<tool calls>", "<tool calls ", "<tool call ")
 _XML_BLOCK_CLOSERS = tuple(f"</{n}>" for n in XML_TOOL_BLOCK_NAMES) + ("</invoke>",)
 
 
@@ -394,6 +394,7 @@ class XmlToolStreamFilter:
     def __init__(self) -> None:
         self._buf = ""
         self._in_block = False
+        self._closers = _XML_BLOCK_CLOSERS
 
     def feed(self, piece: str) -> str:
         self._buf += piece
@@ -411,16 +412,16 @@ class XmlToolStreamFilter:
         n = len(data)
         while i < n:
             if self._in_block:
-                idx, _ = _find_any(data, _XML_BLOCK_CLOSERS, i)
+                idx, _ = _find_any(data, self._closers, i)
                 if idx == -1:
                     if not final:
-                        keep = _tail_partial(data[i:], _XML_BLOCK_CLOSERS)
+                        keep = _tail_partial(data[i:], self._closers)
                         self._buf = data[n - len(keep):] if keep else ""
                     else:
                         self._buf = ""
                     return "".join(out)
                 self._in_block = False
-                i = idx + _matched_len(data, idx, _XML_BLOCK_CLOSERS)
+                i = idx + _matched_len(data, idx, self._closers)
                 continue
             idx, _needle = _find_any(data, _XML_BLOCK_OPENERS, i)
             if idx == -1:
@@ -434,6 +435,15 @@ class XmlToolStreamFilter:
                 return "".join(out)
             out.append(data[i:idx])
             self._in_block = True
+            opener = data[idx:idx + _matched_len(data, idx, _XML_BLOCK_OPENERS)].lower()
+            if opener.startswith("<tool calls"):
+                self._closers = ("</tool calls>",)
+            elif opener.startswith("<tool call "):
+                self._closers = ("/>", ">")
+            elif opener.startswith("<invoke"):
+                self._closers = ("</invoke>",)
+            else:
+                self._closers = _XML_BLOCK_CLOSERS
             i = idx + _matched_len(data, idx, _XML_BLOCK_OPENERS)
         self._buf = "" if final else self._buf
         return "".join(out)
