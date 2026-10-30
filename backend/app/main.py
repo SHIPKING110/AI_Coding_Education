@@ -66,6 +66,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     from app.core.schema_ensure import ensure_business_schema
 
     ensure_business_schema(engine)
+    # Skill 适配脚本版本对齐（管理员/教师同一套自愈 + 出片质量，避免物化副本旧版本漂移）
+    try:
+        import asyncio as _aio
+
+        from app.services import skill_bundle as _bundle
+
+        await _aio.to_thread(_bundle.sync_ppt_adapter)
+    except Exception:
+        pass
     task = asyncio.create_task(_order_expiry_sweeper())
     sync_task = asyncio.create_task(_knowledge_sync_sweeper())
     try:

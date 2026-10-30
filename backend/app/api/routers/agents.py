@@ -341,6 +341,61 @@ _IMG_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 _DOC_SUFFIXES = {".txt", ".md", ".markdown", ".pdf", ".docx"}
 
 
+# 视觉模型（OpenAI 兼容 image_url）支持的格式；SVG/BMP 需先转换，这里直接跳过
+_VISION_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+def _image_data_urls(attachments: list[dict], *, max_images: int = 4, max_total_bytes: int = 30 * 1024 * 1024) -> list[str]:
+    """把随消息上传的图片读成 data URL，供多模态模型直读（如 deepseek-flash 图像理解）。
+
+    只收视觉模型支持的格式（PNG/JPEG/GIF/WebP），总原始体积封顶 30MB（base64 后约 40MB，
+    低于 DeepSeek 48MiB 请求体上限）。读不到/超限的图片跳过，不影响文字对话。
+    """
+    if not attachments:
+        return []
+    import base64
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    upload_root = Path(settings.UPLOAD_DIR).resolve()
+    out: list[str] = []
+    total = 0
+    for a in attachments:
+        if not isinstance(a, dict) or str(a.get("kind")) == "doc":
+            continue
+        url = str(a.get("url") or "")
+        if not url.startswith("/uploads/"):
+            continue
+        disk = upload_root / url[len("/uploads/"):]
+        mime = _VISION_MIME.get(disk.suffix.lower())
+        if not mime:
+            continue
+        try:
+            data = disk.read_bytes()
+        except OSError:
+            continue
+        if not data or total + len(data) > max_total_bytes:
+            continue
+        total += len(data)
+        out.append(f"data:{mime};base64," + base64.b64encode(data).decode("ascii"))
+        if len(out) >= max_images:
+            break
+    return out
+
+
+def _looks_like_vision_rejection(exc: BaseException) -> bool:
+    """判断异常是否「模型/网关不接受图片输入」，用于自动降级为纯文本重试。"""
+    text = f"{exc}".lower()
+    return any(k in text for k in ("image", "vision", "multimodal", "image_url", "content type", "unsupported"))
+
+
 def _attachment_block(attachments: list[dict]) -> str:
     """随消息上传的附件 → 注入对话上下文。
 
@@ -387,10 +442,11 @@ def _attachment_block(attachments: list[dict]) -> str:
     )
     if img_count:
         block += (
-            f"\n【重要·须回应附件】用户本次上传了 {img_count} 张图片。"
-            "请在回答开头用一句话明确告知「已收到这 N 张图片」并复述图片文件名，"
-            "让用户确知附件已被接收；若当前模型无法直接识别图像内容，要如实说明「无法查看图片细节，"
-            "请补充文字描述或用图片文件名指代」，不要假装看不见、也不要编造图片内容。"
+            f"\n【重要·须回应附件】用户本次上传了 {img_count} 张图片，图片已以多模态方式随本轮消息直接附给模型。"
+            "若你能看到图片内容，请直接基于图片作答（描述画面、识别文字、分析图表等），"
+            "不要说自己不具备查看图片的能力，也不要编造可见范围之外的内容；"
+            "只有在你确实收不到图片时，才如实说明并请用户补充文字描述。"
+            "回答开头用一句话确认「已收到这 N 张图片」并复述文件名。"
         )
     if image_hints:
         block += (
@@ -438,46 +494,26 @@ def _existing_pptx_block(db, user) -> str:
 
 
 def _svg_page_title(content: str) -> str:
-    """从 SVG 源码提炼页面标题：取字号最大的 <text> 文本。
+    """从 SVG 源码提炼页面标题（实现在 agent_tools.svg_page_title，供工具层/大纲共用）。"""
+    return agent_tools.svg_page_title(content)
 
-    模型排版约定「标题字号最大」，比文件名 slug（cover/pain/solution）可读得多；
-    工作区大纲标题直接用真实页标题，不再显示英文文件名。
-    """
+
+def _page_num_key(name: str):
+    """页文件名自然排序键（01_x.svg < 02_y.svg < 10_z.svg）。"""
     import re as _re
 
-    try:
-        txt = str(content or "")
-        best: tuple[str, float] = ("", -1.0)
-        for m in _re.finditer(r"<text\b([^>]*)>(.*?)</text>", txt, _re.S):
-            attrs, inner = m.group(1), m.group(2)
-            fs = _re.search(r"""font-size\s*=\s*["']([0-9.]+)""", attrs)
-            try:
-                size = float(fs.group(1)) if fs else 0.0
-            except ValueError:
-                size = 0.0
-            label = _re.sub(r"<[^>]+>", "", inner)
-            label = (label.replace("&amp;", "&").replace("&lt;", "<")
-                     .replace("&gt;", ">").replace("&quot;", '"').strip())
-            if label and size > best[1]:
-                best = (label, size)
-        return best[0][:40]
-    except Exception:
-        return ""
+    m = _re.match(r"^(\d+)", str(name))
+    return int(m.group(1)) if m else 10 ** 9
 
 
-def _conversation_ppt_block(db, user, conv_id) -> str:
-    """列出「本会话」已生成的 PPT 项目与成品，作为二次编辑的基线注入。
-
-    为什么需要：用户说「调整一下」时，模型不知道上一版在哪——只能另起项目重做，
-    造成「后续调整不能建立在第一版基础上」。这里按会话隔离目录（conversations/conv_x/）
-    精确列出本会话自己的项目、页数与最新成品，模型据此就地改页而不是重造。
-    """
+def _conv_ppt_data(db, user, conv_id) -> list[dict]:
+    """本会话（会话隔离目录）里各 Skill 的 PPT 项目数据：项目、页清单（文件名+真实标题）、成品。"""
+    data: list[dict] = []
     try:
         from app.crud import agent_ext as _ext
         from app.services import skill_bundle as _bundle
 
         prefix = "conversations/conv_" + str(conv_id).replace("-", "")[:12] + "/"
-        lines: list[str] = []
         for s in _ext.list_skills(db, owner_id=user.id):
             if not s.enabled:
                 continue
@@ -489,29 +525,88 @@ def _conversation_ppt_block(db, user, conv_id) -> str:
                 svg_dir = proj / "svg_output"
                 if not (proj.is_dir() and svg_dir.is_dir()):
                     continue
-                n_pages = len(list(svg_dir.glob("*.svg")))
-                if n_pages == 0:
+                files = sorted(svg_dir.glob("*.svg"),
+                               key=lambda p: (_page_num_key(p.name), p.name.lower()))
+                if not files:
                     continue
                 pptx = sorted(proj.rglob("*.pptx"), key=lambda p: p.stat().st_mtime)
-                latest = pptx[-1] if pptx else None
-                rel = "projects/" + proj.name  # 模型可见路径（运行时自动会话改写）
-                seg = f"- 项目 `{rel}`（{n_pages} 页）"
-                if latest is not None:
-                    seg += f"，最新成品：{str(latest.relative_to(desk)).replace(chr(92), '/')}"
-                lines.append(f"- Skill「{s.name}」{seg}")
-            if len(lines) >= 6:
+                pages: list[tuple[str, str]] = []
+                for fp in files:
+                    try:
+                        t = agent_tools.svg_page_title(fp.read_text(encoding="utf-8", errors="ignore"))
+                    except OSError:
+                        t = ""
+                    pages.append((fp.name, t))
+                data.append({
+                    "skill": s.name,
+                    "rel": "projects/" + proj.name,
+                    "n_pages": len(pages),
+                    "latest": str(pptx[-1].relative_to(desk)).replace("\\", "/") if pptx else "",
+                    "pages": pages,
+                })
+            if len(data) >= 6:
                 break
-        if not lines:
-            return ""
-        return (
-            "【本会话已生成的 PPT（二次编辑基线）】\n" + "\n".join(lines[:6])
-            + "\n若用户要求「在这基础上调整」（改字/换配色/加删页/调顺序），必须直接改上面"
-            "**本会话该项目**的 svg_output（先 list_skill_files 确认页文件，用 write_skill_file 覆盖改动的页，"
-            "未改页保持不动，处理后重新 build），禁止另起新项目或从头重写整份。"
-            "\n若用户明确说「重新做/换主题/新的一套」，才新建项目。"
-        )
     except Exception:
+        return []
+    return data
+
+
+def _render_conv_ppt_block(data: list[dict]) -> str:
+    if not data:
         return ""
+    lines: list[str] = []
+    for d in data[:6]:
+        seg = f"- Skill「{d['skill']}」- 项目 `{d['rel']}`（{d['n_pages']} 页）"
+        if d["latest"]:
+            seg += f"，最新成品：{d['latest']}"
+        # 当前页清单（文件名 + 真实标题）：二次编辑时模型能精确指名要改的页，
+        # 不必重造整份、也不会把已定稿的页改差（多轮质量衰减的关键）。
+        bits = [f"{n}「{t}」" if t else n for n, t in d["pages"][:30]]
+        if d["n_pages"] > 30:
+            bits.append(f"…另有 {d['n_pages'] - 30} 页")
+        if bits:
+            seg += "\n  当前页：" + "；".join(bits)
+        lines.append(seg)
+    return (
+        "【本会话已生成的 PPT（二次编辑基线）】\n" + "\n".join(lines)
+        + "\n若用户要求「在这基础上调整」（改字/换配色/加删页/调顺序），必须直接改上面"
+        "**本会话该项目**的 svg_output（先用 write_skill_file 覆盖改动的页、删页就删对应 svg 文件，"
+        "未改页保持不动，处理后重新 build），禁止另起新项目或从头重写整份。"
+        "\n若用户明确说「重新做/换主题/新的一套」，才新建项目。"
+    )
+
+
+def _conversation_ppt_block(db, user, conv_id) -> str:
+    """列出「本会话」已生成的 PPT 项目与成品，作为二次编辑的基线注入。"""
+    return _render_conv_ppt_block(_conv_ppt_data(db, user, conv_id))
+
+
+def _page_diff_note(prev_titles: list[str], new_titles: list[str]) -> str:
+    """对比改动前后页标题，生成「改动计划（已执行）」回执（无变化返回空）。
+
+    - 新增：定位第一个新增页在新序中的下标，报「第 N 页后插入」；
+    - 删除：列出被移除的页标题；
+    - 页数变化始终给出。
+    """
+    if not prev_titles or not new_titles:
+        return ""
+    inserted = [t for t in new_titles if t not in prev_titles]
+    removed = [t for t in prev_titles if t not in new_titles]
+    if not inserted and not removed:
+        return ""
+    bits: list[str] = []
+    if inserted:
+        try:
+            pos = new_titles.index(inserted[0])
+        except ValueError:
+            pos = 0
+        bits.append(f"新增 {len(inserted)} 页（第 {pos} 页后插入：{'、'.join(inserted)}）")
+    if removed:
+        bits.append(f"删除 {len(removed)} 页（{'、'.join(removed)}）")
+    return (
+        "改动计划（已执行）：" + "；".join(bits)
+        + f"。页数 {len(prev_titles)} → {len(new_titles)}。"
+    )
 
 
 def _derive_spec_from_tools(plan_outcome) -> dict:
@@ -529,6 +624,7 @@ def _derive_spec_from_tools(plan_outcome) -> dict:
     #    同时记录**整份** svg 清单（含本次未改动的旧页）——调整后大纲要反映最终成品全部页。
     svg_url_by_name: dict[str, str] = {}
     built_svg_names: list[str] = []
+    built_info_by_name: dict[str, dict] = {}
 
     def _sort_names(names: list[str]) -> list[str]:
         def _k(n: str):
@@ -540,6 +636,7 @@ def _derive_spec_from_tools(plan_outcome) -> dict:
         if s.tool != "run_skill_script" or not s.ok or not isinstance(s.result, dict):
             continue
         step_svg: list[str] = []
+        step_info: dict[str, dict] = {}
         for f in (s.result.get("生成文件") or []):
             if not isinstance(f, dict):
                 continue
@@ -552,8 +649,17 @@ def _derive_spec_from_tools(plan_outcome) -> dict:
         pages = s.result.get("页清单")
         if isinstance(pages, list):
             step_svg = [str(x) for x in pages if str(x).lower().endswith(".svg")]
+        infos = s.result.get("页信息")
+        if isinstance(infos, list):
+            for i in infos:
+                if isinstance(i, dict):
+                    step_info[str(i.get("名") or "")] = {
+                        "title": str(i.get("标题") or ""),
+                        "url": str(i.get("url") or ""),
+                    }
         if step_svg:
             built_svg_names = _sort_names(step_svg)  # 最后一步 build 的整份清单为准
+            built_info_by_name = step_info
 
     # 2) 本轮 write_skill_file 写过的页：记录源码与写入的包内路径
     #    标题取 SVG 内字号最大的文本（真实页标题），不再用文件名 slug。
@@ -581,18 +687,21 @@ def _derive_spec_from_tools(plan_outcome) -> dict:
 
     svg_pages: list[dict] = []
     if built_svg_names:
-        # 3) 以 build 的整份清单为准（按文件名排序即页序）：本次没改的旧页也在内，
-        #    标题优先用本轮写入的源码提取，否则用旧页文件名（去序号）。
+        # 3) 以 build 的整份清单为准（按文件名排序即页序）：本次没改的旧页也在内。
+        #    标题/预览 url 用工具回执的「页信息」（build 后从磁盘 svg 提取）→ 与成品逐页对齐；
+        #    回执缺失时才退回本轮写入内容、最后退回文件名。
         for base in built_svg_names:
             info = written.get(base) or {}
+            binfo = built_info_by_name.get(base) or {}
             stem = base.rsplit(".", 1)[0]
-            title = info.get("title") or _re.sub(r"^\d+[_\-\s]*", "", stem).strip() or stem
+            title = (binfo.get("title") or info.get("title")
+                     or _re.sub(r"^\d+[_\-\s]*", "", stem).strip() or stem)
             svg_pages.append({
                 "id": f"p{len(svg_pages) + 1}",
                 "title": title,
                 "kind": "content",
                 "file": info.get("path") or base,
-                "url": svg_url_by_name.get(base, ""),
+                "url": binfo.get("url") or info.get("url") or svg_url_by_name.get(base, ""),
             })
     else:
         # 还没出片：按本轮写入顺序还原
@@ -620,50 +729,323 @@ def _synthesize_ppt_summary(plan_outcome) -> tuple[str, bool]:
     """当模型正文过短/缺下载链接时，基于工具轨迹合成一段完整交付说明。
 
     返回 (markdown, has_pptx)。内容：页数 + 逐页标题 + pptx 下载链接。
+    **以 build 回执的整份页清单为准**（页数=成品页数，标题=磁盘 SVG 提炼的真实标题），
+    与工作区大纲、实际页逐一对齐；不再按标题去重（重复标题的页也曾被吞掉）。
     避免「空回复/输出不完整」——保证用户一定拿到「生成了什么、怎么下载」。
     """
-    pptx_name = ""
+    import re as _re
+
     pptx_url = ""
-    page_titles: list[str] = []
+    roster: list[dict] = []  # build 成品完整页清单（最后一步 build 为准）
+    written: list[dict] = []  # 本轮 write_skill_file 写过的页（尚未成片时的回退）
     for s in plan_outcome.steps:
         if s.tool == "run_skill_script" and s.ok and isinstance(s.result, dict):
             for f in (s.result.get("生成文件") or []):
-                if not isinstance(f, dict):
-                    continue
-                nm = str(f.get("名") or "")
-                if nm.lower().endswith(".pptx") and f.get("下载"):
-                    pptx_name, pptx_url = nm, str(f.get("下载"))
-                elif nm.lower().endswith(".svg"):
-                    t = nm.rsplit(".", 1)[0]
-                    t = __import__("re").sub(r"^\d+[_\-\s]*", "", t).strip() or t
-                    if t not in page_titles:
-                        page_titles.append(t)
+                if isinstance(f, dict) and str(f.get("名") or "").lower().endswith(".pptx") and f.get("下载"):
+                    pptx_url = str(f.get("下载"))
+            infos = s.result.get("页信息")
+            if isinstance(infos, list) and infos:
+                roster = [i for i in infos if isinstance(i, dict)]
+            elif isinstance(s.result.get("页清单"), list):
+                roster = [{"名": str(x), "标题": ""} for x in s.result["页清单"]]
+            else:
+                svg_files = [
+                    str(f.get("名"))
+                    for f in (s.result.get("生成文件") or [])
+                    if isinstance(f, dict) and str(f.get("名") or "").lower().endswith(".svg")
+                ]
+                if svg_files:
+                    roster = [{"名": nm, "标题": ""} for nm in svg_files]
         elif s.tool == "write_skill_file" and s.ok:
             args = s.args or {}
             path = str(args.get("path") or "")
             if path.lower().endswith(".svg"):
-                # 优先用 SVG 内真实页标题；提取不到再退回文件名
                 t = _svg_page_title(str(args.get("content") or ""))
-                if not t:
-                    t = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-                    t = __import__("re").sub(r"^\d+[_\-\s]*", "", t).strip() or t
-                if t not in page_titles:
-                    page_titles.append(t)
-    if not pptx_url and not page_titles:
+                written.append({"名": path.rsplit("/", 1)[-1], "标题": t})
+    if not pptx_url and not roster and not written:
         return "", False
+
+    def _clean(name: str) -> str:
+        stem = name.rsplit(".", 1)[0]
+        return _re.sub(r"^\d+[_\-\s]*", "", stem).strip() or stem
+
+    pages = roster or written
+    titles = [str(p.get("标题") or "").strip() or _clean(str(p.get("名") or "")) for p in pages]
     lines: list[str] = []
-    if page_titles:
-        lines.append(f"已生成 **{len(page_titles)} 页** 幻灯片：")
-        for i, t in enumerate(page_titles, 1):
-            lines.append(f"{i}. {t}")
+    if roster:
+        lines.append(f"已生成 **{len(titles)} 页** 幻灯片：")
+    elif titles:
+        lines.append(f"本轮已写入 **{len(titles)} 页**（构建未完成，质量检查未通过，修复后将自动重新出片）：")
+    for i, t in enumerate(titles, 1):
+        lines.append(f"{i}. {t}")
     if pptx_url:
         lines.append("")
         lines.append(f"📥 [下载 PPTX]({pptx_url})")
     return "\n".join(lines), bool(pptx_url)
 
 
+def _has_pptx_result(plan_outcome) -> bool:
+    """本轮是否成功拿到可下载的 .pptx 成品（以**最后一次** build 结果为准）。"""
+    last = None
+    for s in plan_outcome.steps:
+        if s.tool == "run_skill_script":
+            last = s
+    if last is None or not isinstance(last.result, dict):
+        return False
+    for f in (last.result.get("生成文件") or []):
+        if isinstance(f, dict) and str(f.get("名") or "").lower().endswith(".pptx") and f.get("下载"):
+            return True
+    return False
+
+
+def _build_error_lines(plan_outcome) -> list[str]:
+    """从失败 build 的 stdout/stderr 里提取关键报错行（给自动重试与兜底说明用）。"""
+    import re as _re
+
+    lines: list[str] = []
+    for s in plan_outcome.steps:
+        if s.tool != "run_skill_script" or not isinstance(s.result, dict):
+            continue
+        blob = str(s.result.get("stdout") or "") + "\n" + str(s.result.get("stderr") or "")
+        for raw in blob.splitlines():
+            ln = raw.strip()
+            if not ln:
+                continue
+            if ("[ERROR]" in ln or "errors:" in ln.lower()
+                    or _re.search(r"\.svg.*(exceed|cannot|requires|Unsupported|Invalid|missing)", ln, _re.I)):
+                lines.append(ln[:200])
+            if len(lines) >= 6:
+                return lines
+    return lines
+
+
+def _build_error_pages(plan_outcome) -> list[str]:
+    """失败页文件名（02_xxx.svg），用于给用户一个可操作的定位。"""
+    import re as _re
+
+    pages: list[str] = []
+    for s in plan_outcome.steps:
+        if s.tool != "run_skill_script" or not isinstance(s.result, dict):
+            continue
+        blob = str(s.result.get("stdout") or "") + "\n" + str(s.result.get("stderr") or "")
+        for m in _re.finditer(r"(\d{1,3}[\w\-]*\.svg)", blob):
+            n = m.group(1)
+            if n not in pages:
+                pages.append(n)
+    return pages[:3]
+
+
+_NARRATION_HINTS = (
+    "我先把", "我先读", "先读出来", "读出来", "再重跑", "上一轮", "我这就", "先确认",
+    "接下来我", "先看看", "先定位", "我重新", "我马上", "稍等一下", "我先按",
+)
+
+
+def _looks_like_narration(text: str) -> bool:
+    """是否「过程旁白」式回复（讲下一步要做什么，却没有交付）。"""
+    t = (text or "").strip()
+    if not t or len(t) > 260:
+        return False
+    return any(w in t for w in _NARRATION_HINTS)
+
+
+# 模型会把工具调用「当正文」吐出来（XML/伪 YAML 风格，如 <write_skill_file> skill: … path: … content: | …）。
+# 这些必须：① 从正文里剔除；② 若规划层实际没执行，按块内容**真实执行**，结果进执行链路。
+_PSEUDO_TOOL_NAMES = (
+    "write_skill_file", "read_skill_file", "list_skill_files", "delete_skill_file",
+    "run_skill_script", "web_search",
+)
+# `<tool_use><name>run_skill_script</name><arguments>{json}</arguments></tool_use>` 形式
+# （模型原生 tool-call 语法被当正文吐出来的另一变体，常见于 Claude 风格）
+_TOOL_USE_BLOCK_RE = r"<tool_use>\s*<name>\s*([\w./-]+)\s*</name>\s*<arguments>\s*([\s\S]*?)\s*</arguments>\s*</tool_use>"
+_INVOKE_BLOCK_RE = r"<invoke\s+name=[\"']([\w./-]+)[\"']\s*>\s*<[\s\S]*?</invoke>"
+_PSEUDO_BLOCK_RE = None
+
+
+def _pseudo_block_re():
+    global _PSEUDO_BLOCK_RE
+    import re as _re
+
+    if _PSEUDO_BLOCK_RE is None:
+        _PSEUDO_BLOCK_RE = _re.compile(
+            r"<(" + "|".join(_PSEUDO_TOOL_NAMES) + r")\b[^>]*>(.*?)</\1>",
+            _re.S | _re.I,
+        )
+    return _PSEUDO_BLOCK_RE
+
+
+def _extract_tool_use_blocks(text: str) -> list[tuple[str, dict]]:
+    """解析 `<tool_use><name>X</name><arguments>{json}</arguments></tool_use>` 变体。"""
+    import re as _re
+
+    out: list[tuple[str, dict]] = []
+    if not text:
+        return out
+    for m in _re.finditer(_TOOL_USE_BLOCK_RE, text, _re.S):
+        name = m.group(1).strip().lower()
+        raw = m.group(2).strip()
+        args: dict = {}
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    args = parsed
+            except (ValueError, TypeError):
+                args = {}
+        # 归一化：run_skill_script 的 script 字段统一成 path（与真实工具签名一致）
+        if name == "run_skill_script" and "script" in args and "path" not in args:
+            args["path"] = args.pop("script")
+        if name in _PSEUDO_TOOL_NAMES and (args.get("skill") or args.get("path")):
+            out.append((name, args))
+    return out
+
+
+def _extract_pseudo_tool_blocks(text: str) -> list[tuple[str, dict]]:
+    """从正文里提取伪工具调用块 → [(工具名, 参数)]（用于真实执行 + 正文剔除）。
+
+    支持两种常见变体：
+    1) `<write_skill_file> skill: … path: … content: | <svg…>`（YAML 风格）；
+    2) `<tool_use><name>…</name><arguments>{json}</arguments></tool_use>`（原生调用语法）。
+    """
+    import re as _re
+
+    out: list[tuple[str, dict]] = []
+    if not text:
+        return out
+    for m in _pseudo_block_re().finditer(text):
+        name = m.group(1).strip().lower()
+        body = m.group(2)
+
+        def _pick(key: str) -> str:
+            mm = _re.search(rf"^\s*{key}\s*:\s*(.+)$", body, _re.M)
+            if not mm:
+                return ""
+            return mm.group(1).strip().strip('"').strip("'")
+
+        skill = _pick("skill")
+        path = _pick("path") or _pick("script")
+        args: dict = {}
+        if skill:
+            args["skill"] = skill
+        if path:
+            args["path"] = path
+        if name == "write_skill_file":
+            cm = _re.search(r"^\s*content\s*:\s*\|?\s*\n([\s\S]*)$", body, _re.M)
+            if cm and cm.group(1).strip():
+                args["content"] = cm.group(1).rstrip()
+        raw_args = _pick("args")
+        if raw_args:
+            try:
+                args["args"] = json.loads(raw_args)
+            except (ValueError, TypeError):
+                args["args"] = [x.strip().strip('"').strip("'") for x in raw_args.strip("[]").split(",") if x.strip()]
+        if skill or path:
+            out.append((name, args))
+    # 归一化再补 tool_use JSON 变体（去重：同一 (name,path) 只留一个）
+    seen = {(n, a.get("path")) for n, a in out}
+    for n, a in _extract_tool_use_blocks(text):
+        key = (n, a.get("path"))
+        if key not in seen:
+            seen.add(key)
+            out.append((n, a))
+    return out
+
+
+def _strip_pseudo_tool_blocks(text: str) -> str:
+    """从正文剔除伪工具调用块（含其 YAML/SVG/JSON 载荷），保留前后正常文字。"""
+    import re as _re
+
+    if not text:
+        return text
+    clean = _pseudo_block_re().sub("", text)
+    clean = _re.sub(_TOOL_USE_BLOCK_RE, "", clean, flags=_re.S)
+    clean = _re.sub(_INVOKE_BLOCK_RE, "", clean, flags=_re.S)
+    clean = _re.sub(r"\n{3,}", "\n\n", clean).strip()
+    return clean
+
+
+def _execute_rescue_blocks(db, user, conv_id, agent_id, blocks: list[tuple[str, dict]], on_step=None):
+    """把正文里的伪工具调用**真实执行**（写页/跑构建），让执行链路与交付对齐。
+
+    on_step(step, seq, phase)：可选回调，让 rescue 执行也在前端实时可见
+    （否则用户在「整理结果」阶段仍看不到写页/出片进行到哪一步）。
+    """
+    from app.services.agent_planner import Step
+
+    steps: list = []
+    if not blocks:
+        return steps
+    try:
+        agent_tools.use_conversation(conv_id)
+    except Exception:
+        pass
+    try:
+        from app.services import agent_registry as _reg
+
+        agent_tools.use_allowed_skills(_reg.effective_skill_ids(db, user.id, agent_id))
+    except Exception:
+        try:
+            agent_tools.use_allowed_skills(None)
+        except Exception:
+            pass
+    total_chars = 0
+
+    def _fire(step, phase):
+        if on_step is not None:
+            try:
+                on_step(step, len(steps) + (1 if phase == "start" else 0), phase)
+            except Exception:
+                pass
+
+    try:
+        for name, args in blocks[:40]:
+            if total_chars > 2_000_000:
+                break
+            content = args.get("content")
+            if isinstance(content, str):
+                total_chars += len(content)
+            step = Step(tool=name, args=args, ok=True, result=None, error=None)
+            _fire(step, "start")
+            try:
+                payload = agent_tools.execute_tool(db, user, name, args)
+                ok = not (isinstance(payload, dict) and payload.get("错误"))
+                err = None if ok else str(payload.get("错误"))
+            except Exception as e:  # noqa: BLE001 —— 单条失败不影响后续
+                payload, ok, err = {"错误": str(e)}, False, str(e)
+            step.ok, step.result, step.error = ok, (payload if ok else None), err
+            steps.append(step)
+            _fire(step, "done")
+    finally:
+        # 恢复上下文，避免线程池复用把会话作用域泄漏到后续请求
+        try:
+            agent_tools.use_conversation(None)
+            agent_tools.use_allowed_skills(None)
+        except Exception:
+            pass
+    return steps
+
+
+def _pptx_failure_notice(plan_outcome) -> str:
+    """无成品时的用户可执行兜底说明（绝不输出内部过程旁白/空内容）。"""
+    pages = _build_error_pages(plan_outcome)
+    where = f"（主要卡在：{'、'.join(pages)}）" if pages else ""
+    return (
+        f"这一版**没有成功导出成品**{where}——自动修复两轮后仍有版式细节没通过校验"
+        "（常见是文字越界、分组滤镜、特殊字体样式）。源文件都保留了，没有丢。\n\n"
+        "接下来可以这样选：\n"
+        "1. 回复「**继续修复**」：我再自动修一轮并重新导出；\n"
+        "2. 告诉我可放宽的地方（例如「文字允许小一点」「这页内容精简一半」），我改后立即重导；\n"
+        "3. 只想先要一部分：回复「**先导出前 N 页**」，我删掉其余页再出片。\n\n"
+        "小提示：一次把页数和每页要点说清楚，能明显减少来回修改。"
+    )
+
+
 def _tool_trace(plan_outcome) -> list[dict]:
-    """规划层调用轨迹 → 可持久化/可展示的精简结构（整条裁剪，避免截断成半行）。"""
+    """规划层调用轨迹 → 可持久化/可展示的精简结构（整条裁剪，避免截断成半行）。
+
+    args 里的大文本（如 write_skill_file 的 SVG content）截断展示：trace 是给用户看的
+    执行摘要，不是文件备份；真实内容已在包内文件里。
+    """
     trace: list[dict] = []
     for i, s in enumerate(plan_outcome.steps):
         summary = agent_planner.compact_result(s.result, 900) if s.ok else ""
@@ -675,10 +1057,14 @@ def _tool_trace(plan_outcome) -> list[dict]:
                     {"名": f.get("名"), "下载": f.get("下载"), "字节": f.get("字节")}
                     for f in raw if isinstance(f, dict) and f.get("下载")
                 ]
+        args = s.args or {}
+        if isinstance(args, dict):
+            args = {k: (v[:600] + "…(已截断)" if isinstance(v, str) and len(v) > 600 else v)
+                    for k, v in args.items()}
         trace.append({
             "seq": i + 1,
             "tool": s.tool,
-            "args": s.args,
+            "args": args,
             "ok": s.ok,
             "summary": summary,
             "files": files,
@@ -1292,7 +1678,7 @@ def conversation_chat(
                 if m.role != "assistant" or not isinstance(m.citations, dict):
                     continue
                 _tools = [t.get("tool") for t in (m.citations.get("tools") or []) if isinstance(t, dict)]
-                if any(t in ("write_skill_file", "run_skill_script") for t in _tools):
+                if any(t in ("write_skill_file", "run_skill_script", "delete_skill_file") for t in _tools):
                     had_tools = True
                     break
             # 短确认句，或明显是在延续既有 PPT 任务的指令，都进执行链路
@@ -1301,15 +1687,27 @@ def conversation_chat(
                 skill_mode = True
         except Exception:
             pass
+    # 多轮续作兜底：本会话已生成过 PPT 项目 → 一律走 Skill 链路（带基线 + 长预算）。
+    # 否则「补充讲师/日期/条款」这类较长内容更新会被当成普通聊天，丢掉基线后越改越差。
+    conv_ppt_block = ""
+    prev_ppt_pages: list[str] = []
+    prev_ppt_count = 0
+    if has_skill_tools:
+        try:
+            _ppt_data = _conv_ppt_data(db, user, conv.id)
+            conv_ppt_block = _render_conv_ppt_block(_ppt_data)
+            if _ppt_data:
+                prev_ppt_pages = [t for _, t in _ppt_data[0]["pages"]]
+                prev_ppt_count = _ppt_data[0]["n_pages"]
+        except Exception:
+            conv_ppt_block = ""
+        if conv_ppt_block and not skill_mode:
+            skill_mode = True
     # PPT 二次编辑：把「本会话已生成的 PPT（基线）+ 包内已有 pptx」注入上下文，
     # 让模型能「就地改上一版」而不是重造；同时明确区分「接着调整」与「重新做」。
     if skill_mode and has_skill_tools:
-        try:
-            conv_block = _conversation_ppt_block(db, user, conv.id)
-            if conv_block:
-                mem_block = (mem_block + "\n\n" + conv_block).strip() if mem_block else conv_block
-        except Exception:
-            pass
+        if conv_ppt_block:
+            mem_block = (mem_block + "\n\n" + conv_ppt_block).strip() if mem_block else conv_ppt_block
     if skill_mode and agent_tools.looks_like_ppt_edit(_msg_stripped):
         try:
             pptx_block = _existing_pptx_block(db, user)
@@ -1319,6 +1717,35 @@ def conversation_chat(
             pass
     plan_box: dict = {}
     plan_thread = None
+    # 实时执行事件队列：规划线程每完成/开始一步就 push 到这里，event_stream 边等边推给前端
+    import queue as _live_queue_mod
+    live_queue: "_live_queue_mod.Queue" = _live_queue_mod.Queue()
+    # 重试会让规划器内部的 seq 从 1 重新计数，这里做单调映射，避免前端按 seq 去重时互相覆盖
+    _seq_state = {"offset": 0, "max": 0}
+
+    def _emit_step(step, seq, phase):
+        try:
+            if phase == "start" and seq <= _seq_state["max"]:
+                _seq_state["offset"] = _seq_state["max"]  # 进入新一轮（重试）
+            gseq = _seq_state["offset"] + seq
+            if phase == "done":
+                _seq_state["max"] = max(_seq_state["max"], gseq)
+            live_queue.put_nowait({"phase": phase, "seq": gseq, "step": step})
+        except Exception:
+            pass
+    # 页级编辑意图（插页/删页/改页/调序）：用于「零写入自动重试」与「改动计划回执」
+    _PAGE_EDIT_HINTS = (
+        "插入", "插到", "加页", "加一页", "加两页", "加三页", "新增", "新增页",
+        "删除", "删掉", "去掉这页", "修改第", "改第", "换掉第", "调顺序", "移到第",
+    )
+    _is_page_edit = bool(_msg_stripped) and (
+        agent_tools.looks_like_ppt_edit(_msg_stripped)
+        or any(w in _msg_stripped for w in _PAGE_EDIT_HINTS)
+    )
+    # 本轮是否在要「产出/修改成品」（用于无成品时的兜底话术判断）
+    _PRODUCE_HINTS = ("出片", "生成PPT", "生成一份", "生成一套", "做一份", "做一套", "导出", "PPT", "ppt",
+                       "幻灯片", "加页", "插页", "删页", "修复", "重试", "再来一版", "继续做")
+    _wants_deliverable = bool(_msg_stripped) and any(w in _msg_stripped for w in _PRODUCE_HINTS)
     if (conv.agent_id == "assistant" or has_skill_tools) and message.strip():
         import threading as _plan_th
 
@@ -1336,6 +1763,21 @@ def conversation_chat(
                 if suser is None:
                     plan_box["outcome"] = agent_planner.PlanOutcome()
                     return
+
+                def _plan_once(msg_text: str, hist_items: list[tuple[str, str]]):
+                    if skill_mode:
+                        # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
+                        return agent_planner.plan_and_run(
+                            sdb, suser, msg_text, conversation_id=conv.id, agent_id=conv.agent_id,
+                            max_rounds=16, max_calls=30, time_budget_ms=600000,
+                            history=hist_items, context_block=conv_ppt_block or None,
+                            on_step=_emit_step,
+                        )
+                    return agent_planner.plan_and_run(
+                        sdb, suser, msg_text, conversation_id=conv.id, agent_id=conv.agent_id,
+                        history=hist_items, context_block=conv_ppt_block or None,
+                        on_step=_emit_step,
+                    )
                 # 线程不继承 contextvar：在此重新压入教师个人模型配置，否则规划模型拿不到 Key
                 with _llm_ctx.use_llm(resolved):
                     # 最近几轮对话：多轮 Skill 续作（「继续用深靛」「加页」）必须有上文，
@@ -1345,20 +1787,72 @@ def conversation_chat(
                         for m in agent_crud.recent_messages(sdb, conversation_id=conv.id, limit=4):
                             if m.role == "user" and (m.content or "").strip() == _msg:
                                 continue  # 当前这条消息单独作为本轮输入，避免重复
-                            hist.append((m.role, m.content))
+                            content = (m.content or "").strip()
+                            if m.role == "assistant":
+                                # 历史里的伪工具调用代码块/乱码会污染后续轮次（越改越差）：
+                                # 先净化再喂给规划器。
+                                content = llm.strip_toolcall_markup(content)[:800]
+                            if content:
+                                hist.append((m.role, content))
                     except Exception:
                         hist = []
-                    if skill_mode:
-                        # Skill 干活（读文件/跑脚本/取产物）：多轮 + 长预算，沙箱执行慢也不掐断
-                        out = agent_planner.plan_and_run(
-                            sdb, suser, _msg, conversation_id=conv.id, agent_id=conv.agent_id,
-                            max_rounds=16, max_calls=30, time_budget_ms=600000,
-                            history=hist,
+                    out = _plan_once(_msg, hist)
+                    _attempts = 0
+
+                    def _mutated(o) -> bool:
+                        return any(
+                            st.tool in ("write_skill_file", "delete_skill_file", "run_skill_script")
+                            for st in o.steps
                         )
-                    else:
-                        out = agent_planner.plan_and_run(
-                            sdb, suser, _msg, conversation_id=conv.id, agent_id=conv.agent_id,
-                            history=hist,
+
+                    # ① 规划零写入（只 list/read 就停，正文只剩「开始执行…」的旁白）：自动重试，附带执行约束。
+                    # 触发条件：Skill 任务 + 明确想推进（页级编辑 / 成品诉求 / **带动作词的短确认**）+ 零写入。
+                    # 注意：不能把「好的/谢谢/收到/嗯」这类寒暄当确认——否则会给一句客套话强行重造整份 PPT。
+                    # 只有短句里出现「按这个/开始/继续/执行/出片…」才视为「让我动手」。
+                    _ACTION_WORDS = ("按这个", "按你的", "就按", "开始", "继续", "执行", "来吧", "开做",
+                                     "动手", "出片", "可以", "确定", "好的开始", "go", "ok开始")
+                    _confirm_action = bool(_msg_stripped) and len(_msg_stripped) <= 16 and any(
+                        w in _msg_stripped.lower() for w in _ACTION_WORDS
+                    )
+                    if skill_mode and (_is_page_edit or _wants_deliverable or _confirm_action) \
+                            and not _mutated(out) and _attempts < 2:
+                        logger.info("skill task planned no mutations → forced retry (edit=%s deliverable=%s confirm=%s conv=%s)",
+                                    _is_page_edit, _wants_deliverable, _confirm_action, conv.id)
+                        _attempts += 1
+                        _exec_hint = (
+                            "① 先用 2-4 行给出页级改动计划（插入/删除/修改哪些页、每页标题与要点）；"
+                            "② 实际用 write_skill_file 写入新增或修改的页（插入页用「插入位置序号+描述」"
+                            "命名，如 21x_xinsai.svg），删页用 delete_skill_file 删除对应 svg 文件；"
+                            "③ 用 run_skill_script 跑 build 出片。禁止只读文件、禁止只回文字。"
+                            if _is_page_edit else
+                            "① 直接用 write_skill_file 逐页写入 SVG（沿用本会话已定主题与项目名）；"
+                            "② 写完后必须用 run_skill_script 跑 build 出片并拿到 pptx 下载链接。"
+                            "禁止只读文件、禁止只回一句计划或旁白、禁止只说不写。"
+                        )
+                        out = _plan_once(
+                            _msg + "\n\n【执行约束·本轮必须遵守】上一轮只读/未执行，等于没做。本轮必须真正动手："
+                                   + _exec_hint,
+                            hist,
+                        )
+                    # ② 本轮跑过 build 但没拿到 pptx（门禁未过）：带上具体报错自动再修一轮，
+                    # 不让用户反复说「出片」而系统一直不给结果。
+                    if (
+                        skill_mode
+                        and _attempts < 2
+                        and not _has_pptx_result(out)
+                        and any(st.tool == "run_skill_script" for st in out.steps)
+                    ):
+                        err_lines = _build_error_lines(out)
+                        digest = ("\n".join(err_lines))[:800] or "（未捕获到具体报错行）"
+                        logger.info("build failed without pptx → auto repair retry (conv=%s)", conv.id)
+                        _attempts += 1
+                        out = _plan_once(
+                            _msg + "\n\n【修复约束·自动重试】上一轮 build 未通过质量门禁，具体报错：\n"
+                                   + digest
+                                   + "\n请按报错定位到具体页，只修这些页（write_skill_file 覆盖）后重新 run_skill_script build。"
+                                   "本轮结束时必须要么给出 pptx 下载链接，要么用通俗中文说明：做到哪一步、卡在哪些页/哪类问题、"
+                                   "建议用户怎么调整（不要输出内部过程旁白、不要只说下一步计划）。",
+                            hist,
                         )
                     plan_box["outcome"] = out
                     logger.info("plan done agent=%s skill_mode=%s steps=%s",
@@ -1375,6 +1869,7 @@ def conversation_chat(
     # （_run_stream 与 done 帧都闭包读取它们）
     tool_names: list = []
     system, prompt = "", ""
+    plan_note_holder: list[str] = [""]
 
     def _frame(obj: dict) -> str:
         return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
@@ -1383,21 +1878,63 @@ def conversation_chat(
         # 最外层兜底：任何未预期异常都必须以 error 帧结束，绝不能让前端无限卡"接收中"
         nonlocal plan_outcome, mem_block, tool_names, system, prompt
         try:
-            # 等后台规划（心跳报进度，不再是发流前的黑盒等待）；完工立刻把执行链路推给前端
+            # 等后台规划：边等边把每一步执行结果实时推给前端（tool_step 帧），
+            # 不再是「整轮结束才一次性看到全链路」的黑盒等待；空闲约 5s 仍发一次心跳。
             if plan_thread is not None:
                 import time as _pt
 
                 t_plan = _pt.monotonic()
+                t_beat = t_plan
                 while plan_thread.is_alive():
-                    plan_thread.join(timeout=5)
-                    if plan_thread.is_alive():
-                        el = int(_pt.monotonic() - t_plan)
+                    try:
+                        ev = live_queue.get(timeout=0.2)
+                    except Exception:
+                        ev = None
+                    if ev is not None:
+                        step = ev.get("step")
+                        if step is not None:
+                            yield _frame({"tool_step": {
+                                "phase": ev.get("phase"), "seq": ev.get("seq"),
+                                "tool": step.tool, "args": step.args, "ok": step.ok,
+                                "summary": (agent_planner.compact_result(step.result, 700)
+                                            if step.ok else (step.error or "执行失败")),
+                            }})
+                    now = _pt.monotonic()
+                    if plan_thread.is_alive() and now - t_beat >= 5:
+                        t_beat = now
+                        el = int(now - t_plan)
                         doing = "正在执行 Skill（读文件/跑脚本/取产物）" if skill_mode else "正在查询业务数据"
                         yield _frame({"phase": {"key": "plan", "label": f"{doing}（已用 {el} 秒）"}})
+                    if plan_thread.is_alive():
+                        plan_thread.join(timeout=0.2)
+                # 规划结束后把队列里残余的事件全部推完
+                while True:
+                    try:
+                        ev = live_queue.get_nowait()
+                    except Exception:
+                        break
+                    step = ev.get("step")
+                    if step is not None:
+                        yield _frame({"tool_step": {
+                            "phase": ev.get("phase"), "seq": ev.get("seq"),
+                            "tool": step.tool, "args": step.args, "ok": step.ok,
+                            "summary": (agent_planner.compact_result(step.result, 700)
+                                        if step.ok else (step.error or "执行失败")),
+                        }})
                 got = plan_box.get("outcome")
                 if isinstance(got, agent_planner.PlanOutcome):
                     plan_outcome = got
             tool_names = plan_outcome.tools
+            # 页级改动回执：确定性对比「改动前页清单 vs 本轮成品页清单」，
+            # 让正文开头一定有计划（新增/删除了哪些页、插在第几页后、页数变化），
+            # 不依赖模型自觉输出，也避免口径与实际成品不一致。
+            if skill_mode and _is_page_edit and plan_outcome.steps:
+                try:
+                    derived0 = _derive_spec_from_tools(plan_outcome)
+                    new_titles = [str(o.get("title") or "") for o in (derived0.get("outline") or [])]
+                    plan_note_holder[0] = _page_diff_note(prev_ppt_pages, new_titles)
+                except Exception:
+                    plan_note_holder[0] = ""
             if plan_outcome.block:
                 mem_block = (mem_block + "\n\n" + plan_outcome.block).strip() if mem_block else plan_outcome.block
             system, prompt = agent_chat.build_unified_prompt(
@@ -1409,6 +1946,18 @@ def conversation_chat(
                 memory_block=mem_block,
                 material=material,
             )
+            if skill_mode:
+                # 正文禁止出现工具调用语法（如 <write_skill_file> / run_skill_script(...)）：
+                # 它是「执行动作」不是「聊天内容」，只能走工具调用；写进正文会被系统剔除并改为真实执行，
+                # 用户不该看到原始 XML/SVG 载荷。这里从源头约束 + 下游兜底双保险。
+                prompt = (
+                    prompt
+                    + "\n\n【输出铁律】绝对不要在正文里书写任何工具调用语法或原始文件载荷——包括但不限于 "
+                    "<write_skill_file>、</write_skill_file>、<run_skill_script>、read_skill_file(...)、"
+                    "```svg 代码块、path:/content:/skill: 这类字段。执行动作由系统工具完成；"
+                    "你只需用**自然语言**告诉用户「做了什么、结果如何、下一步」：比如「已生成 22 页成品，"
+                    "点下方下载」。若还需要执行动作，直接发起工具调用，不要用文字模拟。"
+                )
             if message.strip():
                 att_meta = [
                     {k: a.get(k) for k in ("id", "name", "kind", "url", "size")}
@@ -1450,6 +1999,20 @@ def conversation_chat(
                 # 线程不继承 contextvar，在此重新压入教师个人配置
                 with _llm_ctx.use_llm(resolved):
                     try:
+                        # 上传的图片 → data URL 多模态直传（deepseek-flash 等视觉模型可直读）；
+                        # 模型/网关不接受图片输入时自动降级为纯文本，不让整轮对话失败。
+                        imgs = _image_data_urls(body.attachments or [])
+                        if imgs:
+                            try:
+                                for chunk in llm.stream_text(system, prompt, images=imgs):
+                                    box.put(("delta", chunk))
+                                box.put(("end", None))
+                                return
+                            except Exception as e:  # noqa: BLE001
+                                if not _looks_like_vision_rejection(e):
+                                    raise
+                                logger.warning("vision stream rejected, fallback text-only: %s", e)
+                                box.put(("delta", "（当前模型未接受图片输入，本轮按图片文件名与文字理解；如需识图请改用支持视觉的模型，如 deepseek-flash。）\n\n"))
                         for chunk in llm.stream_text(system, prompt):
                             box.put(("delta", chunk))
                         box.put(("end", None))
@@ -1460,6 +2023,9 @@ def conversation_chat(
             t0 = _time.monotonic()
             threading.Thread(target=_produce, daemon=True).start()
             started = False
+            # 显示层过滤：模型把 <write_skill_file>…</write_skill_file> 当正文吐出时，
+            # 实时流里也不给用户看原始块；full 仍保留原文用于「真实执行 + 轨迹」。
+            disp_filter = llm.XmlToolStreamFilter()
             while True:
                 try:
                     kind, payload = box.get(timeout=15)
@@ -1474,37 +2040,107 @@ def conversation_chat(
                 if kind == "error":
                     raise payload
                 if kind == "end":
+                    tail = disp_filter.flush()
+                    if tail:
+                        yield _frame({"delta": tail})
                     break
                 if not started:
                     started = True
                     yield _frame({"phase": {"key": "stream", "label": "接收并整理结果"}})
                 full += payload
-                yield _frame({"delta": payload})
+                shown = disp_filter.feed(payload)
+                if shown:
+                    yield _frame({"delta": shown})
         except Exception as e:  # noqa: BLE001
             yield _frame({"error": llm.friendly_llm_error(e)})
             return
         # 持久化助手回复 + 异步增量提炼长期记忆（不阻塞流式）
-        # 先净化：剔除模型偶发吐出的原生工具调用标记，避免乱码入库、污染后续历史
+        # 次序很重要：先从**原始**正文提取伪工具块（下面净化会把这些块连同载荷一起剔除），
+        # 再净化原生标记、再按需真实执行 rescue 块。
+        _pseudo_blocks = _extract_pseudo_tool_blocks(full)
         full = llm.strip_toolcall_markup(full)
+        if _pseudo_blocks:
+            # 防重复执行/覆盖：若规划器本轮**已经**写页/出片，正文里的同名伪块多半是模型「复述」，
+            # 再执行一次可能把已产出的好成品用不完整的一份覆盖掉，也可能白跑一次 build。
+            # 因此只在「规划器本轮零写入」时才 rescue 执行；无论如何都把这些块从正文剔除。
+            _already_mutated = any(
+                s.tool in ("write_skill_file", "delete_skill_file", "run_skill_script")
+                for s in plan_outcome.steps
+            )
+            if not _already_mutated:
+                try:
+                    _rescue_steps = _execute_rescue_blocks(
+                        db, user, conv.id, conv.agent_id, _pseudo_blocks, on_step=_emit_step
+                    )
+                    if _rescue_steps:
+                        plan_outcome.steps.extend(_rescue_steps)
+                        logger.info("pseudo-tool rescue executed %s blocks (conv=%s)",
+                                    len(_rescue_steps), conv.id)
+                except Exception:
+                    logger.exception("pseudo-tool rescue failed (conv=%s)", conv.id)
+                # rescue 是在主线程同步执行的：把队列里的事件即时转成 tool_step 帧，
+                # 让写页/出片也实时可见（否则用户在「整理结果」阶段看不到进展）。
+                while True:
+                    try:
+                        _ev = live_queue.get_nowait()
+                    except Exception:
+                        break
+                    _st = _ev.get("step")
+                    if _st is not None:
+                        yield _frame({"tool_step": {
+                            "phase": _ev.get("phase"), "seq": _ev.get("seq"),
+                            "tool": _st.tool, "args": _st.args, "ok": _st.ok,
+                            "summary": (agent_planner.compact_result(_st.result, 700)
+                                        if _st.ok else (_st.error or "执行失败")),
+                        }})
+            full = _strip_pseudo_tool_blocks(full)
+        # 页级改动回执置顶：模型正文若没讲清「加了/删了哪些页、插在哪」，这里兜底补上，
+        # 保证用户每轮都能看到与成品一致的改动计划。
+        if plan_note_holder[0] and "改动计划（已执行）" not in full:
+            full = (plan_note_holder[0] + ("\n\n" + full.strip() if full.strip() else ""))
         # 空/过短回复兜底：Skill 任务已真正产出文件，但模型正文过短或缺下载链接时，
         # 用工具轨迹合成一段完整交付说明（页数+逐页标题+下载链接），杜绝「空回复/输出不完整」。
+        # 另外：正文自述的页数与成品不符（如说 19 页实际 22 页）时，也追加校正清单，
+        # 保证「对话正文 = 工作区大纲 = 实际成品」三处页数/标题对齐。
         if plan_outcome.steps and any(
             s.tool in ("write_skill_file", "run_skill_script") for s in plan_outcome.steps
         ):
             _syn, _has_pptx = _synthesize_ppt_summary(plan_outcome)
             _txt = (full or "").strip()
             _need = (len(_txt) < 120) or (_has_pptx and ".pptx" not in _txt and "下载" not in _txt)
+            if _syn and not _need and _has_pptx:
+                import re as _re_n
+
+                _nm = _re_n.search(r"已生成 \*\*(\d+) 页\*\*", _syn)
+                if _nm:
+                    _n = _nm.group(1)
+                    if f"{_n} 页" not in _txt and f"{_n}页" not in _txt:
+                        _need = True
             if _need and _syn:
                 full = (full.rstrip() + "\n\n" + _syn) if _txt else _syn
+        # 无成品兜底：PPT/Skill 任务跑了但没导出 pptx 时，绝不把「内部过程旁白」丢给用户。
+        #  - 旁白式回复（「我先把报告读出来/再重跑」）或空内容 → 换成可执行的下一步说明；
+        #  - 已自愈两轮仍失败时，正文里也不允许出现空洞的成功口径（有「已生成/下载」但无成品 → 追加真实状态）。
+        if (skill_mode and _wants_deliverable) and not _has_pptx_result(plan_outcome):
+            _notice = _pptx_failure_notice(plan_outcome)
+            _txt2 = (full or "").strip()
+            if (_looks_like_narration(_txt2) or len(_txt2) < 80
+                    or "构建未完成" in _txt2 or "质量检查" in _txt2):
+                full = _notice
+            elif "下载" in _txt2 or "已生成" in _txt2:
+                full = _txt2 + "\n\n" + _notice
         options = agent_chat.extract_options(full)
         spec = agent_chat.extract_spec(full)
-        # Skill 路径兜底：模型用 run_skill_script 生成 PPT 时，通常不会在正文里输出 ```json 大纲，
-        # 导致工作区「大纲/成果」不同步、SVG 预览丢失。这里从工具执行结果里提炼大纲回填 spec，
-        # 让「大纲」与「成果」始终对齐（大纲里的每一页都能对应到已生成的幻灯片）。
-        if not spec.get("outline") and plan_outcome.steps:
+        # 大纲与成品对齐：只要本轮有 Skill 执行轨迹，**以工具产物为准**刷新大纲/成果。
+        # 模型正文里自拟的 json 大纲可能与实际页不一致（标题对不上），工具轨迹才是真实成品。
+        if plan_outcome.steps:
             derived = _derive_spec_from_tools(plan_outcome)
             if derived:
-                spec = {**derived, **spec}
+                if spec.get("outline"):
+                    # 保留模型给出的主题等元信息，但大纲/幻灯片以真实产物覆盖
+                    spec = {**spec, "outline": derived["outline"], "slides": derived["slides"]}
+                else:
+                    spec = derived
         final_stage = _infer_stage(conv.agent_id, stage, options, spec)
         # 工具调用轨迹：随 citations 持久化（免迁移），前端在气泡下方可收起展开
         tool_trace = _tool_trace(plan_outcome)

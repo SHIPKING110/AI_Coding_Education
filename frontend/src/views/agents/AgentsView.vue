@@ -110,7 +110,7 @@ function userPreview(text: string): string {
   return (text ?? '').slice(0, USER_MSG_COLLAPSE_CHARS).replace(/\n+$/, '') + ' …'
 }
 const streamBuf = ref('')
-const liveTools = ref<{ seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[]>([])
+const liveTools = ref<{ seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null; running?: boolean }[]>([])
 const streaming = ref(false)
 const phaseLabel = ref('')
 const input = ref('')
@@ -1080,6 +1080,21 @@ async function send(preset?: { text: string; stage?: string }) {
         },
         onToolsLive: (steps) => {
           liveTools.value = steps
+          scrollBottom()
+        },
+        onToolStep: (step) => {
+          const list = liveTools.value.slice()
+          const idx = list.findIndex((t) => t.seq === step.seq)
+          const running = step.phase === 'start'
+          const entry = {
+            seq: step.seq, tool: step.tool, args: step.args,
+            ok: running ? true : step.ok,
+            summary: step.summary, error: running ? null : (step.ok ? null : step.summary),
+            running,
+          }
+          if (idx >= 0) list[idx] = entry
+          else list.push(entry)
+          liveTools.value = list
           scrollBottom()
         },
       },
@@ -2452,9 +2467,10 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                   <div v-if="stripPartialJson(streamBuf)" v-html="renderMarkdown(stripPartialJson(streamBuf))" />
                   <div v-if="liveTools.length" class="live-tools">
                     <div class="live-tools-title">执行中（{{ liveTools.length }} 步，完成后可在回答下方展开全链路）</div>
-                    <div v-for="t in liveTools" :key="t.seq" class="tool-step" :class="{ fail: !t.ok }">
+                    <div v-for="t in liveTools" :key="t.seq" class="tool-step" :class="{ fail: !t.running && !t.ok, running: t.running }">
                       <div class="tool-step-head">
-                        <span class="tool-dot" :class="{ ok: t.ok, fail: !t.ok }">{{ t.ok ? '✓' : '✕' }}</span>
+                        <span v-if="t.running" class="tool-dot spinning">…</span>
+                        <span v-else class="tool-dot" :class="{ ok: t.ok, fail: !t.ok }">{{ t.ok ? '✓' : '✕' }}</span>
                         <b>{{ t.seq }}. {{ TOOL_LABELS[t.tool] ?? t.tool }}</b>
                         <span class="tool-args">{{ toolArgsText(t.args) }}</span>
                       </div>
@@ -3601,10 +3617,13 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .tool-meta { font-size: 11.5px; color: var(--ink-3); margin: 6px 0 0; }
 .tool-step { margin-top: 6px; font-size: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 7px 9px; }
 .tool-step.fail { border-color: #fca5a5; background: #fef2f2; }
+.tool-step.running { border-color: var(--brand-strong); box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-strong) 20%, transparent); }
 .tool-step-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .tool-dot { width: 16px; height: 16px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #fff; }
 .tool-dot.ok { background: #10b981; }
 .tool-dot.fail { background: #ef4444; }
+.tool-dot.spinning { background: #f59e0b; animation: tool-pulse 1.1s ease-in-out infinite; }
+@keyframes tool-pulse { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
 .tool-step-head b { color: var(--ink-1); }
 .tool-args { font-size: 11px; color: var(--ink-3); background: var(--bg-soft); padding: 1px 7px; border-radius: 4px; }
 .tool-summary { margin: 5px 0 0; color: var(--ink-2); line-height: 1.55; word-break: break-all; }

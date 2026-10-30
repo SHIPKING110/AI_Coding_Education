@@ -9,14 +9,15 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_roles
+from app.api.deps import require_teacher_permission
 from app.core.database import get_db
 from app.crud import search_config as crud
-from app.models.user import Role, User
+from app.models.user import User
 
 router = APIRouter(prefix="/search-configs", tags=["search-configs"])
 
-ADMIN_ROLES = (Role.ADMIN,)
+# 系统级单例：管理员，或已被授予「设置-模型配置」权限的教师（与管理员配置项对齐）
+SETTING_PERM = require_teacher_permission("settings_tab_model")
 
 
 class SearchIn(BaseModel):
@@ -45,7 +46,7 @@ def _out(row) -> dict:
 @router.get("")
 def get_search_config(
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*ADMIN_ROLES)),
+    _: User = Depends(SETTING_PERM),
 ) -> dict:
     row = crud.get_system_search(db)
     return {"item": _out(row) if row else None}
@@ -55,7 +56,7 @@ def get_search_config(
 def set_search_config(
     payload: SearchIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*ADMIN_ROLES)),
+    _: User = Depends(SETTING_PERM),
 ) -> dict:
     existing = crud.get_system_search(db)
     # 创建时必填 Key；编辑时留空表示不改密钥
@@ -76,7 +77,7 @@ def set_search_config(
 @router.delete("")
 def remove_search_config(
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*ADMIN_ROLES)),
+    _: User = Depends(SETTING_PERM),
 ) -> dict:
     crud.delete_system_search(db)
     return {"deleted": True}
@@ -85,7 +86,7 @@ def remove_search_config(
 @router.post("/test")
 def test_search_config(
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*ADMIN_ROLES)),
+    _: User = Depends(SETTING_PERM),
 ) -> dict:
     """连通性检查：用当前生效配置做一次最小搜索。"""
     resolved = crud.resolve_search(db)

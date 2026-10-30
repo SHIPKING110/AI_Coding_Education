@@ -485,6 +485,275 @@ def _sanitize_svg_overflow(project) -> None:
         print(f"[自动修复] 已把 {fixed} 个越界元素回收到画布内")
 
 
+def _sanitize_root_role(project) -> None:
+    """移除根 `<svg>` 上的 data-pptx-role（门禁 error：role 只允许出现在可视子元素上）。
+
+    模型常把 `data-pptx-role="slide"` 写到根 svg 上，触发「belongs on a visual SVG element」+
+    「<svg> with data-pptx-role requires a stable id」两条 error；删掉根上的 role 即消解。
+    """
+    import re as _re
+
+    svg_dir = project / "svg_output"
+    if not svg_dir.is_dir():
+        return
+    fixed = 0
+    for p in svg_dir.glob("*.svg"):
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        m = _re.search(r"<svg\b[^>]*>", text)
+        if not m or "data-pptx-role" not in m.group(0):
+            continue
+        tag = m.group(0)
+        new_tag = _re.sub(r'\s+data-pptx-role\s*=\s*["\'][^"\']*["\']', "", tag)
+        if new_tag != tag:
+            text = text[: m.start()] + new_tag + text[m.end():]
+            try:
+                p.write_text(text, encoding="utf-8")
+                fixed += 1
+            except OSError:
+                pass
+    if fixed:
+        print(f"[自动修复] 已移除 {fixed} 个页面根 svg 上的 data-pptx-role")
+
+
+def _sanitize_spans(project) -> None:
+    """把 `<text>` 里的 `<span>` 转成 `<tspan>`（门禁 error：span 不参与原生 PPTX 导出）。
+
+    模型常把 Markdown/HTML 习惯带进 SVG（`<text><span font-weight>…</span></text>`），
+    质量门禁与导出都判不支持。`tspan` 是 SVG 标准文本分片，样式能力等价；
+    文本块之外的残留 span 直接解包（去标签留内容）。
+    """
+    import re as _re
+
+    svg_dir = project / "svg_output"
+    if not svg_dir.is_dir():
+        return
+    text_el = _re.compile(r"<text\b[^>]*>.*?</text>", _re.S)
+    fixed = 0
+    for p in svg_dir.glob("*.svg"):
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        def _conv(m):
+            nonlocal fixed
+            el = m.group(0)
+            new = _re.sub(r"<span\b", "<tspan", el)
+            new = new.replace("</span>", "</tspan>")
+            if new != el:
+                fixed += 1
+            return new
+
+        new = text_el.sub(_conv, text)
+        # 文本块外残留的 span：去标签留内容（避免再触发 Unsupported element）
+        new = _re.sub(r"</?span\b[^>]*>", "", new)
+        if new != text:
+            try:
+                p.write_text(new, encoding="utf-8")
+            except OSError:
+                pass
+    if fixed:
+        print(f"[自动修复] 已把 {fixed} 个文本块内的 span 转为 tspan")
+
+
+def _sanitize_filters(project) -> None:
+    """移除 `<g>` 上的 filter（门禁 error：filter 只允许在 rect/circle/image/path/polygon/text 等原生目标）。
+
+    模型喜欢给分组加模糊/发光滤镜（`<g filter="url(#blur)">`），但导出只认叶子图形上的滤镜。
+    确定性修复：删掉 `<g>` 上的 filter 属性（视觉略损失，但保证整份能出片）。
+    """
+    import re as _re
+
+    svg_dir = project / "svg_output"
+    if not svg_dir.is_dir():
+        return
+    fixed = 0
+    g_tag = _re.compile(r"<g\b[^>]*>")
+    for p in svg_dir.glob("*.svg"):
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        def _fix(m):
+            nonlocal fixed
+            tag = m.group(0)
+            if not _re.search(r"\bfilter\s*=", tag):
+                return tag
+            new_tag = _re.sub(r'\s+filter\s*=\s*["\'][^"\']*["\']', "", tag)
+            if new_tag != tag:
+                fixed += 1
+            return new_tag
+
+        new = g_tag.sub(_fix, text)
+        if new != text:
+            try:
+                p.write_text(new, encoding="utf-8")
+            except OSError:
+                pass
+    if fixed:
+        print(f"[自动修复] 已移除 {fixed} 处 <g> 上的 filter（不被原生导出支持）")
+
+
+def _text_estimate_width(label: str, font_size: float) -> float:
+    """粗估文本渲染宽度（中文/全角按 1em，西文按字宽比例）——用于越界收缩。"""
+    import unicodedata
+
+    units = 0.0
+    for ch in label:
+        if ch.isspace():
+            units += 0.32
+        elif unicodedata.east_asian_width(ch) in ("W", "F"):
+            units += 1.0
+        elif ch.isdigit():
+            units += 0.56
+        elif ch.isupper():
+            units += 0.64
+        else:
+            units += 0.55
+    return max(1.0, units * max(font_size, 1.0))
+
+
+def _sanitize_text_fit(project) -> None:
+    """文本越出画布（门禁 error「exceeds the root viewBox」）：按估算宽度缩字号/夹坐标。
+
+    旧逻辑只夹 x 坐标，没考虑文本自身宽度（如 font-size 180 的「C++」）。这里：
+      - 按 text-anchor 估算文本左右边界；右侧越界 → 等比缩小 font-size（≥12px）；
+      - 纵向 y 超界 → 夹回画布。
+    """
+    import re as _re
+
+    svg_dir = project / "svg_output"
+    if not svg_dir.is_dir():
+        return
+    vb_re = _re.compile(r'viewBox\s*=\s*["\']\s*(-?[\d.]+)[,\s]+(-?[\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)')
+    fs_re = _re.compile(r"""font-size\s*=\s*["']([0-9.]+)(?:px)?["']""")
+    x_re = _re.compile(r"""(?<![\w-])x\s*=\s*["'](-?[0-9.]+)["']""")
+    y_re = _re.compile(r"""(?<![\w-])y\s*=\s*["'](-?[0-9.]+)["']""")
+    anchor_re = _re.compile(r"""text-anchor\s*=\s*["'](start|middle|end)["']""")
+    fixed = 0
+    for p in svg_dir.glob("*.svg"):
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        vm = vb_re.search(text)
+        if not vm:
+            continue
+        cx, cy, cw, ch = (float(vm.group(i)) for i in range(1, 5))
+        right, bottom = cx + cw, cy + ch
+
+        def _fix(m):
+            nonlocal fixed
+            el = m.group(0)
+            open_tag = el[: el.index(">") + 1]
+            fm = fs_re.search(open_tag)
+            if not fm:
+                return el
+            fs = float(fm.group(1))
+            if fs < 2:
+                return el
+            xm = x_re.search(open_tag)
+            ym = y_re.search(open_tag)
+            am = anchor_re.search(open_tag)
+            x = float(xm.group(1)) if xm else cx
+            y = float(ym.group(1)) if ym else cy
+            anchor = am.group(1) if am else "start"
+            label = _re.sub(r"<[^>]+>", "", el[el.index(">") + 1: el.rfind("</text>")])
+            label = label.strip()
+            if not label:
+                return el
+            changed = False
+            # 横向：按估宽收缩字号，直到右边不越界
+            width = _text_estimate_width(label, fs)
+            left = x if anchor == "start" else (x - width / 2 if anchor == "middle" else x - width)
+            if left + width > right and left < right:
+                new_fs = max(12.0, fs * (right - left) / width)
+                if new_fs < fs:
+                    open_tag2 = fs_re.sub(f'font-size="{round(new_fs, 1):g}"', open_tag, count=1)
+                    if open_tag2 != open_tag:
+                        open_tag = open_tag2
+                        fs = new_fs
+                        changed = True
+            elif left < cx:
+                # 文本整体越出左边界：以左边界为起点（start 锚点直接右移）
+                if anchor == "start":
+                    open_tag2 = x_re.sub(f'x="{round(cx, 1):g}"', open_tag, count=1)
+                    if open_tag2 != open_tag:
+                        open_tag = open_tag2
+                        changed = True
+            # 纵向：基线上沿不要越过画布顶部/底部
+            if y > bottom:
+                open_tag2 = y_re.sub(f'y="{round(bottom, 1):g}"', open_tag, count=1)
+                if open_tag2 != open_tag:
+                    open_tag = open_tag2
+                    changed = True
+            elif y - fs < cy:
+                ny = cy + fs
+                if ny > bottom:
+                    ny = bottom
+                open_tag2 = y_re.sub(f'y="{round(ny, 1):g}"', open_tag, count=1)
+                if open_tag2 != open_tag:
+                    open_tag = open_tag2
+                    changed = True
+            if changed:
+                fixed += 1
+                return open_tag + el[len(open_tag):]
+            return el
+
+        new = _re.sub(r"<text\b[^>]*>.*?</text>", _fix, text, flags=_re.S)
+        if new != text:
+            try:
+                p.write_text(new, encoding="utf-8")
+            except OSError:
+                pass
+    if fixed:
+        print(f"[自动修复] 已收缩/回收到画布内的越界文本 {fixed} 处")
+
+
+def _ensure_spec_lock(project) -> None:
+    """保证 `spec_lock.md` 有 typography 的 title/body 行（Master 导出硬性要求）。
+
+    模型跳过 spec_lock 时导出会报「Master export requires spec_lock.md typography…」。
+    确定性补全：缺文件就建最小版；已有文件缺行就在 `## typography` 段补默认值。
+    """
+    import re as _re
+
+    lock = project / "spec_lock.md"
+    default = (
+        "# Spec Lock\n\n## typography\n"
+        "- title: 44\n- body: 22\n\n## colors\n- primary: #0E1B2C\n- accent: #F0902E\n"
+    )
+    try:
+        if not lock.is_file():
+            lock.write_text(default, encoding="utf-8")
+            print("[自动修复] 已补建 spec_lock.md（typography title/body）")
+            return
+        text = lock.read_text(encoding="utf-8", errors="ignore")
+        rows = dict(_re.findall(r"^-\s+([A-Za-z0-9_]+)\s*:\s*(.+?)\s*$", text, _re.M))
+        missing = [k for k in ("title", "body") if k not in rows]
+        if not missing:
+            return
+        add = "".join(
+            f"- {k}: {44 if k == 'title' else 22}\n" for k in missing
+        )
+        if _re.search(r"^##\s*typography\s*$", text, _re.M):
+            text = _re.sub(
+                r"(^##\s*typography\s*$\n(?:[^\n#].*\n)*)",
+                lambda m: m.group(1) + add,
+                text, count=1, flags=_re.M,
+            )
+        else:
+            text = text.rstrip() + "\n\n## typography\n" + add
+        lock.write_text(text, encoding="utf-8")
+        print(f"[自动修复] 已补全 spec_lock.md typography 行：{', '.join(missing)}")
+    except OSError:
+        pass
+
+
 def _qc_errors_only(out: str) -> bool:
     """从质量检查输出判断「是否只有 warning、没有 error」。
 
@@ -526,11 +795,16 @@ def _print_pages(project) -> None:
 def _repair_pass(project) -> None:
     """一轮确定性自愈：按质量门禁已知 error 模式依次修复（顺序即依赖：先结构后几何）。"""
     _sanitize_svg_xml(project)
+    _sanitize_spans(project)
     _sanitize_svg_colors(project)
     _sanitize_svg_fonts(project)
+    _sanitize_filters(project)
     _sanitize_pptx_role_ids(project)
+    _sanitize_root_role(project)
     _sanitize_root_bounds_overlap(project)
     _sanitize_svg_overflow(project)
+    _sanitize_text_fit(project)
+    _ensure_spec_lock(project)
 
 
 def cmd_build(args):

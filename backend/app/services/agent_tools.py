@@ -43,6 +43,103 @@ def use_conversation(conv_id) -> None:
     _CONV_SCOPE.set(str(conv_id) if conv_id else None)
 
 
+def svg_page_title(content: str) -> str:
+    """从 SVG 源码提炼页面标题（大纲/正文摘要/工具回执共用，保证三处对齐）。
+
+    规则（按优先级）：
+      1) 语义 id（h1/title/main-title/headline…）的字号最大者；
+      2) 排除纯数字/符号（「01」「2000+」这类装饰性大数字不是页标题）；
+      3) 在接近最大字号（≥85%）的候选里取**最靠上**的文本（标题在页面上方）；
+      4) 标题被拆成多个同字号 <text> 行时拼回一句（如「孩子带回家的，/不是一个分数，/…」）；
+      5) 去掉尾部标点。
+    """
+    import re as _re
+
+    try:
+        txt = str(content or "")
+        cands: list[dict] = []
+        for m in _re.finditer(r"<text\b([^>]*)>(.*?)</text>", txt, _re.S):
+            attrs, inner = m.group(1), m.group(2)
+            label = _re.sub(r"<[^>]+>", "", inner)
+            label = (label.replace("&amp;", "&").replace("&lt;", "<")
+                     .replace("&gt;", ">").replace("&quot;", '"').replace("&apos;", "'")).strip()
+            if not label:
+                continue
+            fs = _re.search(r"""font-size\s*=\s*["']([0-9.]+)""", attrs)
+            try:
+                size = float(fs.group(1)) if fs else 0.0
+            except ValueError:
+                size = 0.0
+            ym = _re.search(r"""\by\s*=\s*["'](-?[0-9.]+)""", attrs)
+            xm = _re.search(r"""\bx\s*=\s*["'](-?[0-9.]+)""", attrs)
+            idm = _re.search(r"""\bid\s*=\s*["']([^"']+)""", attrs)
+            cands.append({
+                "label": label, "size": size,
+                "x": float(xm.group(1)) if xm else 0.0,
+                "y": float(ym.group(1)) if ym else 0.0,
+                "id": idm.group(1) if idm else "",
+            })
+        if not cands:
+            return ""
+
+        def _meaningful(c: dict) -> bool:
+            lab = c["label"]
+            if not _re.search(r"[0-9A-Za-z\u4e00-\u9fff]", lab):
+                return False
+            # 纯数字/符号串（编号、统计值、页码）不当标题
+            if _re.fullmatch(r"[0-9０-９\s.%+\-×xX/=*#°:：·•|]+", lab):
+                return False
+            # 「4 小时+」「1200+」这类短统计值也不当标题
+            if _re.search(r"[+%]", lab) and len(_re.sub(r"\s+", "", lab)) <= 6:
+                return False
+            return True
+
+        pool = [c for c in cands if _meaningful(c)] or cands
+        id_pref = [
+            c for c in pool
+            if _re.fullmatch(
+                r"(h1|h0|title|main[-_]?title|headline|page[-_]?title|t[-_]?title|section[-_]?title)",
+                c["id"], _re.I,
+            )
+        ]
+        best = None
+        if id_pref:
+            best = max(id_pref, key=lambda c: c["size"])
+        else:
+            max_size = max(c["size"] for c in pool)
+            for ratio in (0.85, 0.7, 0.55, 0.0):
+                near = [c for c in pool if c["size"] >= max_size * ratio]
+                if near:
+                    best = min(near, key=lambda c: (c["y"], -c["size"]))
+                    break
+        if best is None:
+            return ""
+        # 标题被拆成多行 <text>：同字号、纵向紧邻、当前行无句末标点时拼下一行
+        parts = [best["label"]]
+        used = {id(best)}
+        cur = best
+        for _ in range(3):
+            if _re.search(r"[。！？!?…]$", cur["label"]):
+                break
+            nxt = [
+                c for c in cands
+                if id(c) not in used
+                and abs(c["size"] - best["size"]) <= max(2.0, best["size"] * 0.15)
+                and 0 < (c["y"] - cur["y"]) <= best["size"] * 1.8
+            ]
+            if not nxt:
+                break
+            nxt.sort(key=lambda c: c["y"])
+            cur = nxt[0]
+            used.add(id(cur))
+            parts.append(cur["label"])
+        title = "".join(parts).strip()
+        title = _re.sub(r"[，,、：:；;。\s]+$", "", title).strip()
+        return title[:60]
+    except Exception:
+        return ""
+
+
 def use_allowed_skills(ids) -> None:
     """设置当前 Agent 生效可用的 Skill id 集合（None 表示不限制）。"""
     _ALLOWED_SKILLS.set(frozenset(str(x) for x in ids) if ids is not None else None)
@@ -734,6 +831,45 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
             out["页清单"] = [x.strip() for x in m.group(1).split(",") if x.strip()]
     except Exception:
         pass
+    # 页清单 → 每页真实标题（直接从磁盘 svg_output 读字号/位置语义提取）：
+    # 对话正文摘要、工作区大纲、实际页三处用同一份标题，杜绝「标题对不上/01、2000+ 当标题」。
+    try:
+        pages = out.get("页清单")
+        if isinstance(pages, list) and pages:
+            from app.services import skill_bundle as _bundle_pt
+
+            desk_pt = _bundle_pt.skill_dir(user.id, target.id)
+            proj_rel = ""
+            for a in (args or []):
+                norm = str(a).replace("\\", "/").lstrip("/")
+                while norm.startswith("./"):
+                    norm = norm[2:]
+                if norm == "projects" or norm.startswith("projects/"):
+                    proj_rel = _scope_path(norm)
+                    break
+            svg_dir = None
+            if proj_rel:
+                proj_dir = desk_pt / proj_rel
+                cand = proj_dir / "svg_output"
+                svg_dir = cand if cand.is_dir() else (proj_dir if proj_dir.is_dir() else None)
+            infos: list[dict] = []
+            for nm in pages:
+                title = ""
+                url = ""
+                try:
+                    if svg_dir is not None:
+                        fp = svg_dir / nm
+                        if fp.is_file() and fp.stat().st_size <= 4 * 1024 * 1024:
+                            title = svg_page_title(fp.read_text(encoding="utf-8", errors="ignore"))
+                            rel_p = str(fp.relative_to(desk_pt)).replace("\\", "/")
+                            url = f"/uploads/skills/{user.id}/{target.id}/{rel_p}"
+                except OSError:
+                    title = ""
+                infos.append({"名": nm, "标题": title, "url": url})
+            if any(i["标题"] for i in infos):
+                out["页信息"] = infos
+    except Exception:
+        pass
     if result.get("deps"):
         out["依赖"] = result["deps"]
     # PPT 二次编辑支撑：把工作区里现成的 .pptx 源文件告诉模型，便于后续「编辑已有 PPT」而非重新生成。
@@ -802,6 +938,45 @@ def _tool_write_skill_file(db: Session, user: User, *, skill: str = "", path: st
         _ext.update_skill(db, target, files=files)
     return {"skill": target.name, "已写入": rel, "字节": len(body.encode("utf-8")),
             "提示": "文件已就位，可继续写其余页面，然后用 run_skill_script 跑该 Skill 的转换脚本生成 PPTX"}
+
+
+def _tool_delete_skill_file(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
+    """删除 Skill 包内文件（典型用途：删页——删除 svg_output 下某一页 SVG）。
+
+    多轮编辑里「删掉第 N 页/移除某页」只能靠这个工具真正落盘；删除后必须重新 build，
+    `_normalize_svg_order` 会把剩余页规范成连续序号。
+    """
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    ref = (skill or "").strip()
+    rel = (path or "").strip().replace("\\", "/")
+    if not ref or not rel:
+        return {"错误": "需提供 skill（Skill 名或 id）与 path（要删除的包内文件路径）"}
+    pp = pathlib.PurePosixPath(rel)
+    if pp.is_absolute() or ".." in pp.parts:
+        return {"错误": f"非法路径：{rel}"}
+    if pp.suffix.lower() not in (".svg", ".json", ".md", ".txt", ".xml", ".css", ".yaml", ".yml", ".csv", ".html"):
+        return {"错误": f"仅支持删除文本/页面文件：{rel}"}
+    target, _avail = _resolve_skill_for_exec(db, user, ref)
+    if target is None:
+        return {"错误": f"找不到 Skill：{ref}"}
+    dest = _bundle.skill_dir(user.id, target.id)
+    scoped = _scope_path(rel)
+    fp = (dest / scoped).resolve()
+    if dest.resolve() not in fp.parents:
+        return {"错误": f"非法路径：{rel}"}
+    if not fp.is_file():
+        return {"错误": f"文件不存在：{rel}"}
+    try:
+        fp.unlink()
+    except OSError as e:
+        return {"错误": f"删除失败：{e}"}
+    files = [f for f in (target.files or []) if f != scoped]
+    if len(files) != len(target.files or []):
+        _ext.update_skill(db, target, files=files)
+    return {"skill": target.name, "已删除": rel,
+            "提示": "删除完成。请继续 run_skill_script 跑 build 出片（页序会自动规范化）。"}
 
 
 def _tool_list_skill_files(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
@@ -885,6 +1060,7 @@ _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "write_skill_file": _tool_write_skill_file,
     "read_skill_file": _tool_read_skill_file,
     "list_skill_files": _tool_list_skill_files,
+    "delete_skill_file": _tool_delete_skill_file,
 }
 
 # OpenAI 兼容 function-calling 的 tools schema
@@ -1131,6 +1307,7 @@ TOOLS_SCHEMA: list[dict] = [
                 "把文本写入某个 Skill 包内（如手写 SVG/JSON 工程文件）。"
                 "当 Skill 需要 agent 先产出源文件再跑转换脚本时（例如 ppt-master 手写 SVG 后用 svg_to_pptx 导出），"
                 "用它逐页写入；每页一次调用，之后再用 run_skill_script 执行转换脚本。"
+                "插入新页时文件名用「插入位置序号+描述」（如 21x_xinsai.svg），build 会自动规范序号。"
                 "只支持文本文件（.svg/.json/.md/.txt/.xml/.html/.yaml/.yml/.csv/.css），单文件≤512KB。"
             ),
             "parameters": {
@@ -1141,6 +1318,24 @@ TOOLS_SCHEMA: list[dict] = [
                     "content": {"type": "string", "description": "文件文本内容"},
                 },
                 "required": ["skill", "path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_skill_file",
+            "description": (
+                "删除某个 Skill 包内的文件（典型用途：删页——删除 svg_output 下某一页 SVG）。"
+                "用户要求「删掉第 N 页/移除某页」时必须用它真正删除，再 run_skill_script 重新 build。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "要删除的包内文件路径，如 projects/demo/svg_output/07_class.svg"},
+                },
+                "required": ["skill", "path"],
             },
         },
     },

@@ -186,8 +186,12 @@ def _invoke(prompt: str) -> str:
     return (resp.content or "").strip()
 
 
-def stream_text(system: str, prompt: str):
+def stream_text(system: str, prompt: str, images: list[str] | None = None):
     """流式调用 LLM，逐段 yield 文本增量（供 SSE 对话式 PPT 定制使用）。
+
+    `images`：随消息上传的图片（data URL 列表，如 `data:image/png;base64,...`）。
+    传入后会以 OpenAI 兼容的 `image_url` 多模态内容块附在 user 消息里，
+    支持视觉的模型（如 deepseek-flash）可直接读取图片内容。
 
     未配置 LLM 时抛 LLMConfigError；调用异常时抛出，由调用方转为 SSE error 事件。
     输出经 `_StreamSanitizer` 净化：模型偶发把「原生工具调用标记」（如
@@ -198,8 +202,15 @@ def stream_text(system: str, prompt: str):
 
     _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI")
     model = _chat_model()
+    if images:
+        content: list = [{"type": "text", "text": prompt}]
+        for url in images:
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        human = HumanMessage(content=content)
+    else:
+        human = HumanMessage(content=prompt)
     san = _StreamSanitizer()
-    for chunk in model.stream([SystemMessage(content=system), HumanMessage(content=prompt)]):
+    for chunk in model.stream([SystemMessage(content=system), human]):
         piece = getattr(chunk, "content", "") or ""
         if isinstance(piece, list):
             piece = "".join(
@@ -224,14 +235,15 @@ _DIRTY_OPENERS = (
     "<|tool\u2581call\u2581begin|>", "<｜tool\u2581call\u2581begin｜>",
     "<|tool\u2581calls\u2581begin", "<｜tool\u2581calls\u2581begin",
     "<||DSML||", "<｜｜DSML｜｜", "<|｜DSML｜｜", "<｜|DSML|｜",
-    "<function_calls>", "<tool_call>", "<invoke ", "<invoke>",
+    "<function_calls>", "<tool_calls>", "<tool_calls ", "<tool_call>", "<tool_call ",
+    "<invoke ", "<invoke>",
 )
 # 「退出脏区」的闭标记子串
 _DIRTY_CLOSERS = (
     "<|tool\u2581calls\u2581end|>", "<｜tool\u2581calls\u2581end｜>",
     "<|tool\u2581call\u2581end|>", "<｜tool\u2581call\u2581end｜>",
     "<|tool\u2581calls\u2581end", "<｜tool\u2581calls\u2581end",
-    "</||DSML||>", "</｜｜DSML｜｜>", "</function_calls>", "</tool_call>",
+    "</||DSML||>", "</｜｜DSML｜｜>", "</function_calls>", "</tool_calls>", "</tool_call>",
     "</invoke>", "</parameter>", "<|end|>", "<｜end｜>",
 )
 
@@ -354,6 +366,100 @@ def _tail_partial(text: str, needles: tuple[str, ...]) -> str:
     return ""
 
 
+# 伪工具调用文本（模型把「工具名(skill=…, path=…)」当正文吐出）：整块/整行剔除
+_PSEUDO_CALL_RE = (
+    r"(?:list_skill_files|write_skill_file|read_skill_file|delete_skill_file|run_skill_script|"
+    r"skill_info|skill_preview|mcp_[a-z_]+)"
+)
+
+# XML 风格的伪工具调用块（<write_skill_file>…</write_skill_file>）：只在流式显示层剔除，
+# 原始内容仍由调用方保留，用于「真实执行」与执行轨迹。
+XML_TOOL_BLOCK_NAMES = (
+    "write_skill_file", "read_skill_file", "list_skill_files", "delete_skill_file",
+    "run_skill_script", "tool_use",
+)
+_XML_BLOCK_OPENERS = tuple(f"<{n}>" for n in XML_TOOL_BLOCK_NAMES) + tuple(
+    f"<{n} " for n in XML_TOOL_BLOCK_NAMES
+) + ("<invoke ", "<invoke>")
+_XML_BLOCK_CLOSERS = tuple(f"</{n}>" for n in XML_TOOL_BLOCK_NAMES) + ("</invoke>",)
+
+
+class XmlToolStreamFilter:
+    """流式剔除 XML 伪工具调用块的显示过滤器（原样内容由调用方另行累积）。
+
+    与 _StreamSanitizer 同思路：进入 `<write_skill_file>` 后吞掉，直到 `</write_skill_file>`；
+    末尾可能是未完成标记前缀时保留到下一 chunk，避免把标记拆两半漏给用户。
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_block = False
+
+    def feed(self, piece: str) -> str:
+        self._buf += piece
+        return self._drain(final=False)
+
+    def flush(self) -> str:
+        out = self._drain(final=True)
+        self._buf = ""
+        return out
+
+    def _drain(self, *, final: bool) -> str:
+        data = self._buf
+        out: list[str] = []
+        i = 0
+        n = len(data)
+        while i < n:
+            if self._in_block:
+                idx, _ = _find_any(data, _XML_BLOCK_CLOSERS, i)
+                if idx == -1:
+                    if not final:
+                        keep = _tail_partial(data[i:], _XML_BLOCK_CLOSERS)
+                        self._buf = data[n - len(keep):] if keep else ""
+                    else:
+                        self._buf = ""
+                    return "".join(out)
+                self._in_block = False
+                i = idx + _matched_len(data, idx, _XML_BLOCK_CLOSERS)
+                continue
+            idx, _needle = _find_any(data, _XML_BLOCK_OPENERS, i)
+            if idx == -1:
+                tail = "" if final else _could_be_partial_opener_xml(data[i:])
+                if tail:
+                    out.append(data[i:n - len(tail)])
+                    self._buf = data[n - len(tail):]
+                    return "".join(out)
+                out.append(data[i:])
+                self._buf = ""
+                return "".join(out)
+            out.append(data[i:idx])
+            self._in_block = True
+            i = idx + _matched_len(data, idx, _XML_BLOCK_OPENERS)
+        self._buf = "" if final else self._buf
+        return "".join(out)
+
+
+def _could_be_partial_opener_xml(text: str) -> str:
+    for opener in _XML_BLOCK_OPENERS:
+        lo = opener.lower()
+        for k in range(1, min(len(lo), len(text)) + 1):
+            if text[-k:].lower() == lo[:k]:
+                return text[-k:]
+    return ""
+
+
+def strip_xml_tool_blocks(text: str) -> str:
+    """非流式剔除 XML 伪工具调用块（含块内的 YAML/SVG 载荷）。"""
+    if not text:
+        return text
+    try:
+        f = XmlToolStreamFilter()
+        clean = f.feed(text) + f.flush()
+        return re.sub(r"\n{3,}", "\n\n", clean).strip()
+    except Exception:
+        return text
+
+
 def strip_toolcall_markup(text: str) -> str:
     """非流式净化：剔除原生工具调用标记及其脏区内容（历史清洗/持久化前用）。"""
     if not text:
@@ -365,6 +471,20 @@ def strip_toolcall_markup(text: str) -> str:
         clean = s.feed(text) + s.flush()
         for pat in _toolcall_patterns():
             clean = pat.sub("", clean)
+        # 模型把「伪工具调用」当代码块/正文输出（如 ```\nlist_skill_files(skill=ppt-master, path=…)```）：
+        # 整块删除代码围栏，再清理行内残余调用片段——这类内容对用户是噪音，还会污染后续历史。
+        fence_re = _re.compile(r"```[a-zA-Z0-9_-]*\n(?:(?!```)[\s\S])*?```", _re.S)
+
+        def _drop_pseudo_fence(m):
+            body = m.group(0)
+            return "" if _re.search(_PSEUDO_CALL_RE + r"\s*\(", body) else body
+
+        clean = fence_re.sub(_drop_pseudo_fence, clean)
+        clean = _re.sub(
+            r"(?:^|\n)\s*" + _PSEUDO_CALL_RE + r"\s*\([^\n]{0,300}\)?\s*(?=\n|$)", "\n", clean
+        )
+        # XML 风格伪工具块（<write_skill_file>…</write_skill_file> 含 SVG 载荷）：整块剔除
+        clean = strip_xml_tool_blocks(clean)
         clean = _re.sub(r"\n{3,}", "\n\n", clean).strip()
         return clean
     except Exception:
@@ -432,6 +552,11 @@ TOOL_PLANNER_SYS += (
     "\n【二次编辑判定】：用户说「调整/修改/改一下/加页/换配色」且会话里有已生成的项目（见「二次编辑基线」）时，"
     "必须在**上一版项目**上就地改（覆盖改动的页 → 重新 build），禁止另起项目重做；"
     "只有用户明确说「重新做/换主题/新的一套」才新建项目。"
+    "\n【多轮修改质量纪律】：基线里已列出「当前页（文件名+标题）」。改第 N 页就只覆盖第 N 页的 svg，"
+    "**其余页原样保留、禁止重写**（重写会把已定稿的设计改差）；删页用 delete_skill_file 删除对应 svg；"
+    "插入页文件名用「插入位置序号+描述」（如 21x_xinsai.svg），build 自动规范序号；"
+    "改完必须重新 build，页数变化要与计划一致。"
+    "用户补充内容（讲师/日期/条款/数字等）时，只把内容改入对应页，不要整份重新生成。"
     "\n【门禁自愈·自己修不要问】：build 返回失败/质量报告含 error 时，**不要停下来向用户解释**，"
     "按报错提示修 SVG 后重新 build（常见错：data-pptx-role 元素缺 id、font-size 0、非法颜色、bounds 越界），"
     "同一轮内最多自动重试 3 次；修复成功后正常交付 pptx 下载链接。"

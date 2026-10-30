@@ -9,14 +9,15 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_roles
+from app.api.deps import get_current_user, require_teacher_permission
 from app.core.database import get_db
 from app.crud import retrieval_config as crud
-from app.models.user import Role, User
+from app.models.user import User
 
 router = APIRouter(prefix="/retrieval-configs", tags=["retrieval-configs"])
 
-ADMIN_ROLES = (Role.ADMIN,)
+# 系统级 Embedding：管理员，或已被授予「设置-模型配置」权限的教师（与管理员配置项对齐）
+EMBEDDING_PERM = require_teacher_permission("settings_tab_model")
 
 
 class EmbeddingIn(BaseModel):
@@ -66,7 +67,7 @@ def _rerank_out(row) -> dict:
 @router.get("/embedding")
 def get_embedding_config(
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*ADMIN_ROLES)),
+    _: User = Depends(EMBEDDING_PERM),
 ) -> dict:
     row = crud.get_system_embedding(db)
     return {"item": _embedding_out(row) if row else None}
@@ -76,7 +77,7 @@ def get_embedding_config(
 def set_embedding_config(
     payload: EmbeddingIn,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*ADMIN_ROLES)),
+    _: User = Depends(EMBEDDING_PERM),
 ) -> dict:
     if payload.provider != "local" and not (payload.base_url.strip() and payload.model.strip()):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="接口地址与模型名不能为空")
@@ -103,7 +104,7 @@ def set_embedding_config(
 @router.delete("/embedding")
 def remove_embedding_config(
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*ADMIN_ROLES)),
+    _: User = Depends(EMBEDDING_PERM),
 ) -> dict:
     crud.delete_system_embedding(db)
     from app.services import rag
@@ -115,7 +116,7 @@ def remove_embedding_config(
 @router.post("/embedding/test")
 def test_embedding_config(
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles(*ADMIN_ROLES)),
+    _: User = Depends(EMBEDDING_PERM),
 ) -> dict:
     """连通性检查：用当前生效配置做一次 embedding。"""
     resolved = crud.resolve_embedding(db)

@@ -178,6 +178,16 @@ export interface ToolTraceStep {
   error?: string | null
 }
 
+/** 实时执行步骤（规划阶段逐步推送）：phase=running 表示这一步正在执行。 */
+export interface LiveToolStep {
+  phase?: 'start' | 'done'
+  seq: number
+  tool: string
+  args: Record<string, unknown>
+  ok: boolean
+  summary: string
+}
+
 /** RAG 命中的知识库片段：similarity=向量相似度，rerank_score=重排分（启用重排时才有）。 */
 export interface RagHit {
   title: string
@@ -210,7 +220,7 @@ export async function agentChatStream(
     hits?: RagHit[];
     retrieval?: RetrievalInfo;
   }) => void,
-  opts?: { idleTimeoutMs?: number; onTimeout?: () => void; onToolsLive?: (steps: ToolTraceStep[]) => void },
+  opts?: { idleTimeoutMs?: number; onTimeout?: () => void; onToolsLive?: (steps: ToolTraceStep[]) => void; onToolStep?: (step: LiveToolStep) => void },
 ): Promise<void> {
   const token = localStorage.getItem('access_token')
   const resp = await fetch(`/api/agents/conversations/${convId}/chat`, {
@@ -274,6 +284,7 @@ export async function agentChatStream(
           error?: string
           phase?: AgentPhase
           tools_live?: ToolTraceStep[]
+          tool_step?: LiveToolStep
           tool_trace?: ToolTraceStep[]
           tool_rounds?: number
           tool_degraded?: boolean
@@ -290,6 +301,7 @@ export async function agentChatStream(
         if (data.error) throw new Error(data.error)
         if (data.phase && onPhase) onPhase(data.phase)
         if (data.tools_live && opts?.onToolsLive) opts.onToolsLive(data.tools_live)
+        if (data.tool_step && opts?.onToolStep) opts.onToolStep(data.tool_step)
         if (data.delta) onDelta(data.delta)
         if (data.done) {
           if (onDone) {

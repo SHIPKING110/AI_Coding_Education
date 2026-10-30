@@ -66,6 +66,50 @@ def skill_dir(owner_id, skill_id) -> pathlib.Path:
     return base
 
 
+_PPT_ADAPTER_MARKER = "PPT-Master 兼容适配器"
+
+
+def sync_ppt_adapter() -> int:
+    """把仓库里最新的 `ppt_oneshot.py` 同步到所有已物化的 ppt-master 用户包。
+
+    为什么需要：ppt-master 适配包会**物化到每个用户目录**（收录/安装时复制一份），
+    之后系统升级的自愈规则只更新了仓库种子，用户手里还是旧脚本 —— 结果「管理员出片正常、
+    教师出片总卡门禁」，输出质量不一致。启动时统一对齐版本（只覆盖带适配器标记的脚本，
+    不动用户自己写的同名文件）。返回更新数量。
+    """
+    import pathlib
+
+    from app.core.config import get_settings
+
+    seed = pathlib.Path(__file__).resolve().parents[2] / "seed_skills" / "ppt-master-adapter" / "scripts" / "ppt_oneshot.py"
+    if not seed.is_file():
+        return 0
+    try:
+        seed_txt = seed.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    root = pathlib.Path(get_settings().UPLOAD_DIR) / "skills"
+    if not root.is_dir():
+        return 0
+    updated = 0
+    for wrapper in root.glob("*/*/**/scripts/ppt_oneshot.py"):
+        try:
+            old = wrapper.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if old == seed_txt:
+            continue
+        # 只覆盖「本仓库注入的适配器」；用户自装同名脚本保持不动
+        if _PPT_ADAPTER_MARKER not in old and old.strip():
+            continue
+        try:
+            wrapper.write_text(seed_txt, encoding="utf-8")
+            updated += 1
+        except OSError:
+            pass
+    return updated
+
+
 def cleanup_conversation(owner_id, conv_id, output_urls=None) -> int:
     """删除一个会话时，清理它在各 Skill 下的会话隔离工作区 + 关联产物。
 

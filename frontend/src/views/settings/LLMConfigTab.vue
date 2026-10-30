@@ -35,10 +35,17 @@ import {
 } from '@/api/searchConfig'
 import { toastApiError, useToastStore } from '@/stores/toast'
 import { useAuthStore } from '@/stores/auth'
+import { myPermissions } from '@/api/permissions'
 
 const toast = useToastStore()
 const auth = useAuthStore()
-const isAdmin = computed(() => auth.user?.role === 'admin')
+// 配置项权限：管理员全开；教师按「设置-模型配置」(settings_tab_model) /
+// 「全部设置管理」(settings_manage) 权限决定——与管理员看到的配置项保持同步。
+const myPerms = ref<Record<string, boolean>>({})
+const canManageModel = computed(() => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value.settings_tab_model === true || myPerms.value.settings_manage === true
+})
 const items = ref<LLMConfigOut[]>([])
 const loading = ref(false)
 
@@ -194,7 +201,7 @@ const rrkTestMsg = ref('')
 
 async function loadRetrieval() {
   try {
-    if (isAdmin.value) {
+    if (canManageModel.value) {
       emb.value = await getEmbeddingConfig()
       embForm.value = emb.value
         ? {
@@ -396,7 +403,14 @@ async function checkSearch() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  if (auth.user?.role === 'teacher') {
+    try {
+      myPerms.value = await myPermissions()
+    } catch {
+      myPerms.value = {}
+    }
+  }
   load()
   void loadRetrieval()
   void loadSearch()
@@ -453,8 +467,8 @@ onMounted(() => {
       <button class="btn primary sm" :disabled="savingMap" @click="saveMapping">{{ savingMap ? '保存中…' : '保存映射' }}</button>
     </section>
 
-    <!-- 检索 · Embedding（系统级，管理员） -->
-    <section v-if="isAdmin" class="card">
+    <!-- 检索 · Embedding（系统级：管理员 / 有模型配置权限的教师） -->
+    <section v-if="canManageModel" class="card">
       <div class="card-head">
         <div>
           <h2>检索 · Embedding（系统级）</h2>
@@ -507,8 +521,8 @@ onMounted(() => {
       <div v-else class="empty-tip">未配置 Rerank（可选项）：当前为单层向量检索，完全正常工作。</div>
     </section>
 
-    <!-- 联网搜索 · Tavily（系统级，管理员） -->
-    <section v-if="isAdmin" class="card">
+    <!-- 联网搜索 · Tavily（系统级：管理员 / 有模型配置权限的教师） -->
+    <section v-if="canManageModel" class="card">
       <div class="card-head">
         <div>
           <h2>联网搜索 · Tavily（系统级）</h2>

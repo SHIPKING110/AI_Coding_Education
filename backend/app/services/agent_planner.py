@@ -103,6 +103,8 @@ def plan_and_run(
     max_calls: int | None = None,
     time_budget_ms: int | None = None,
     history: list[tuple[str, str]] | None = None,
+    context_block: str | None = None,
+    on_step=None,
 ) -> PlanOutcome:
     """规划并执行只读业务工具，返回调用记录与注入文本块。
 
@@ -113,6 +115,8 @@ def plan_and_run(
     - history：本会话最近几轮 (role, content)。规划器只带当前消息时，用户短确认句
       （如「继续用深靛，按你的主题生成」）会丢失上下文，导致模型换主题/另起无关项目——
       这正是「多轮续写跑偏出错片」的根因。这里把最近对话摘要一并带给规划器。
+    - on_step：每执行完一个工具就回调一次（工具名/参数/结果），用于前端实时展示
+      「执行到哪一步、何时开始、何时结束」，无需等整轮结束才看到全链路。
     """
     agent_tools.use_conversation(conversation_id)
     # 权限界定：求出「当前 Agent 生效可用的 Skill id」（per-agent 绑定 ∪ 全局默认，含 id 漂移同名自愈），
@@ -148,6 +152,35 @@ def plan_and_run(
     steps: list[Step] = []
     seen: set[str] = set()
     rounds = 0
+
+    def _run_one(name: str, args: dict) -> "Step":
+        """执行一个工具：先回调「开始」，执行完再回调「结束」（前端实时展示执行到哪步）。"""
+        step = Step(tool=name, args=args, ok=True, result=None, error=None)
+        if on_step is not None:
+            try:
+                on_step(step, len(steps) + 1, "start")
+            except Exception:
+                pass
+        ok, payload = _exec(db, user, name, args)
+        step.ok = ok
+        step.result = payload if ok else None
+        step.error = None if ok else str(payload)
+        steps.append(step)
+        if on_step is not None:
+            try:
+                on_step(step, len(steps), "done")
+            except Exception:
+                pass
+        return step
+
+    def _push_step(step: "Step") -> None:
+        """追加一步并即时回调（用于兜底/自愈等非主循环路径）。"""
+        steps.append(step)
+        if on_step is not None:
+            try:
+                on_step(step, len(steps), "done")
+            except Exception:
+                pass
     # 是否属于「Skill 任务」（生成/编辑/催出片续作）：决定是否注入 Skill 清单与强制执行兜底。
     is_skill_task = bool(inv) and (
         agent_tools.looks_like_skill_task(message)
@@ -175,6 +208,19 @@ def plan_and_run(
     messages.append(llm._human_msg(message))
     if is_skill_task:
         messages.append(llm._sys_msg(f"可用 Skill（用户已绑定，可用 run_skill_script 实际执行包内脚本，生成文件会取回下载链接）：\n{inv}"))
+    if context_block:
+        # 会话内 PPT 现状（项目/页清单/真实标题）：规划「插页/删页/改某页」时要据此定位，
+        # 不能只靠 list_skill_files 现读；同时也防止多轮修改另起项目。
+        messages.append(llm._sys_msg(context_block))
+        messages.append(llm._sys_msg(
+            "【页级编辑规划纪律】用户要求插页/删页/改页/调顺序时：\n"
+            "1) 先给出页级规划（例如「在第 21 页后插入 2 页：22_赛事概览、23_赛制与晋级」），"
+            "再按规划执行；新增页文件名用「插入位置序号 + 描述」，如 21x_xinsai.svg、21y_saizhi.svg"
+            "（build 会自动规范为连续序号）；\n"
+            "2) 只新增/覆盖受影响的页，其余页保持不动；删页用 delete_skill_file 删除对应 svg 文件；\n"
+            "3) 必须实际 write_skill_file/delete_skill_file + run_skill_script(build)，只 list/read 不收工；"
+            "build 后核对页数变化符合规划。"
+        ))
     planner_failed = False
 
     for _ in range(rounds_cap):
@@ -204,12 +250,8 @@ def plan_and_run(
                 observations.append(f"· {name}：{json.dumps(args, ensure_ascii=False)}（重复调用已跳过）")
                 continue
             seen.add(key)
-            ok, payload = _exec(db, user, name, args)
-            steps.append(
-                Step(tool=name, args=args, ok=ok,
-                     result=payload if ok else None, error=None if ok else str(payload))
-            )
-            observations.append(f"· {name}：{compact_result(payload, result_chars)}")
+            step = _run_one(name, args)
+            observations.append(f"· {name}：{compact_result(step.result if step.ok else step.error, result_chars)}")
         if observations:
             messages.append(llm._human_msg("工具结果：\n" + "\n".join(observations)))
 
@@ -231,10 +273,8 @@ def plan_and_run(
                         break
                     name = str(c.get("name") or "")
                     args = c.get("arguments") or {}
-                    ok, payload = _exec(db, user, name, args)
-                    steps.append(Step(tool=name, args=args, ok=ok,
-                                      result=payload if ok else None, error=None if ok else str(payload)))
-                    observations.append(f"· {name}：{compact_result(payload, result_chars)}")
+                    step = _run_one(name, args)
+                    observations.append(f"· {name}：{compact_result(step.result if step.ok else step.error, result_chars)}")
                 if observations:
                     observations.append("（SKILL.md 已读：下一步必须调 run_skill_script 执行入口脚本，禁止再读文件；"
                                         "先跑 Skill 自带的校验脚本，不通过就停并如实告诉用户）")
@@ -265,10 +305,8 @@ def plan_and_run(
                             round_obs.append(f"· {name}：{json.dumps(args, ensure_ascii=False)}（重复调用已跳过）")
                             continue
                         seen.add(key)
-                        ok, payload = _exec(db, user, name, args)
-                        steps.append(Step(tool=name, args=args, ok=ok,
-                                          result=payload if ok else None, error=None if ok else str(payload)))
-                        round_obs.append(f"· {name}：{compact_result(payload, result_chars)}")
+                        step = _run_one(name, args)
+                        round_obs.append(f"· {name}：{compact_result(step.result if step.ok else step.error, result_chars)}")
                     if round_obs:
                         messages.append(llm._human_msg("工具结果：\n" + "\n".join(round_obs)))
                 # 自动出片兜底：读文档/写页之后模型仍没真正执行脚本 →
@@ -276,10 +314,10 @@ def plan_and_run(
                 if not any(s.tool == "run_skill_script" and s.ok for s in steps):
                     built = agent_tools.auto_build_ppt(db, user)
                     if built is not None:
-                        steps.append(Step(tool="run_skill_script",
-                                          args={"auto": True}, ok=bool(built.get("成功")),
-                                          result=built if built.get("成功") else None,
-                                          error=None if built.get("成功") else str(built.get("错误") or built)))
+                        _push_step(Step(tool="run_skill_script",
+                                        args={"auto": True}, ok=bool(built.get("成功")),
+                                        result=built if built.get("成功") else None,
+                                        error=None if built.get("成功") else str(built.get("错误") or built)))
                 block = _format_block(steps, block_chars, result_chars=result_chars)
                 return PlanOutcome(steps=steps, block=block, rounds=rounds, degraded=True)
         if planner_failed or not llm.is_llm_configured() or heuristic:
@@ -297,10 +335,10 @@ def plan_and_run(
     if is_skill_task and not any(s.tool == "run_skill_script" and s.ok for s in steps):
         built = agent_tools.auto_build_ppt(db, user)
         if built is not None:
-            steps.append(Step(tool="run_skill_script", args={"auto": True},
-                              ok=bool(built.get("成功")),
-                              result=built if built.get("成功") else None,
-                              error=None if built.get("成功") else str(built.get("错误") or built)))
+            _push_step(Step(tool="run_skill_script", args={"auto": True},
+                            ok=bool(built.get("成功")),
+                            result=built if built.get("成功") else None,
+                            error=None if built.get("成功") else str(built.get("错误") or built)))
             block = _format_block(steps, block_chars, result_chars=result_chars)
     return PlanOutcome(steps=steps, block=block, rounds=rounds)
 
