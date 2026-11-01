@@ -266,6 +266,8 @@ const ADMIN_NAV = [
   { to: '/reports', label: '报告·总结', navKey: 'nav_reports', icon: 'M8 2v4M16 2v4M3 10h18M6 6h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zM8 14h8M8 18h5' },
   { to: '/evaluations', label: '学员评估', navKey: 'nav_evaluations', icon: 'M7 3h10a2 2 0 0 1 2 2v16H5V5a2 2 0 0 1 2-2zM8 8h8M8 12h8M8 16h5' },
   { to: '/agents', label: 'Agent 工作台', navKey: 'nav_agents', icon: 'M13 2 3 14h7l-1 8 10-12h-7l1-8z' },
+  { to: '/rag/overview', label: 'RAG 运营', adminOnly: true, icon: 'M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20M8 7h8M8 11h8M8 15h5' },
+  { to: '/rag/runs', label: '任务监控', adminOnly: true, icon: 'M3 3h18v4H3zM3 10h18v4H3zM3 17h18v4H3z' },
   { to: '/service', label: '教学服务', navKey: 'nav_service', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 13h5' },
   { to: '/assignments', label: 'AI 习题', navKey: 'nav_assignments', icon: 'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11M15 3h6v6' },
   { to: '/finance', label: '财务管理', icon: 'M3 3v18h18M7 14l4-4 4 4 5-6', perm: 'finance_view', navKey: 'nav_finance' },
@@ -328,7 +330,7 @@ onMounted(() => {
           :key="item.to"
           :to="item.to"
           class="nav-item"
-          :class="{ active: item.to === '/reports' ? route.path.startsWith('/reports') || route.path.startsWith('/summaries') : route.path.startsWith(item.to) }"
+          :class="{ active: item.to === '/reports' ? route.path.startsWith('/reports') || route.path.startsWith('/summaries') : item.to.startsWith('/rag') ? route.path.startsWith('/rag') : route.path.startsWith(item.to) }"
           :title="collapsed ? item.label : undefined"
         >
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">

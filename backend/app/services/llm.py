@@ -104,6 +104,21 @@ def _plan_model():
     return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.0, 120, 0)
 
 
+def _model_info() -> tuple[str, str]:
+    resolved = _active_resolved()
+    if resolved is not None:
+        return resolved.model or "", "openai-compatible"
+    settings = get_settings()
+    return settings.LLM_MODEL or "", "openai-compatible"
+
+
+def _usage_from_chunk(chunk) -> tuple[int, int]:
+    meta = getattr(chunk, "usage_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return 0, 0
+    return int(meta.get("input_tokens") or 0), int(meta.get("output_tokens") or 0)
+
+
 def ping(resolved=None) -> str:
     model = _build_chat(
         (resolved.base_url if resolved else ""),
@@ -186,6 +201,54 @@ def _invoke(prompt: str) -> str:
     return (resp.content or "").strip()
 
 
+def invoke_text(system: str, prompt: str, *, temperature: float = 0.0, timeout: int = 60) -> str:
+    """通用同步文本调用（意图分类/契约规划等轻量结构化任务）。
+
+    与反馈/报告专用 `_invoke` 不同，system 完全由调用方决定；失败统一抛 LLMConfigError。
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI")
+    resolved = _active_resolved()
+    if resolved is not None:
+        model = _build_chat(resolved.base_url, resolved.api_key, resolved.model, temperature, timeout, 0)
+    else:
+        settings = get_settings()
+        model = _build_chat(
+            _normalized_base_url(settings.LLM_BASE_URL) or "",
+            settings.LLM_API_KEY,
+            settings.LLM_MODEL,
+            temperature,
+            timeout,
+            0,
+        )
+    from app.services import agent_ops
+
+    model_name, provider = _model_info()
+    with agent_ops.span(span_type="model", name="model.invoke_text") as sp:
+        try:
+            resp = model.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
+        except LLMConfigError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            sp.end(status="error", error=str(e), model=model_name, provider=provider)
+            raise LLMConfigError(friendly_llm_error(e)) from e
+        meta = getattr(resp, "usage_metadata", None) or {}
+        sp.end(
+            summary=f"prompt={len(prompt)} chars",
+            model=model_name,
+            provider=provider,
+            input_tokens=int(meta.get("input_tokens") or 0) if isinstance(meta, dict) else 0,
+            output_tokens=int(meta.get("output_tokens") or 0) if isinstance(meta, dict) else 0,
+        )
+    content = getattr(resp, "content", "") or ""
+    if isinstance(content, list):
+        content = "".join(
+            p.get("text", "") if isinstance(p, dict) else str(p) for p in content
+        )
+    return str(content).strip()
+
+
 def stream_text(system: str, prompt: str, images: list[str] | None = None):
     """流式调用 LLM，逐段 yield 文本增量（供 SSE 对话式 PPT 定制使用）。
 
@@ -209,20 +272,43 @@ def stream_text(system: str, prompt: str, images: list[str] | None = None):
         human = HumanMessage(content=content)
     else:
         human = HumanMessage(content=prompt)
-    san = _StreamSanitizer()
-    for chunk in model.stream([SystemMessage(content=system), human]):
-        piece = getattr(chunk, "content", "") or ""
-        if isinstance(piece, list):
-            piece = "".join(
-                p.get("text", "") if isinstance(p, dict) else str(p) for p in piece
-            )
-        if piece:
-            out = san.feed(piece)
-            if out:
-                yield out
-    tail = san.flush()
-    if tail:
-        yield tail
+    from app.services import agent_ops
+
+    model_name, provider = _model_info()
+    sp = agent_ops.start_span(span_type="model", name="model.chat_stream")
+    in_tokens = 0
+    out_tokens = 0
+    chars = 0
+    try:
+        san = _StreamSanitizer()
+        for chunk in model.stream([SystemMessage(content=system), human]):
+            it, ot = _usage_from_chunk(chunk)
+            in_tokens = max(in_tokens, it)
+            out_tokens = max(out_tokens, ot)
+            piece = getattr(chunk, "content", "") or ""
+            if isinstance(piece, list):
+                piece = "".join(
+                    p.get("text", "") if isinstance(p, dict) else str(p) for p in piece
+                )
+            if piece:
+                chars += len(str(piece))
+                out = san.feed(piece)
+                if out:
+                    yield out
+        tail = san.flush()
+        if tail:
+            yield tail
+        sp.end(
+            summary=f"prompt={len(prompt)} chars, output={chars} chars",
+            model=model_name,
+            provider=provider,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+        )
+    except Exception as e:  # noqa: BLE001
+        sp.end(status="error", error=str(e), model=model_name, provider=provider,
+               input_tokens=in_tokens, output_tokens=out_tokens)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -590,14 +676,30 @@ def tool_step(messages: list, tools: list[dict]) -> tuple[str, list[dict]]:
                 return "", []
         except Exception:
             return "", []
+    from app.services import agent_ops
+
     model = _plan_model()
-    bound = model.bind_tools(tools)
-    resp = bound.invoke(messages)
-    content = resp.content if isinstance(resp.content, str) else ""
-    calls: list[dict] = []
-    for tc in getattr(resp, "tool_calls", None) or []:
-        calls.append(
-            {"id": tc.get("id") or "", "name": tc.get("name"), "arguments": tc.get("args") or {}}
+    model_name, provider = _model_info()
+    with agent_ops.span(span_type="model", name="model.tool_planner") as sp:
+        bound = model.bind_tools(tools)
+        try:
+            resp = bound.invoke(messages)
+        except Exception as e:  # noqa: BLE001
+            sp.end(status="error", error=str(e), model=model_name, provider=provider)
+            raise
+        content = resp.content if isinstance(resp.content, str) else ""
+        calls: list[dict] = []
+        for tc in getattr(resp, "tool_calls", None) or []:
+            calls.append(
+                {"id": tc.get("id") or "", "name": tc.get("name"), "arguments": tc.get("args") or {}}
+            )
+        meta = getattr(resp, "usage_metadata", None) or {}
+        sp.end(
+            summary=f"tools={[c.get('name') for c in calls]}",
+            model=model_name,
+            provider=provider,
+            input_tokens=int(meta.get("input_tokens") or 0) if isinstance(meta, dict) else 0,
+            output_tokens=int(meta.get("output_tokens") or 0) if isinstance(meta, dict) else 0,
         )
     return content, calls
 

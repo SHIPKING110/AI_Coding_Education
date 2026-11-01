@@ -38,6 +38,7 @@ from app.models.parent_service import (
 )
 from app.models.user import Role, User
 from app.services import rag
+from app.services import rag_trace
 from app.services.llm import LLMConfigError
 
 parent_router = APIRouter(prefix="/parent-service", tags=["parent-service"])
@@ -359,10 +360,18 @@ def parent_chat(
             hits = []
         else:
             try:
-                hits = rag.retrieve(
-                    retrieval_query, db=db, owner_id=owner_id,
-                    collected_ids=white, top_k=5, diag=diag,
-                )
+                with rag_trace.trace_scope(
+                    domain="parent_service",
+                    user_id=parent_id,
+                    owner_id=owner_id,
+                    conversation_id=th.id,
+                    route="parent_service",
+                ):
+                    hits = rag.retrieve(
+                        retrieval_query, db=db, owner_id=owner_id,
+                        collected_ids=white, top_k=5, diag=diag,
+                        route_key="parent_service",
+                    )
             except Exception:
                 hits = []
     # 二次硬过滤：doc_id 不在白名单的一律丢弃（防 collected_ids 语义漂移）
@@ -373,11 +382,12 @@ def parent_chat(
         # 统一兜底话术（零编造；RAG 零命中不再各自造文案）
         fallback = pi.UNIFIED_FALLBACK
         diag["intent"] = intent_name
-        ps.add_message(
+        _msg = ps.add_message(
             db, thread_id=th.id, role=ROLE_ASSISTANT,
             content=fallback,
             retrieval_diag=diag or None,
         )
+        rag_trace.attach_message(diag.get("trace_id"), _msg.id)
         return {
             "thread": _thread_out(th), "answer": fallback,
             "refs": [], "escalated": False, "kind": "fallback", "intent": intent_name,
@@ -459,7 +469,8 @@ def parent_chat(
     store_diag = dict(diag or {})
     store_diag["intent"] = intent_name
     store_diag["refs"] = refs
-    ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=answer, tokens=tokens, retrieval_diag=store_diag)
+    _msg = ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=answer, tokens=tokens, retrieval_diag=store_diag)
+    rag_trace.attach_message(store_diag.get("trace_id"), _msg.id)
     return {
         "thread": _thread_out(th), "answer": answer, "refs": refs,
         "citations": {"refs": refs, "summary": rag.retrieval_summary(diag)},

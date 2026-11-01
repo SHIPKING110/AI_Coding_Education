@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import uuid
 from pathlib import Path
 
@@ -17,9 +16,22 @@ from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.crud import agent as agent_crud
 from app.crud import knowledge as knowledge_crud
+from app.crud import ppt_task as ppt_task_crud
 from app.crud import report as report_crud
 from app.models.user import User
-from app.services import agent_chat, agent_memory, agent_planner, agent_registry, agent_tools, llm, ppt_chat
+from app.services import (
+    agent_chat,
+    agent_intent,
+    agent_memory,
+    agent_ops,
+    agent_planner,
+    agent_registry,
+    agent_tools,
+    llm,
+    ppt_chat,
+    ppt_task,
+    rag_trace,
+)
 from app.services import rag as rag_service
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -224,7 +236,6 @@ def _class_eval_block(db: Session, user: User, context_ref: dict, max_chars: int
 
         from app.models.enrollment import Class
         from app.models.evaluation import Evaluation
-        from app.models.user import Role
 
         cls = db.get(Class, uuid.UUID(str(class_id)), options=[selectinload(Class.students)])
     except (ValueError, AttributeError):
@@ -237,7 +248,6 @@ def _class_eval_block(db: Session, user: User, context_ref: dict, max_chars: int
     try:
         from sqlalchemy import select
 
-        from app.models.evaluation import EvaluationStatus
 
         ev_stmt = select(Evaluation).order_by(Evaluation.updated_at.desc())
         if str(getattr(user, "role", "")) == "teacher":
@@ -509,6 +519,13 @@ def _page_num_key(name: str):
 def _conv_ppt_data(db, user, conv_id) -> list[dict]:
     """本会话（会话隔离目录）里各 Skill 的 PPT 项目数据：项目、页清单（文件名+真实标题）、成品。"""
     data: list[dict] = []
+    preferred = ""
+    try:
+        active = ppt_task_crud.get_active(db, conversation_id=conv_id)
+        if active is not None:
+            preferred = str(active.project_key or "").replace("\\", "/").strip("/")
+    except Exception:
+        preferred = ""
     try:
         from app.crud import agent_ext as _ext
         from app.services import skill_bundle as _bundle
@@ -548,6 +565,12 @@ def _conv_ppt_data(db, user, conv_id) -> list[dict]:
                 break
     except Exception:
         return []
+    # 有 active 契约时，只用契约指向的项目作为基线；否则多项目目录会让「补齐」
+    # 误读旧项目，进而另起一版（用户感知就是「又给了我一份不同的 PPT」）。
+    if preferred:
+        same = [d for d in data if str(d.get("rel") or "").strip("/") == preferred]
+        if same:
+            return same
     return data
 
 
@@ -1515,7 +1538,6 @@ def remove_conversation(conv_id: uuid.UUID, db: Session = Depends(get_db), user:
     output_urls: list[str] = []
     try:
         msgs = agent_crud.list_messages(db, conversation_id=conv.id, limit=500)
-        import re as _re
 
         for m in msgs:
             if not isinstance(m.citations, dict):
@@ -1605,6 +1627,50 @@ def conversation_chat(
         if reps:
             material = ppt_chat.combined_report_material(db, reps)
 
+    # 意图分类 + run trace：每条用户消息都留痕，RAG 指标才有正确分母
+    # （寒暄/业务查询/PPT 任务本来就不需要检索，不能算成「检索失败」）。
+    _recent_tool_names: list[str] = []
+    try:
+        for _m in agent_crud.recent_messages(db, conversation_id=conv.id, limit=6):
+            if _m.role == "assistant" and isinstance(_m.citations, dict):
+                for _t in (_m.citations.get("tools") or []):
+                    if isinstance(_t, dict) and _t.get("tool"):
+                        _recent_tool_names.append(str(_t["tool"]))
+    except Exception:
+        _recent_tool_names = []
+    try:
+        _has_docs = bool(knowledge_crud.collected_doc_ids(db, user_id=user.id))
+    except Exception:
+        _has_docs = False
+    intent_info = agent_intent.classify(
+        message,
+        agent_id=conv.agent_id,
+        stage=stage,
+        has_docs=_has_docs,
+        rag_enabled=bool(conv.rag_enabled),
+        recent_tools=_recent_tool_names,
+    )
+    _initial_rag_decision = "pending"
+    _initial_skip_reason = ""
+    if not intent_info.get("needs_rag"):
+        _initial_rag_decision = "skipped_by_intent"
+        _initial_skip_reason = f"intent:{intent_info.get('intent')}:{intent_info.get('reason')}"
+    run_id = agent_ops.start_run(
+        conversation_id=conv.id,
+        agent_id=conv.agent_id,
+        user_id=user.id,
+        owner_id=user.id,
+        domain="agent_teacher",
+        intent=intent_info.get("intent") or "unknown",
+        intent_confidence=float(intent_info.get("intent_confidence") or 0),
+        intent_source=intent_info.get("intent_source") or "rule",
+        needs_rag=bool(intent_info.get("needs_rag")),
+        rag_decision=_initial_rag_decision,
+        rag_skip_reason=_initial_skip_reason,
+        task_kind=intent_info.get("task_kind") or "chat",
+        attributes={"intent_reason": intent_info.get("reason")},
+    )
+
     mem_ctx = agent_memory.build_memory_context(
         db, owner_id=user.id, agent_id=conv.agent_id, conversation_id=conv.id, query=message
     )
@@ -1649,8 +1715,15 @@ def conversation_chat(
             from app.services import mcp_runner as _mcp
 
             # 压入教师个人模型配置：规划调用走自配模型，否则全局无 key 时报 Missing credentials
-            with _llm_ctx.use_llm(resolved):
-                mcp_block, mcp_tool_names, mcp_trace = _mcp.run(db, user.id, conv.agent_id, message.strip())
+            with agent_ops.span(span_type="mcp", name="mcp.run", run_id=run_id) as _mcp_sp:
+                with _llm_ctx.use_llm(resolved):
+                    mcp_block, mcp_tool_names, mcp_trace = _mcp.run(db, user.id, conv.agent_id, message.strip())
+                _mcp_sp.summary = f"工具 {len(mcp_tool_names)} 个；trace {len(mcp_trace)} 步"
+                _mcp_sp.attributes = {"tools": mcp_tool_names, "trace_steps": len(mcp_trace)}
+                if not mcp_tool_names:
+                    _mcp_sp.status = "skipped"
+            if mcp_tool_names:
+                agent_ops.update_run(run_id, mcp_calls=len(mcp_tool_names))
             if mcp_block:
                 mem_block = (mem_block + "\n\n" + mcp_block).strip() if mem_block else mcp_block
     except Exception:
@@ -1663,22 +1736,65 @@ def conversation_chat(
     want_rag = body.use_rag if body.use_rag is not None else bool(conv.rag_enabled)
     rag_auto = False
     citations: dict | None = None
+    rag_trace_id_holder: list[str | None] = [None]
     if agent_info.get("supports_rag") and message.strip() and (
         want_rag or (body.use_rag is None and not conv.rag_enabled)
     ):
+        diag: dict = {}
+        hits: list[dict] = []
         try:
             # 寒暄类消息跳过检索：省一次向量化，首字更快
             if rag_service.needs_retrieval(message.strip()):
                 collected = knowledge_crud.collected_doc_ids(db, user_id=user.id)
-                # 压入教师个人配置：检索向量化走自配 embedding 模型
-                diag: dict = {}
-                with _llm_ctx.use_llm(resolved):
-                    hits = rag_service.retrieve(
-                        message.strip(), db=db, owner_id=user.id, collected_ids=collected, diag=diag
+                if not collected:
+                    agent_ops.update_run(
+                        run_id, rag_decision="skipped_no_docs",
+                        rag_skip_reason="no_collected_docs",
                     )
+                else:
+                    # 压入教师个人配置：检索向量化走自配 embedding 模型
+                    with rag_trace.trace_scope(
+                        domain="agent_teacher",
+                        user_id=user.id,
+                        owner_id=user.id,
+                        conversation_id=conv.id,
+                        route="agent_teacher",
+                    ):
+                        with agent_ops.span(
+                            span_type="rag", name="rag.retrieve", run_id=run_id,
+                            attributes={"query": message.strip()[:300]},
+                        ) as _rag_sp:
+                            with _llm_ctx.use_llm(resolved):
+                                hits = rag_service.retrieve(
+                                    message.strip(), db=db, owner_id=user.id,
+                                    collected_ids=collected, diag=diag,
+                                    route_key="agent_teacher",
+                                )
+                            _rag_sp.summary = rag_service.retrieval_summary(diag)
+                            _rag_sp.attributes = {
+                                "trace_id": diag.get("trace_id"),
+                                "hits": len(hits),
+                                "vector": bool(diag.get("vector")),
+                                "keyword": bool(diag.get("keyword")),
+                                "rerank": bool(diag.get("rerank")),
+                            }
+                    rag_trace_id_holder[0] = diag.get("trace_id")
+                    agent_ops.update_run(
+                        run_id,
+                        rag_decision="used" if not rag_auto else "auto",
+                        retrieval_trace_id=diag.get("trace_id"),
+                        rag_calls=1,
+                        rag_skip_reason="" if hits else "zero_result",
+                    )
+            else:
+                agent_ops.update_run(
+                    run_id, rag_decision="skipped_by_intent",
+                    rag_skip_reason="smalltalk",
+                )
             if hits:
                 if not want_rag:
                     rag_auto = True
+                agent_ops.update_run(run_id, rag_decision="auto" if rag_auto else "used")
                 citations = {
                     "hits": hits,
                     # 检索诊断：向量/关键词/重排是否真的生效（前端展示 + 排障）
@@ -1688,6 +1804,7 @@ def conversation_chat(
                         "rerank": bool(diag.get("rerank")),
                         "rerank_model": diag.get("rerank_model"),
                         "summary": rag_service.retrieval_summary(diag),
+                        "trace_id": diag.get("trace_id"),
                     },
                 }
                 if rag_auto:
@@ -1701,8 +1818,11 @@ def conversation_chat(
                     + "\n回答时优先依据上述片段，并在末尾给出引用来源。"
                 )
                 mem_block = (mem_block + "\n\n" + rag_block).strip() if mem_block else rag_block
-        except Exception:
-            pass
+        except Exception as exc:
+            agent_ops.update_run(
+                run_id, rag_decision="error", rag_skip_reason="retrieval_exception",
+                error_code="rag_error", error_message=str(exc)[:500],
+            )
     # 智能助手：多轮规划层执行只读业务工具（排课考勤/教学数据/班级/学员/评估）或 Skill 脚本。
     # 规划→执行→观察，带预算护栏与降级；非业务问题或失败时静默跳过，不影响流式回答。
     # 长耗时（沙箱建实例/装依赖按分钟计）不能在发流前同步等：提前扔后台线程，
@@ -1775,7 +1895,7 @@ def conversation_chat(
     plan_thread = None
     # 实时执行事件队列：规划线程每完成/开始一步就 push 到这里，event_stream 边等边推给前端
     import queue as _live_queue_mod
-    live_queue: "_live_queue_mod.Queue" = _live_queue_mod.Queue()
+    live_queue: _live_queue_mod.Queue = _live_queue_mod.Queue()
     # 重试会让规划器内部的 seq 从 1 重新计数，这里做单调映射，避免前端按 seq 去重时互相覆盖
     _seq_state = {"offset": 0, "max": 0}
 
@@ -1812,6 +1932,7 @@ def conversation_chat(
 
         def _run_plan():
             sdb = _SessionLocal()
+            _run_token = agent_ops.push_run(run_id)
             try:
                 from app.models.user import User as _User
 
@@ -1819,6 +1940,29 @@ def conversation_chat(
                 if suser is None:
                     plan_box["outcome"] = agent_planner.PlanOutcome()
                     return
+                # PPT 契约：生成前先冻结目标页数与页序；后续补齐/改页都围绕同一份契约。
+                plan_context = conv_ppt_block or ""
+                contract = None
+                if skill_mode:
+                    try:
+                        contract = ppt_task.ensure_contract(
+                            sdb,
+                            conversation_id=conv.id,
+                            owner_id=suser.id,
+                            agent_id=conv.agent_id,
+                            message=_msg,
+                            state_outline=(state or {}).get("outline"),
+                            material_text=json.dumps(material or {}, ensure_ascii=False)[:4000],
+                        )
+                        if contract is not None:
+                            plan_context = (
+                                (plan_context + "\n\n" + ppt_task.contract_block(contract)).strip()
+                                if plan_context else ppt_task.contract_block(contract)
+                            )
+                            plan_box["contract"] = contract
+                    except Exception:
+                        logger.exception("ppt contract ensure failed conv=%s", conv.id)
+                        contract = None
 
                 def _plan_once(msg_text: str, hist_items: list[tuple[str, str]]):
                     if skill_mode:
@@ -1826,12 +1970,12 @@ def conversation_chat(
                         return agent_planner.plan_and_run(
                             sdb, suser, msg_text, conversation_id=conv.id, agent_id=conv.agent_id,
                             max_rounds=16, max_calls=30, time_budget_ms=600000,
-                            history=hist_items, context_block=conv_ppt_block or None,
+                            history=hist_items, context_block=plan_context or None,
                             on_step=_emit_step,
                         )
                     return agent_planner.plan_and_run(
                         sdb, suser, msg_text, conversation_id=conv.id, agent_id=conv.agent_id,
-                        history=hist_items, context_block=conv_ppt_block or None,
+                        history=hist_items, context_block=plan_context or None,
                         on_step=_emit_step,
                     )
                 # 线程不继承 contextvar：在此重新压入教师个人模型配置，否则规划模型拿不到 Key
@@ -1910,6 +2054,33 @@ def conversation_chat(
                                    "建议用户怎么调整（不要输出内部过程旁白、不要只说下一步计划）。",
                             hist,
                         )
+                    # ③ 契约校验：计划 28 页、实际 26 页时，自动按缺失页补一轮，而不是把
+                    # 缺页成品当成功交给用户（用户再喊「补齐」时也不会另起一版）。
+                    if contract is not None:
+                        def _sync_contract(o):
+                            nonlocal contract
+                            v = ppt_task.sync_from_outcome(sdb, contract, o)
+                            contract = ppt_task_crud.get_by_id(sdb, contract.id) or contract
+                            plan_box["contract"] = contract
+                            plan_box["contract_validation"] = v
+                            return v
+
+                        validation = _sync_contract(out)
+                        repair_round = 0
+                        while (
+                            skill_mode
+                            and not validation.get("aligned")
+                            and int(validation.get("target_page_count") or 0) > 0
+                            and repair_round < 2
+                        ):
+                            repair_round += 1
+                            prompt = _msg + "\n\n" + ppt_task.repair_prompt(contract, message=_msg)
+                            logger.info("ppt contract mismatch → repair round %s (conv=%s target=%s current=%s)",
+                                        repair_round, conv.id, validation.get("target_page_count"),
+                                        validation.get("current_page_count"))
+                            out = _plan_once(prompt, hist)
+                            validation = _sync_contract(out)
+                        plan_box["contract_validation"] = validation
                     plan_box["outcome"] = out
                     logger.info("plan done agent=%s skill_mode=%s steps=%s",
                                 conv.agent_id, skill_mode, [s.tool for s in out.steps])
@@ -1917,6 +2088,7 @@ def conversation_chat(
                 logger.exception("plan failed agent=%s skill_mode=%s", conv.agent_id, skill_mode)
                 plan_box["error"] = e
             finally:
+                agent_ops.pop_run(_run_token)
                 sdb.close()
 
         plan_thread = _plan_th.Thread(target=_run_plan, daemon=True)
@@ -1933,6 +2105,10 @@ def conversation_chat(
     def event_stream():
         # 最外层兜底：任何未预期异常都必须以 error 帧结束，绝不能让前端无限卡"接收中"
         nonlocal plan_outcome, mem_block, tool_names, system, prompt
+        import time as _etime
+
+        _run_t0 = _etime.monotonic()
+        _event_token = agent_ops.push_run(run_id)
         try:
             # 等后台规划：边等边把每一步执行结果实时推给前端（tool_step 帧），
             # 不再是「整轮结束才一次性看到全链路」的黑盒等待；空闲约 5s 仍发一次心跳。
@@ -1980,6 +2156,12 @@ def conversation_chat(
                 got = plan_box.get("outcome")
                 if isinstance(got, agent_planner.PlanOutcome):
                     plan_outcome = got
+            contract_obj = plan_box.get("contract")
+            if contract_obj is not None:
+                agent_ops.update_run(run_id, task_kind="ppt")
+                block = ppt_task.contract_block(contract_obj)
+                if block:
+                    mem_block = (mem_block + "\n\n" + block).strip() if mem_block else block
             tool_names = plan_outcome.tools
             # 页级改动回执：确定性对比「改动前页清单 vs 本轮成品页清单」，
             # 让正文开头一定有计划（新增/删除了哪些页、插在第几页后、页数变化），
@@ -2027,11 +2209,27 @@ def conversation_chat(
                 yield _frame({"tools_live": _tool_trace(plan_outcome)})
             with _llm_ctx.use_llm(resolved):
                 yield from _run_stream()
+            _skill_tools = {"write_skill_file", "delete_skill_file", "run_skill_script", "read_skill_file"}
+            agent_ops.finish_run(
+                run_id,
+                status="ok",
+                latency_ms=int((_etime.monotonic() - _run_t0) * 1000),
+                tool_calls=len(plan_outcome.steps),
+                skill_calls=sum(1 for s in plan_outcome.steps if s.tool in _skill_tools),
+                model_calls=1 + (1 if plan_outcome.steps else 0),
+            )
         except Exception as e:  # noqa: BLE001
+            agent_ops.finish_run(
+                run_id, status="error", error_code="stream_error",
+                error_message=str(e)[:1000],
+                latency_ms=int((_etime.monotonic() - _run_t0) * 1000),
+            )
             try:
                 yield _frame({"error": llm.friendly_llm_error(e)})
             except Exception:
                 pass
+        finally:
+            agent_ops.pop_run(_event_token)
 
     def _run_stream():
         import queue
@@ -2039,6 +2237,7 @@ def conversation_chat(
         import time as _time
 
         full = ""
+        _contract_ref = plan_box.get("contract")
         try:
             yield _frame({"phase": {"key": "read", "label": "读取会话与记忆"}})
             if tool_names:
@@ -2052,29 +2251,33 @@ def conversation_chat(
             box: queue.Queue = queue.Queue()
 
             def _produce():
-                # 线程不继承 contextvar，在此重新压入教师个人配置
-                with _llm_ctx.use_llm(resolved):
-                    try:
-                        # 上传的图片 → data URL 多模态直传（deepseek-flash 等视觉模型可直读）；
-                        # 模型/网关不接受图片输入时自动降级为纯文本，不让整轮对话失败。
-                        imgs = _image_data_urls(body.attachments or [])
-                        if imgs:
-                            try:
-                                for chunk in llm.stream_text(system, prompt, images=imgs):
-                                    box.put(("delta", chunk))
-                                box.put(("end", None))
-                                return
-                            except Exception as e:  # noqa: BLE001
-                                if not _looks_like_vision_rejection(e):
-                                    raise
-                                logger.warning("vision stream rejected, fallback text-only: %s", e)
-                                box.put(("delta", "（当前模型未接受图片输入，本轮按图片文件名与文字理解；如需识图请改用支持视觉的模型，如 deepseek-flash。）\n\n"))
-                        for chunk in llm.stream_text(system, prompt):
-                            box.put(("delta", chunk))
-                        box.put(("end", None))
-                    except Exception as e:  # noqa: BLE001
-                        logger.exception("chat stream failed conv=%s", conv.id)
-                        box.put(("error", e))
+                # 线程不继承 contextvar，在此重新压入教师个人配置与 run 上下文
+                _prod_token = agent_ops.push_run(run_id)
+                try:
+                    with _llm_ctx.use_llm(resolved):
+                        try:
+                            # 上传的图片 → data URL 多模态直传（deepseek-flash 等视觉模型可直读）；
+                            # 模型/网关不接受图片输入时自动降级为纯文本，不让整轮对话失败。
+                            imgs = _image_data_urls(body.attachments or [])
+                            if imgs:
+                                try:
+                                    for chunk in llm.stream_text(system, prompt, images=imgs):
+                                        box.put(("delta", chunk))
+                                    box.put(("end", None))
+                                    return
+                                except Exception as e:  # noqa: BLE001
+                                    if not _looks_like_vision_rejection(e):
+                                        raise
+                                    logger.warning("vision stream rejected, fallback text-only: %s", e)
+                                    box.put(("delta", "（当前模型未接受图片输入，本轮按图片文件名与文字理解；如需识图请改用支持视觉的模型，如 deepseek-flash。）\n\n"))
+                            for chunk in llm.stream_text(system, prompt):
+                                box.put(("delta", chunk))
+                            box.put(("end", None))
+                        except Exception as e:  # noqa: BLE001
+                            logger.exception("chat stream failed conv=%s", conv.id)
+                            box.put(("error", e))
+                finally:
+                    agent_ops.pop_run(_prod_token)
 
             t0 = _time.monotonic()
             threading.Thread(target=_produce, daemon=True).start()
@@ -2174,6 +2377,41 @@ def conversation_chat(
                         _need = True
             if _need and _syn:
                 full = (full.rstrip() + "\n\n" + _syn) if _txt else _syn
+        # 契约最终校验：以 build 回执为准，把「目标页数 / 实际页数 / 缺失页」写进正文。
+        # 这样用户不会再看到「规划 28 页、实际 26 页」却没有任何解释。
+        if _contract_ref is not None:
+            try:
+                latest = ppt_task_crud.get_by_id(db, _contract_ref.id) or _contract_ref
+                if any(s.tool in ("write_skill_file", "delete_skill_file", "run_skill_script")
+                       for s in plan_outcome.steps):
+                    plan_box["contract_validation"] = ppt_task.sync_from_outcome(db, latest, plan_outcome)
+                    latest = ppt_task_crud.get_by_id(db, latest.id) or latest
+                v = plan_box.get("contract_validation") or ppt_task.validate(latest)
+                target_n = int(v.get("target_page_count") or 0)
+                current_n = int(v.get("current_page_count") or 0)
+                if not v.get("aligned"):
+                    missing = v.get("missing") or []
+                    miss_txt = "、".join(f"第{m['order']}页《{m['title']}》" for m in missing[:8])
+                    note = (
+                        f"⚠️ 契约校验：目标 {target_n} 页，当前 {current_n} 页"
+                        + (f"，缺 {miss_txt}" if miss_txt else "")
+                        + "。已尝试自动补齐；若仍缺页，可点「补齐缺失页」继续。"
+                    )
+                else:
+                    note = f"✅ 契约校验：{target_n}/{target_n} 页已对齐。"
+                if "契约校验" not in (full or ""):
+                    full = ((full or "").rstrip() + "\n\n" + note).strip()
+                plan_box["contract"] = latest
+                agent_ops.update_run(
+                    run_id,
+                    ppt_target_pages=target_n,
+                    ppt_current_pages=current_n,
+                    ppt_aligned=bool(v.get("aligned")),
+                    ppt_project_key=latest.project_key or "",
+                    artifact_url=latest.current_pptx_url or "",
+                )
+            except Exception:
+                logger.exception("contract final validation failed conv=%s", conv.id)
         # 无成品兜底：PPT/Skill 任务跑了但没导出 pptx 时，绝不把「内部过程旁白」丢给用户。
         #  - 旁白式回复（「我先把报告读出来/再重跑」）或空内容 → 换成可执行的下一步说明；
         #  - 已自愈两轮仍失败时，正文里也不允许出现空洞的成功口径（有「已生成/下载」但无成品 → 追加真实状态）。
@@ -2211,15 +2449,33 @@ def conversation_chat(
             msg_citations["tools"] = tool_trace
             msg_citations["rounds"] = plan_outcome.rounds
             msg_citations["degraded"] = plan_outcome.degraded
+        if _contract_ref is not None:
+            try:
+                latest = ppt_task_crud.get_by_id(db, _contract_ref.id) or _contract_ref
+                v = plan_box.get("contract_validation") or ppt_task.validate(latest)
+                msg_citations = dict(msg_citations or {})
+                msg_citations["ppt_task"] = {
+                    "id": str(latest.id),
+                    "target_page_count": v.get("target_page_count"),
+                    "current_page_count": v.get("current_page_count"),
+                    "aligned": bool(v.get("aligned")),
+                    "missing": v.get("missing") or [],
+                    "project_key": latest.project_key,
+                    "pptx_url": latest.current_pptx_url,
+                }
+            except Exception:
+                pass
         # 首轮问答后自动拟标题：默认标题才改，用户改过的保持不动
         auto_title: str | None = None
         if (conv.title or "新的对话") == "新的对话" and message.strip():
             auto_title = message.strip().replace("\n", " ")[:16]
         try:
-            agent_crud.add_message(
+            _saved_msg = agent_crud.add_message(
                 db, conversation_id=conv.id, role="assistant", content=full,
                 citations=msg_citations, options=options or None, spec=spec or None,
             )
+            rag_trace.attach_message(rag_trace_id_holder[0], _saved_msg.id)
+            agent_ops.attach_message(run_id, _saved_msg.id)
             updates: dict = {}
             if final_stage != conv.stage:
                 updates["stage"] = final_stage

@@ -203,6 +203,7 @@ export interface RetrievalInfo {
   rerank: boolean
   rerank_model?: string | null
   summary: string
+  trace_id?: string | null
 }
 
 /** 统一流式对话：SSE，回调 delta；onPhase 回调阶段；onDone 回调完成帧（含 stage/options/工具轨迹） */

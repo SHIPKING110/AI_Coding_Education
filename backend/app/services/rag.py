@@ -131,6 +131,29 @@ def chunk_semantic(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK
     return [c for c in chunks if c]
 
 
+def _build_parent_texts(chunks: list[str], parent_size: int) -> list[str | None]:
+    """父子切分：把连续子块聚合成父块作为 LLM 上下文。
+
+    父块只用于“命中后回填上下文”，不参与向量化；parent_size<=0 时关闭。
+    """
+    if parent_size <= 0 or not chunks:
+        return [None] * len(chunks)
+    out: list[str | None] = []
+    buf: list[str] = []
+    buf_len = 0
+    for c in chunks:
+        if buf and buf_len + len(c) > parent_size:
+            parent = "\n\n".join(buf).strip()
+            out.extend([parent] * len(buf))
+            buf, buf_len = [], 0
+        buf.append(c)
+        buf_len += len(c) + 2
+    if buf:
+        parent = "\n\n".join(buf).strip()
+        out.extend([parent] * len(buf))
+    return out
+
+
 _embed_resolved_cache: tuple[float, object] = (0.0, None)
 _EMBED_TTL_S = 30.0
 _EMBED_CACHE_LOCK = threading.Lock()
@@ -183,6 +206,56 @@ def get_collection():
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     return client.get_or_create_collection(_collection_name())
+
+
+def active_collection_name() -> str:
+    """当前生效集合名（embedding 指纹分片）。"""
+    return _collection_name()
+
+
+def collection_stats() -> dict:
+    """当前集合与历史集合的文档/分片计数，供后台运维展示。"""
+    import chromadb
+
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    items: list[dict] = []
+    for col in client.list_collections():
+        if not col.name.startswith(COLLECTION_BASE):
+            continue
+        try:
+            count = int(col.count())
+        except Exception:
+            count = 0
+        items.append({"name": col.name, "count": count, "active": col.name == _collection_name()})
+    return {"active": _collection_name(), "collections": items}
+
+
+def get_document_chunks(doc_id: uuid.UUID | str, *, limit: int = 500) -> list[dict]:
+    """读取某文档的分片（当前集合），供后台详情/检索反查。"""
+    try:
+        col = get_collection()
+        got = col.get(where={"doc_id": str(doc_id)}, include=["documents", "metadatas"])
+    except Exception:
+        return []
+    docs = got.get("documents") or []
+    metas = got.get("metadatas") or []
+    ids = got.get("ids") or []
+    out: list[dict] = []
+    for i, (vid, text, meta) in enumerate(zip(ids, docs, metas)):
+        if i >= limit:
+            break
+        meta = meta or {}
+        out.append({
+            "id": vid,
+            "chunk_no": meta.get("chunk_no"),
+            "title": meta.get("title", ""),
+            "chars": len(text or ""),
+            "preview": (text or "")[:600],
+            "has_parent": bool(meta.get("parent_text")),
+        })
+    out.sort(key=lambda x: (x.get("chunk_no") is None, x.get("chunk_no") or 0))
+    return out
 
 
 _embed_client_cache: dict = {}
@@ -682,26 +755,34 @@ def index_document(
     采用语义切片（标题/段落感知 + 重叠）；向量化走 embed_texts 的持久化缓存，
     文档更新时未变化的分片命中缓存、不重复消耗 Token。
     """
-    chunks = chunk_semantic(text)
+    try:
+        from app.services import rag_settings
+
+        cfg = rag_settings.get_config()
+        chunk_size = int(cfg.get("chunk_size", CHUNK_SIZE))
+        overlap = int(cfg.get("chunk_overlap", CHUNK_OVERLAP))
+        parent_size = int(cfg.get("parent_chunk_size", 0) or 0)
+    except Exception:
+        chunk_size, overlap, parent_size = CHUNK_SIZE, CHUNK_OVERLAP, 0
+    chunks = chunk_semantic(text, chunk_size, overlap)
     if on_progress is not None:
         on_progress("chunk", 40, f"切块完成，共 {len(chunks)} 块")
     if not chunks:
         return 0
+    parent_texts = _build_parent_texts(chunks, parent_size)
     col = get_collection()
     delete_document_vectors(doc_id)
     if on_progress is not None:
         on_progress("embed", 65, "向量化中…")
     embs = embed_texts(chunks)
     ids = [f"{doc_id}:{i}" for i in range(len(chunks))]
-    col.upsert(
-        ids=ids,
-        embeddings=embs,
-        documents=chunks,
-        metadatas=[
-            {"doc_id": str(doc_id), "owner_id": str(owner_id), "title": title, "chunk_no": i}
-            for i in range(len(chunks))
-        ],
-    )
+    metas = []
+    for i in range(len(chunks)):
+        meta = {"doc_id": str(doc_id), "owner_id": str(owner_id), "title": title, "chunk_no": i}
+        if parent_texts[i]:
+            meta["parent_text"] = parent_texts[i]
+        metas.append(meta)
+    col.upsert(ids=ids, embeddings=embs, documents=chunks, metadatas=metas)
     return len(chunks)
 
 
@@ -744,10 +825,18 @@ def _rerank_circuit_open() -> bool:
 
 def _rerank_on_fail() -> None:
     global _RERANK_FAIL_STREAK, _RERANK_CIRCUIT_UNTIL
+    try:
+        from app.services import rag_settings
+
+        cfg = rag_settings.get_config()
+        threshold = int(cfg.get("rerank_circuit_threshold", _RERANK_CIRCUIT_THRESHOLD))
+        cooldown = int(cfg.get("rerank_circuit_cooldown_s", 60))
+    except Exception:
+        threshold, cooldown = _RERANK_CIRCUIT_THRESHOLD, 60
     with _RERANK_FAIL_LOCK:
         _RERANK_FAIL_STREAK += 1
-        if _RERANK_FAIL_STREAK >= _RERANK_CIRCUIT_THRESHOLD:
-            _RERANK_CIRCUIT_UNTIL = time.time() + 60.0
+        if _RERANK_FAIL_STREAK >= threshold:
+            _RERANK_CIRCUIT_UNTIL = time.time() + cooldown
 
 
 def _rerank_on_success() -> None:
@@ -834,10 +923,16 @@ def rerank_documents(query: str, documents: list[str], resolved) -> tuple[list[i
         "return_documents": False,
     }
     headers = {"Authorization": f"Bearer {resolved.api_key}"}
+    try:
+        from app.services import rag_settings
+
+        timeout_s = float(rag_settings.get_config().get("rerank_timeout_s", RERANK_TIMEOUT_S))
+    except Exception:
+        timeout_s = RERANK_TIMEOUT_S
     tried: list[str] = []
     last: Exception | None = None
     data: dict | None = None
-    with httpx.Client(timeout=RERANK_TIMEOUT_S) as client:
+    with httpx.Client(timeout=timeout_s) as client:
         for url in _rerank_url_candidates(base):
             tried.append(url)
             try:
@@ -869,7 +964,6 @@ def rerank_documents(query: str, documents: list[str], resolved) -> tuple[list[i
 
 def _apply_rerank(query: str, cands: list[dict], db, owner_id) -> tuple[list[dict], dict]:
     """对过召回候选做重排；任何失败/超时/熔断 → 原样返回向量序（静默降级）。
-
     返回 (重排后候选, 诊断)。诊断含是否真的重排成功、所用模型、候选数，
     供上层观测「向量检索与重排到底有没有生效」。重排命中的分片会带上 rerank_score。
     """
@@ -896,12 +990,65 @@ def _apply_rerank(query: str, cands: list[dict], db, owner_id) -> tuple[list[dic
         return cands, meta
 
 
+_QUERY_SYNONYMS = {
+    "退费": "退款 退费 退课",
+    "请假": "请假 缺勤 缺席",
+    "收费": "收费 费用 价格",
+    "课时": "课时 课次 剩余课时",
+    "排课": "排课 上课时间 课程安排",
+}
+
+
+def _rewrite_query(query: str, cfg: dict) -> tuple[str, bool]:
+    """轻量 query 改写：仅在配置开启时做业务同义词扩展。"""
+    q = _norm_text(query)
+    if not cfg.get("query_rewrite_enabled"):
+        return q, False
+    extras: list[str] = []
+    for k, v in _QUERY_SYNONYMS.items():
+        if k in q:
+            extras.extend(x for x in v.split() if x not in q)
+    if not extras:
+        return q, False
+    return f"{q} {' '.join(dict.fromkeys(extras))}", True
+
+
+def _rrf_merge(vector_cands: list[dict], keyword_cands: list[dict], *, k: int = 60) -> list[dict]:
+    """RRF 融合向量与关键词候选：只看排名，不比较量纲。"""
+    merged: dict[tuple[str, str], dict] = {}
+    scores: dict[tuple[str, str], float] = {}
+    for source, items in (("v", vector_cands), ("k", keyword_cands)):
+        for rank, c in enumerate(items):
+            key = (str(c.get("doc_id") or ""), (c.get("text") or "")[:120])
+            if key not in merged:
+                merged[key] = dict(c)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+    out = []
+    for key, c in merged.items():
+        c["rrf_score"] = round(scores[key], 6)
+        out.append(c)
+    out.sort(key=lambda x: x.get("rrf_score", 0.0), reverse=True)
+    return out
+
+
+def _hit_preview(hit: dict, *, limit: int = 500) -> dict:
+    """trace 里只保留命中预览，避免重复存储整篇文档。"""
+    return {
+        "doc_id": str(hit.get("doc_id") or ""),
+        "title": hit.get("title", ""),
+        "similarity": hit.get("similarity"),
+        "rerank_score": hit.get("rerank_score"),
+        "rrf_score": hit.get("rrf_score"),
+        "preview": (hit.get("text") or "")[:limit],
+    }
+
+
 def retrieve(
     query: str, *, db, owner_id: uuid.UUID, collected_ids: list[uuid.UUID] | None = None,
-    top_k: int = TOP_K_DEFAULT, min_similarity: float | None = None, per_doc_cap: int = 2,
-    rerank: bool = True, diag: dict | None = None,
+    top_k: int | None = None, min_similarity: float | None = None, per_doc_cap: int | None = None,
+    rerank: bool = True, diag: dict | None = None, route_key: str | None = None,
 ) -> list[dict]:
-    """两阶段检索：向量过召回（top_k*5）→（可选）rerank 精排 → 取 top_k。
+    """两阶段检索：向量过召回（top_k*oversample）→（可选）rerank 精排 → 取 top_k。
 
     精准性保障：
     - enabled=false / 非 ready / 已删除的文档，其分片一律过滤（作者关掉即不参与）；
@@ -910,91 +1057,204 @@ def retrieve(
     - rerank 未配置或失败时自动退化为单层向量召回（保证不回归）。
 
     diag：若传入 dict，则回填本次检索的可观测诊断（向量/关键词/重排是否生效、
-    各阶段计数），用于前端「引用来源」标注与运维排查。
+    各阶段计数、trace_id），用于前端「引用来源」标注与运维排查。
     """
     from app.core.config import get_settings
     from app.crud import knowledge as _kb
+    from app.services import rag_settings, rag_trace
 
-    # 阈值门控：显式 min_similarity 优先，否则取全局 RAG_MIN_SIMILARITY（默认 0.35）。
-    # 评估暴露 0.15 过松 → 低相关过度召回（反例「午餐吃什么」也捞到片段）。
-    gate = float(min_similarity) if min_similarity is not None else float(get_settings().RAG_MIN_SIMILARITY)
+    trace = rag_trace.current_trace()
+    try:
+        cfg = rag_settings.get_config(db)
+    except Exception:
+        cfg = {}
+    route_key = route_key or (trace.route if trace else "") or "default"
+    overrides = (cfg.get("route_overrides") or {}).get(route_key) or {}
+    if top_k is None:
+        top_k = int(overrides.get("top_k", cfg.get("top_k", TOP_K_DEFAULT)))
+    if per_doc_cap is None:
+        per_doc_cap = int(overrides.get("per_doc_cap", cfg.get("per_doc_cap", 2)))
+    if min_similarity is None:
+        min_similarity = overrides.get("min_similarity", cfg.get("min_similarity"))
+    if min_similarity is None:
+        min_similarity = get_settings().RAG_MIN_SIMILARITY
+    gate = float(min_similarity)
+    oversample = int(overrides.get("rerank_oversample", cfg.get("rerank_oversample", RERANK_OVERSAMPLE)))
+
     d = diag if diag is not None else {}
-    d.update({"vector": False, "keyword": False, "rerank": False, "rerank_model": None, "gate": gate})
+    d.update({
+        "vector": False, "keyword": False, "rerank": False, "rerank_model": None,
+        "gate": gate, "route": route_key, "stage_timings": {},
+    })
+    if trace is not None:
+        d["trace_id"] = trace.trace_id
     t0 = time.time()
     where: dict
-    collected = [str(d) for d in (collected_ids or [])]
+    collected = [str(x) for x in (collected_ids or [])]
     if collected:
         where = {"$or": [{"owner_id": str(owner_id)}, {"doc_id": {"$in": collected}}]}
     else:
         where = {"owner_id": str(owner_id)}
-    n_fetch = max(top_k * (RERANK_OVERSAMPLE if rerank else 1), 10)
+    n_fetch = max(int(top_k) * (oversample if rerank else 1), 10)
 
-    # —— 第一阶段：向量召回（embedding 不可用/异常/无结果时静默降级到关键词） ——
-    cands: list[dict] = []
+    rewritten, did_rewrite = _rewrite_query(query, cfg)
+    d["query_rewritten"] = did_rewrite
+    search_query = rewritten if did_rewrite else query
+
+    keyword_candidates = 0
+    rerank_in = 0
+    parent_texts: dict[int, str] = {}
+
+    def _emit(out: list[dict], *, error: str | None = None) -> None:
+        if trace is None:
+            return
+        elapsed_ms = int((time.time() - t0) * 1000)
+        timings = dict(trace.stage_timings)
+        timings.update(d.get("stage_timings") or {})
+        rag_trace.record(
+            trace,
+            query=query,
+            rewritten_query=search_query,
+            filters=where,
+            embedding_fingerprint=active_collection_name() if not error else "",
+            vector_candidates=int(d.get("vector_in", 0) or 0),
+            keyword_candidates=keyword_candidates,
+            rerank_candidates=rerank_in,
+            gated_out=int(d.get("gated_out", 0) or 0),
+            vector_ok=bool(d.get("vector")),
+            keyword_used=bool(d.get("keyword")),
+            rerank_ok=bool(d.get("rerank")),
+            rerank_model=d.get("rerank_model") or "",
+            zero_result=not out,
+            is_error=bool(error),
+            error=error,
+            latency_ms=elapsed_ms,
+            stage_timings=timings,
+            hits=[_hit_preview(h) for h in out],
+        )
+
     try:
-        col = get_collection()
-        q_emb = embed_texts([query])[0]
-        res = col.query(query_embeddings=[q_emb], n_results=n_fetch, where=where)
-        docs = (res.get("documents") or [[]])[0]
-        metas = (res.get("metadatas") or [[]])[0]
-        dists = (res.get("distances") or [[]])[0]
-        for doc, meta, dist in zip(docs, metas, dists):
-            sim = round(1 - float(dist) / 2, 4) if dist is not None else 0.0
-            if sim < gate:
-                d["gated_out"] = d.get("gated_out", 0) + 1
+        # —— 第一阶段：向量召回（embedding 不可用/异常/无结果时静默降级到关键词） ——
+        cands: list[dict] = []
+        t_vec = time.time()
+        try:
+            col = get_collection()
+            q_emb = embed_texts([search_query])[0]
+            res = col.query(query_embeddings=[q_emb], n_results=n_fetch, where=where)
+            docs = (res.get("documents") or [[]])[0]
+            metas = (res.get("metadatas") or [[]])[0]
+            dists = (res.get("distances") or [[]])[0]
+            for doc, meta, dist in zip(docs, metas, dists):
+                sim = round(1 - float(dist) / 2, 4) if dist is not None else 0.0
+                if sim < gate:
+                    d["gated_out"] = d.get("gated_out", 0) + 1
+                    continue
+                cands.append({
+                    "text": doc, "title": (meta or {}).get("title", ""),
+                    "doc_id": (meta or {}).get("doc_id", ""), "similarity": sim,
+                    "parent_text": (meta or {}).get("parent_text"),
+                })
+            d["vector"] = True
+            d["vector_in"] = len(cands)
+            _bump("vector_ok")
+        except Exception:
+            cands = []
+            d["vector"] = False
+            _bump("vector_fail")
+        d["stage_timings"]["vector"] = round((time.time() - t_vec) * 1000, 2)
+
+        # 文档级过滤：关闭检索 / 未就绪 / 已删除的文档，其分片一律不要
+        usable = _kb.usable_doc_ids(db, doc_ids=[c["doc_id"] for c in cands]) if cands else set()
+        cands = [c for c in cands if c["doc_id"] in usable]
+
+        # 混合检索：向量候选 + 关键词候选 RRF 融合（默认关闭，评测后再开）
+        if cands and cfg.get("hybrid_enabled"):
+            t_kw = time.time()
+            kw = _keyword_search(
+                search_query, db=db, owner_id=owner_id,
+                collected_ids=collected_ids, top_k=int(cfg.get("hybrid_candidates", 50)),
+            )
+            keyword_candidates = len(kw)
+            if kw:
+                cands = _rrf_merge(cands, kw)
+                d["hybrid"] = True
+            d["stage_timings"]["keyword"] = round((time.time() - t_kw) * 1000, 2)
+
+        if not cands:
+            # —— 兜底：向量召回为空 → 关键词检索，保证有结果可用 ——
+            if cfg.get("keyword_fallback_enabled", True):
+                _bump("keyword_fallback")
+                t_kw = time.time()
+                out = _keyword_search(
+                    search_query, db=db, owner_id=owner_id,
+                    collected_ids=collected_ids, top_k=int(top_k),
+                )
+                keyword_candidates = len(out)
+                d["stage_timings"]["keyword_fallback"] = round((time.time() - t_kw) * 1000, 2)
+            else:
+                out = []
+            d["keyword"] = bool(out)
+            d["final"] = len(out)
+            for c in out:
+                pt = c.pop("parent_text", None)
+                if pt:
+                    c["child_text"] = c.get("text", "")
+                    c["text"] = pt
+            _sort_by_score(out)
+            _record_query(out, t0)
+            _emit(out)
+            return out
+
+        # 第二阶段：可选 rerank 重排（失败静默回落向量序）
+        if rerank:
+            t_rr = time.time()
+            rerank_in = len(cands)
+            cands, rmeta = _apply_rerank(search_query, cands, db, owner_id)
+            d.update(rmeta)
+            d["rerank_in"] = rerank_in
+            d["stage_timings"]["rerank"] = round((time.time() - t_rr) * 1000, 2)
+
+        # 父子切分：子块检索/重排，命中后回填父块作为 LLM 上下文
+        for c in cands:
+            if c.get("parent_text"):
+                parent_texts[id(c)] = c["parent_text"]
+
+        # per_doc_cap + top_k 截断
+        per_doc: dict[str, int] = {}
+        out: list[dict] = []
+        for c in cands:
+            if per_doc.get(c["doc_id"], 0) >= per_doc_cap:
                 continue
-            cands.append({
-                "text": doc, "title": (meta or {}).get("title", ""),
-                "doc_id": (meta or {}).get("doc_id", ""), "similarity": sim,
-            })
-        d["vector"] = True
-        d["vector_in"] = len(cands)
-        _bump("vector_ok")
-    except Exception:
-        cands = []
-        d["vector"] = False
-        _bump("vector_fail")
+            per_doc[c["doc_id"]] = per_doc.get(c["doc_id"], 0) + 1
+            out.append(c)
+            if len(out) >= top_k:
+                break
 
-    # 文档级过滤：关闭检索 / 未就绪 / 已删除的文档，其分片一律不要
-    usable = _kb.usable_doc_ids(db, doc_ids=[c["doc_id"] for c in cands]) if cands else set()
-    cands = [c for c in cands if c["doc_id"] in usable]
-    if not cands:
-        # —— 兜底：向量召回为空 → 关键词检索，保证有结果可用 ——
-        _bump("keyword_fallback")
-        out = _keyword_search(query, db=db, owner_id=owner_id, collected_ids=collected_ids, top_k=top_k)
-        d["keyword"] = bool(out)
-        d["final"] = len(out)
+        # 回填父块上下文（如果有），保留 child_text 便于排障
+        for c in out:
+            pt = parent_texts.get(id(c)) or c.pop("parent_text", None)
+            if pt:
+                c["child_text"] = c.get("text", "")
+                c["text"] = pt
+
+        # 统一按「有效分」显式排序：有重排分用重排分，否则用 RRF/向量相似度
         _sort_by_score(out)
+        d["final"] = len(out)
         _record_query(out, t0)
+        _emit(out)
         return out
-
-    # 第二阶段：可选 rerank 重排（失败静默回落向量序）
-    if rerank:
-        cands, rmeta = _apply_rerank(query, cands, db, owner_id)
-        d.update(rmeta)
-    # per_doc_cap + top_k 截断
-    per_doc: dict[str, int] = {}
-    out: list[dict] = []
-    for c in cands:
-        if per_doc.get(c["doc_id"], 0) >= per_doc_cap:
-            continue
-        per_doc[c["doc_id"]] = per_doc.get(c["doc_id"], 0) + 1
-        out.append(c)
-        if len(out) >= top_k:
-            break
-    # 统一按「有效分」显式排序：有重排分用重排分，否则用向量相似度，
-    # 避免出现「显示分与顺序不一致」（曾出现 0.468 排在 0.5334 之前）。
-    _sort_by_score(out)
-    d["final"] = len(out)
-    _record_query(out, t0)
-    return out
+    except Exception as exc:  # noqa: BLE001 —— 观测到异常后继续抛出，不改变调用方行为
+        d["error"] = str(exc)
+        _emit([], error=str(exc) or exc.__class__.__name__)
+        raise
 
 
 def _effective_score(hit: dict) -> float:
-    """命中分片的排序依据分：重排分优先，否则向量相似度。"""
-    rs = hit.get("rerank_score")
-    if isinstance(rs, (int, float)):
-        return float(rs)
+    """命中分片的排序依据分：重排分优先，其次 RRF，最后向量相似度。"""
+    for key in ("rerank_score", "rrf_score"):
+        v = hit.get(key)
+        if isinstance(v, (int, float)):
+            return float(v)
     return float(hit.get("similarity") or 0.0)
 
 
@@ -1010,6 +1270,8 @@ def retrieval_summary(diag: dict) -> str:
         stages.append(f"向量召回 {diag.get('vector_in', 0)} 条")
         if diag.get("gated_out"):
             stages.append(f"门控过滤 {diag.get('gated_out')} 条（相似度<{diag.get('gate')}）")
+    if diag.get("hybrid"):
+        stages.append("混合检索 RRF")
     if diag.get("rerank"):
         model = diag.get("rerank_model") or ""
         stages.append(f"重排精排（{model}）" if model else "重排精排")
@@ -1083,6 +1345,7 @@ def _keyword_search(query: str, *, db, owner_id, collected_ids=None, top_k: int 
         scored.append({
             "text": doc, "title": meta.get("title", ""), "doc_id": doc_id,
             "similarity": round(min(1.0, hits / max(len(terms), 1) / 3), 4),
+            "parent_text": meta.get("parent_text"),
         })
     if not scored:
         return []
@@ -1188,6 +1451,9 @@ __all__ = [
     "retrieve",
     "index_in_background",
     "get_collection",
+    "active_collection_name",
+    "collection_stats",
+    "get_document_chunks",
     "invalidate_embedding_cache",
     "sweep_orphan_vectors",
     "list_knowledge_collections",

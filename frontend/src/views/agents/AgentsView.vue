@@ -2412,7 +2412,15 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
                       引用来源（{{ citationsOf(m).length }}）
                     </summary>
-                    <p v-if="retrievalOf(m)" class="retrieval-line">检索：{{ retrievalOf(m)?.summary }}</p>
+                    <p v-if="retrievalOf(m)" class="retrieval-line">
+                      检索：{{ retrievalOf(m)?.summary }}
+                      <RouterLink
+                        v-if="retrievalOf(m)?.trace_id"
+                        class="trace-link"
+                        :to="{ path: '/rag/traces', query: { trace_id: retrievalOf(m)?.trace_id } }"
+                        target="_blank"
+                      >查看链路</RouterLink>
+                    </p>
                     <div v-for="(c, j) in sortedCitationsOf(m)" :key="j" class="cite">
                       <div class="cite-head">
                         《{{ c.title }}》
@@ -3609,6 +3617,7 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .sim { margin-left: auto; font-size: 10.5px; font-weight: 600; color: var(--ink-3); background: var(--bg-soft); padding: 1px 6px; border-radius: 4px; }
 .sim em { font-style: normal; margin-left: 4px; opacity: .65; font-weight: 500; }
 .retrieval-line { margin: 5px 0 2px; font-size: 11px; color: var(--ink-3); }
+.trace-link { margin-left: 8px; color: var(--brand-strong); text-decoration: none; font-weight: 600; }
 .cite p { margin: 3px 0 0; color: var(--ink-2); line-height: 1.55; }
 /* 业务工具调用轨迹：默认收起，点击展开 */
 .tool-drop summary { color: var(--ink-2); }

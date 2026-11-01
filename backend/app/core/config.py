@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     # RAG 检索阈值门控（评估暴露：0.15 过松导致低相关过度召回）
     RAG_MIN_SIMILARITY: float = 0.35  # 向量相似度低于此直接丢弃；可用 env 覆盖
 
+    # Agent 任务观测（run/span）：默认开启，失败不影响主链路
+    AGENT_RUN_TRACE_ENABLED: bool = True
+    AGENT_RUN_TRACE_SAMPLE_RATE: float = 1.0
+    AGENT_RUN_RETENTION_DAYS: int = 30
+
+    # 意图分类：规则优先；低置信度时才交给轻量 LLM（默认关闭，避免额外 token）
+    AGENT_INTENT_LLM_FALLBACK: bool = False
+    AGENT_INTENT_CONFIDENCE_THRESHOLD: float = 0.55
+
 
 @lru_cache
 def get_settings() -> Settings:

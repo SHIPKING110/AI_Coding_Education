@@ -49,6 +49,52 @@ const router = createRouter({
           meta: { adminOnly: true },
         },
         {
+          path: 'rag',
+          redirect: '/rag/overview',
+        },
+        {
+          path: 'rag/overview',
+          name: 'rag-overview',
+          component: () => import('@/views/rag/RagOverviewView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/assets',
+          name: 'rag-assets',
+          component: () => import('@/views/rag/RagAssetsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/traces',
+          name: 'rag-traces',
+          component: () => import('@/views/rag/RagTracesView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/runs',
+          name: 'rag-runs',
+          component: () => import('@/views/rag/RagRunsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/routes',
+          name: 'rag-routes',
+          component: () => import('@/views/rag/RagRoutesView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/eval',
+          name: 'rag-eval',
+          component: () => import('@/views/rag/RagEvalView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/settings',
+          name: 'rag-settings',
+          component: () => import('@/views/rag/RagSettingsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
           path: 'settings',
           name: 'settings',
           component: () => import('@/views/settings/SettingsView.vue'),

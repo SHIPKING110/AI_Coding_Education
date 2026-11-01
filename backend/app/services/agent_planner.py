@@ -155,17 +155,36 @@ def plan_and_run(
 
     def _run_one(name: str, args: dict) -> "Step":
         """执行一个工具：先回调「开始」，执行完再回调「结束」（前端实时展示执行到哪步）。"""
+        from app.services import agent_ops
+
         step = Step(tool=name, args=args, ok=True, result=None, error=None)
+        span_type = "skill" if name in {
+            "write_skill_file", "delete_skill_file", "read_skill_file", "list_skill_files", "run_skill_script",
+        } else ("rag" if name in {"search_knowledge", "knowledge_search"} else "tool")
+        sp = agent_ops.start_span(
+            span_type=span_type, name=f"{span_type}.{name}",
+            attributes={"tool": name, "arguments": compact_result(args, 800)},
+        )
         if on_step is not None:
             try:
                 on_step(step, len(steps) + 1, "start")
             except Exception:
                 pass
-        ok, payload = _exec(db, user, name, args)
+        try:
+            ok, payload = _exec(db, user, name, args)
+        except Exception as exc:  # noqa: BLE001
+            sp.end(status="error", error=str(exc))
+            raise
         step.ok = ok
         step.result = payload if ok else None
         step.error = None if ok else str(payload)
         steps.append(step)
+        sp.end(
+            status="ok" if ok else "error",
+            summary=compact_result(payload, 700) if ok else str(payload),
+            error=None if ok else str(payload),
+            attributes={"tool": name},
+        )
         if on_step is not None:
             try:
                 on_step(step, len(steps), "done")
@@ -175,7 +194,19 @@ def plan_and_run(
 
     def _push_step(step: "Step") -> None:
         """追加一步并即时回调（用于兜底/自愈等非主循环路径）。"""
+        from app.services import agent_ops
+
         steps.append(step)
+        agent_ops.record_span(
+            span_type="skill" if step.tool in {
+                "write_skill_file", "delete_skill_file", "run_skill_script",
+            } else "tool",
+            name=f"auto.{step.tool}",
+            status="ok" if step.ok else "error",
+            summary=(compact_result(step.result, 700) if step.ok else (step.error or "")),
+            error="" if step.ok else (step.error or ""),
+            attributes={"tool": step.tool, "auto": True},
+        )
         if on_step is not None:
             try:
                 on_step(step, len(steps), "done")

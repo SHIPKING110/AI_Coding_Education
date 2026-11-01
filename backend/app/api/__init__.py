@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.routers import (
+    agent_ops,
     agents,
     agents_ext,
     assignments,
@@ -20,6 +21,7 @@ from app.api.routers import (
     parent_service,
     permissions,
     prompts,
+    rag_admin,
     reports,
     retrieval_configs,
     schedules,
@@ -32,6 +34,7 @@ from app.api.routers import (
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+api_router.include_router(agent_ops.router)
 api_router.include_router(agents.router)
 api_router.include_router(agents_ext.router)
 api_router.include_router(knowledge.router)
@@ -56,6 +59,7 @@ api_router.include_router(business.router)
 api_router.include_router(finance.router)
 api_router.include_router(llm_configs.router)
 api_router.include_router(retrieval_configs.router)
+api_router.include_router(rag_admin.router)
 api_router.include_router(search_configs.router)
 api_router.include_router(client.router)
 api_router.include_router(trials.router)

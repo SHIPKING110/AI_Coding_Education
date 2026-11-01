@@ -1,0 +1,201 @@
+"""RAG 运营后台：管理员权限、配置版本、trace 落库、虚拟知识库统计。"""
+
+import time
+import uuid
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+
+import app.models  # noqa: F401 —— 注册全部 ORM 模型
+from app.core.database import Base
+from app.main import app
+
+TEST_DB_NAME = "child_code_rag_admin_test"
+
+
+@pytest.fixture(scope="session")
+def test_engine():
+    from app.core.config import get_settings
+
+    base_url = get_settings().DATABASE_URL.rsplit("/", 1)[0]
+    admin_engine = create_engine(base_url + "/postgres", isolation_level="AUTOCOMMIT")
+    with admin_engine.connect() as conn:
+        conn.execute(text(f"DROP DATABASE IF EXISTS {TEST_DB_NAME} WITH (FORCE)"))
+        conn.execute(text(f"CREATE DATABASE {TEST_DB_NAME}"))
+    admin_engine.dispose()
+    engine = create_engine(base_url + f"/{TEST_DB_NAME}")
+    Base.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture()
+def client(test_engine, tmp_path_factory):
+    from app.api import deps
+    from app.api.routers import rag_admin as rag_admin_router
+    from app.services import rag, rag_evaluation, rag_trace
+
+    rag.CHROMA_DIR = tmp_path_factory.mktemp("rag-admin-chroma")
+    TestSession = sessionmaker(bind=test_engine)
+    rag_trace._SESSION_FACTORY = TestSession
+    rag_evaluation._SESSION_FACTORY = TestSession
+    rag_admin_router._SESSION_FACTORY = TestSession
+    rag_trace.flush(0.1)
+
+    def override_get_db():
+        session = TestSession()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[deps.get_db] = override_get_db
+    c = TestClient(app)
+    c.test_session_factory = TestSession  # type: ignore[attr-defined]
+    yield c
+    app.dependency_overrides.clear()
+
+
+def _register(client, role: str, tag: str) -> tuple[dict, dict]:
+    username = f"{tag}-{uuid.uuid4().hex[:8]}"
+    r = client.post(
+        "/api/auth/register",
+        json={"role": role, "username": username, "password": "123456", "name": tag},
+    )
+    assert r.status_code == 201, r.text
+    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    token = login.json()["access_token"]
+    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).json()
+    return {"Authorization": f"Bearer {token}"}, me
+
+
+def test_rag_admin_requires_admin(client):
+    teacher_h, _ = _register(client, "teacher", "rag-t")
+    admin_h, _ = _register(client, "admin", "rag-a")
+
+    assert client.get("/api/admin/rag/overview", headers=teacher_h).status_code == 403
+    r = client.get("/api/admin/rag/overview", headers=admin_h)
+    assert r.status_code == 200, r.text
+    assert "assets" in r.json()
+
+
+def test_config_version_and_rollback(client):
+    admin_h, admin_me = _register(client, "admin", "rag-cfg")
+    from app.services import rag_settings
+
+    rag_settings.invalidate()
+    r = client.put("/api/admin/rag/config", json={"config": {"top_k": 7}, "note": "v1"}, headers=admin_h)
+    assert r.status_code == 200, r.text
+    assert r.json()["config"]["top_k"] == 7
+
+    r2 = client.put("/api/admin/rag/config", json={"config": {"top_k": 9}, "note": "v2"}, headers=admin_h)
+    assert r2.status_code == 200, r2.text
+    _db = client.test_session_factory()
+    try:
+        assert rag_settings.get_config(_db, force=True)["top_k"] == 9
+    finally:
+        _db.close()
+
+    versions = client.get("/api/admin/rag/config/versions", headers=admin_h).json()["items"]
+    assert versions
+    v1 = min(v["version"] for v in versions)
+    rr = client.post(f"/api/admin/rag/config/rollback/{v1}", headers=admin_h)
+    assert rr.status_code == 200, rr.text
+    _db = client.test_session_factory()
+    try:
+        assert rag_settings.get_config(_db, force=True)["top_k"] == 7
+    finally:
+        _db.close()
+
+    audit = client.get("/api/admin/rag/audit", headers=admin_h).json()["items"]
+    assert any(a["action"] == "config.update" for a in audit)
+
+
+def test_trace_persisted_and_virtual_bases(client):
+    admin_h, admin_me = _register(client, "admin", "rag-tr")
+    teacher_h, teacher_me = _register(client, "teacher", "rag-kb")
+
+    from app.models.knowledge import KnowledgeDocument
+    from app.services import rag_trace
+
+    db = client.test_session_factory()
+    try:
+        db.add(KnowledgeDocument(
+            owner_id=uuid.UUID(teacher_me["id"]), title="家长政策A",
+            description="退费与请假政策", status="ready", chunk_count=3,
+            visibility="private", enabled=True, visible_to_parents=True,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    bases = client.get("/api/admin/rag/knowledge-bases", headers=admin_h).json()["items"]
+    private = next(x for x in bases if x["key"] == "private")
+    parent = next(x for x in bases if x["key"] == "parent")
+    assert private["documents"] >= 1
+    assert private["chunks"] >= 3
+    assert parent["documents"] >= 1
+
+    with rag_trace.trace_scope(
+        domain="admin_test", user_id=admin_me["id"], owner_id=admin_me["id"], route="admin_test",
+    ) as ctx:
+        rag_trace.record(
+            ctx, query="退费政策是什么", hits=[{
+                "doc_id": "d1", "title": "家长政策A", "similarity": 0.9,
+                "rerank_score": None, "rrf_score": None, "preview": "退费规则",
+            }],
+            vector_ok=True, latency_ms=12, stage_timings={"vector": 5.0},
+        )
+    assert rag_trace.flush(3.0)
+    deadline = time.time() + 3
+    items = []
+    while time.time() < deadline:
+        items = client.get("/api/admin/rag/traces", headers=admin_h).json()["items"]
+        if items:
+            break
+        time.sleep(0.1)
+    assert items, "trace 应已异步落库"
+    assert items[0]["query"] == "退费政策是什么"
+    assert items[0]["hits"][0]["title"] == "家长政策A"
+    assert True
+
+
+def test_route_override(client):
+    admin_h, _ = _register(client, "admin", "rag-route")
+    r = client.put("/api/admin/rag/routes/agent_teacher", json={
+        "top_k": 3, "min_similarity": 0.42, "per_doc_cap": 1,
+    }, headers=admin_h)
+    assert r.status_code == 200, r.text
+    routes = client.get("/api/admin/rag/routes", headers=admin_h).json()["items"]
+    agent = next(x for x in routes if x["key"] == "agent_teacher")
+    assert agent["effective"]["top_k"] == 3
+    assert agent["effective"]["min_similarity"] == 0.42
+    assert agent["override"]["per_doc_cap"] == 1
+
+
+def test_eval_run_completes(client):
+    admin_h, admin_me = _register(client, "admin", "rag-eval")
+    # 创建评测集与用例
+    s = client.post("/api/admin/rag/eval/sets", json={
+        "name": "种子集", "domain": "agent_teacher", "owner_id": admin_me["id"],
+    }, headers=admin_h).json()
+    client.post(f"/api/admin/rag/eval/sets/{s['id']}/cases", json={
+        "query": "测试问题", "relevant": ["不存在的文档"], "query_type": "fact",
+    }, headers=admin_h)
+    r = client.post(f"/api/admin/rag/eval/sets/{s['id']}/runs", json={
+        "owner_id": admin_me["id"], "top_k": 3,
+    }, headers=admin_h)
+    assert r.status_code == 200, r.text
+    run_id = r.json()["id"]
+    # 轮询完成
+    deadline = time.time() + 10
+    run = None
+    while time.time() < deadline:
+        run = client.get(f"/api/admin/rag/eval/runs/{run_id}", headers=admin_h).json()["run"]
+        if run["status"] in ("done", "failed"):
+            break
+        time.sleep(0.2)
+    assert run is not None and run["status"] == "done", run
+    assert "off" in (run["metrics"] or {}) and "on" in (run["metrics"] or {})

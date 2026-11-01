@@ -6,6 +6,7 @@ from app.models.agent import (
     AgentWorkingMemory,
 )
 from app.models.agent_ext import AgentGlobalSetting, AgentMCP, AgentMCPCollection, AgentSkill, AgentSkillCollection, CustomAgent
+from app.models.agent_trace import AgentRunSpan, AgentRunTrace
 from app.models.assignment import (
     Assignment,
     AssignmentFolder,
@@ -42,7 +43,17 @@ from app.models.knowledge import KnowledgeCollection, KnowledgeDocument
 from app.models.llm_config import TeacherLLMConfig, TeacherModuleModel
 from app.models.notification import Notification, NotificationType
 from app.models.parent_service import ParentServiceMessage, ParentServiceThread
+from app.models.ppt_task import AgentPptTask, AgentPptTaskEvent
 from app.models.prompt import PromptScope, PromptTemplate
+from app.models.rag_admin import (
+    RagAdminAudit,
+    RagConfigVersion,
+    RagEvalCase,
+    RagEvalResult,
+    RagEvalRun,
+    RagEvalSet,
+    RagRetrievalTrace,
+)
 from app.models.report import Report, ReportStatus, ReportType
 from app.models.retrieval_config import (
     PROVIDER_LOCAL,
@@ -60,6 +71,10 @@ __all__ = [
     "AgentMemory",
     "AgentMessage",
     "AgentWorkingMemory",
+    "AgentRunSpan",
+    "AgentRunTrace",
+    "AgentPptTask",
+    "AgentPptTaskEvent",
     "AgentGlobalSetting",
     "AgentMCP",
     "AgentMCPCollection",
@@ -93,6 +108,13 @@ __all__ = [
     "PackageStatus",
     "PromptScope",
     "PromptTemplate",
+    "RagAdminAudit",
+    "RagConfigVersion",
+    "RagEvalCase",
+    "RagEvalResult",
+    "RagEvalRun",
+    "RagEvalSet",
+    "RagRetrievalTrace",
     "Question",
     "QuestionType",
     "TeacherLLMConfig",
