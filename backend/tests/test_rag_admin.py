@@ -81,6 +81,15 @@ def test_rag_admin_requires_admin(client):
     assert "assets" in r.json()
 
 
+def test_config_get(client):
+    admin_h, _ = _register(client, "admin", "rag-cfg-get")
+    r = client.get("/api/admin/rag/config", headers=admin_h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "config" in body and "defaults" in body
+    assert body["config"]["top_k"] >= 1
+
+
 def test_config_version_and_rollback(client):
     admin_h, admin_me = _register(client, "admin", "rag-cfg")
     from app.services import rag_settings
@@ -173,6 +182,38 @@ def test_route_override(client):
     assert agent["effective"]["top_k"] == 3
     assert agent["effective"]["min_similarity"] == 0.42
     assert agent["override"]["per_doc_cap"] == 1
+
+
+def test_parent_sessions_endpoint(client):
+    admin_h, _ = _register(client, "admin", "rag-ps")
+    from app.models.parent_service import ParentServiceMessage, ParentServiceThread
+
+    db = client.test_session_factory()
+    try:
+        thread = ParentServiceThread(status="open", risk_flag=True)
+        db.add(thread)
+        db.commit()
+        db.refresh(thread)
+        db.add(ParentServiceMessage(thread_id=thread.id, role="user", content="退费怎么处理"))
+        db.commit()
+        thread_id = str(thread.id)
+    finally:
+        db.close()
+
+    rows = client.get("/api/admin/rag/parent-sessions", headers=admin_h).json()
+    assert rows["total"] >= 1
+    item = next(x for x in rows["items"] if x["thread_id"] == thread_id)
+    assert item["risk_flag"] is True
+    assert item["message_count"] >= 1
+
+    risk_rows = client.get("/api/admin/rag/parent-sessions", params={"risk": True}, headers=admin_h).json()
+    assert any(x["thread_id"] == thread_id for x in risk_rows["items"])
+
+    detail = client.get(f"/api/admin/rag/parent-sessions/{thread_id}", headers=admin_h)
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["thread"]["id"] == thread_id
+    assert body["messages"][0]["content"] == "退费怎么处理"
 
 
 def test_eval_run_completes(client):

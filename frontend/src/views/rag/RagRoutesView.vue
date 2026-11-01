@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import RagTabs from '@/components/RagTabs.vue'
 import { listRagRoutes, testRagRoute, updateRagRoute, type RagTrace } from '@/api/ragAdmin'
 
 const routes = ref<any[]>([])
@@ -81,6 +82,8 @@ onMounted(load)
         <RouterLink class="btn ghost" to="/rag/settings">参数配置</RouterLink>
       </template>
     </PageHead>
+
+    <RagTabs />
 
     <p v-if="error" class="error">{{ error }}</p>
 

@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import PageHead from '@/components/PageHead.vue'
+import RagTabs from '@/components/RagTabs.vue'
 import { getRagTrace, listRagTraces, setRagTraceFeedback, type RagTrace } from '@/api/ragAdmin'
 
 const route = useRoute()
@@ -14,8 +15,7 @@ const page = ref(1)
 const pageSize = 20
 const domain = ref('')
 const q = ref('')
-const zeroOnly = ref(route.query.zero_only === '1')
-const errorOnly = ref(route.query.error_only === '1')
+const ragStatus = ref('')
 const selected = ref<RagTrace | null>(null)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
@@ -27,8 +27,7 @@ async function load() {
     const res = await listRagTraces({
       domain: domain.value || undefined,
       q: q.value || undefined,
-      zero_only: zeroOnly.value || undefined,
-      error_only: errorOnly.value || undefined,
+      rag_status: ragStatus.value || undefined,
       page: page.value,
       page_size: pageSize,
     })
@@ -101,6 +100,8 @@ onMounted(async () => {
       </template>
     </PageHead>
 
+    <RagTabs />
+
     <p v-if="error" class="error">{{ error }}</p>
 
     <section class="toolbar">
@@ -112,8 +113,12 @@ onMounted(async () => {
         <option value="admin_test">admin_test</option>
         <option value="eval">eval</option>
       </select>
-      <label><input v-model="zeroOnly" type="checkbox" @change="search" /> 只看零结果</label>
-      <label><input v-model="errorOnly" type="checkbox" @change="search" /> 只看错误</label>
+      <select v-model="ragStatus" @change="search">
+        <option value="">all statuses</option>
+        <option value="hit">hit</option>
+        <option value="no_hit">no_hit</option>
+        <option value="error">error</option>
+      </select>
       <button class="btn" @click="search">查询</button>
     </section>
 
@@ -131,9 +136,10 @@ onMounted(async () => {
             <td>{{ t.hits?.length || 0 }}</td>
             <td>{{ t.latency_ms }} ms</td>
             <td>
-              <span v-if="t.is_error" class="tag bad">error</span>
-              <span v-else-if="t.zero_result" class="tag pending">zero</span>
-              <span v-else class="tag ok">hit</span>
+              <span v-if="t.rag_status === 'error'" class="tag bad">error</span>
+              <span v-else-if="t.rag_status === 'no_hit'" class="tag pending">no_hit</span>
+              <span v-else-if="t.rag_status === 'hit'" class="tag ok">hit</span>
+              <span v-else class="tag">{{ t.rag_status }}</span>
             </td>
             <td>
               <button class="mini" :class="{ on: t.feedback === 'up' }" @click="feedback(t, 'up')">赞</button>
@@ -190,6 +196,20 @@ onMounted(async () => {
           <p>{{ h.preview }}</p>
         </div>
         <div v-if="!selected.hits?.length" class="muted">无命中</div>
+      </div>
+      <div v-if="selected.related_runs && selected.related_runs.length" class="block">
+        <div class="muted">related runs</div>
+        <div v-for="r in selected.related_runs" :key="r.run_id" class="hit">
+          <div class="hit-head">
+            <span class="tag">{{ r.task_kind }}</span>
+            <strong>{{ r.intent }}</strong>
+            <span class="muted">{{ r.status }} / {{ r.latency_ms }} ms</span>
+          </div>
+          <p class="muted mono">{{ r.run_id }}</p>
+        </div>
+      </div>
+      <div v-if="selected.conversation_id" class="block">
+        <RouterLink class="btn ghost" to="/rag/sessions">session observability</RouterLink>
       </div>
     </aside>
   </div>

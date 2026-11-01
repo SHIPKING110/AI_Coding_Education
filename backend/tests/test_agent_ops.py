@@ -114,6 +114,36 @@ def test_run_trace_persisted(client):
     assert items[0]["rag_decision"] == "used"
 
 
+def test_run_detail_endpoint(client):
+    admin_h = _register(client, "admin", "ops-detail")
+    from app.services import agent_ops
+
+    run_id = agent_ops.start_run(
+        conversation_id=None,
+        agent_id="assistant",
+        user_id=None,
+        intent="knowledge_qa",
+        needs_rag=True,
+        rag_decision="used",
+        task_kind="rag_qa",
+    )
+    agent_ops.finish_run(run_id, status="ok", latency_ms=8)
+    assert agent_ops.flush(3.0)
+
+    deadline = time.time() + 3
+    r = None
+    while time.time() < deadline:
+        r = client.get(f"/api/admin/agent-ops/runs/{run_id}", headers=admin_h)
+        if r.status_code == 200:
+            break
+        time.sleep(0.1)
+    assert r is not None and r.status_code == 200, r.text if r is not None else "no response"
+    body = r.json()
+    assert body["run"]["run_id"] == run_id
+    assert body["run"]["rag_status"] == "used"
+    assert isinstance(body["spans"], list)
+
+
 def test_intent_classification_no_rag_for_ppt():
     from app.services import agent_intent
 

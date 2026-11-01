@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import RagTabs from '@/components/RagTabs.vue'
 import {
   addEvalCase,
   createEvalRun,
@@ -178,6 +179,8 @@ onMounted(loadSets)
         <button class="btn ghost" :disabled="loading" @click="loadSets">{{ loading ? '刷新中…' : '刷新' }}</button>
       </template>
     </PageHead>
+
+    <RagTabs />
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="msg" class="ok">{{ msg }}</p>

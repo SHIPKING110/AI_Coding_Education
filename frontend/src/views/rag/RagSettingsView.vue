@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import RagTabs from '@/components/RagTabs.vue'
 import { getEmbeddingConfig, type RetrievalConfigOut } from '@/api/retrievalConfig'
 import {
   getRagConfig,
@@ -100,6 +101,8 @@ onMounted(load)
       </template>
     </PageHead>
 
+    <RagTabs />
+
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="msg" class="ok">{{ msg }}</p>
 
@@ -142,6 +145,7 @@ onMounted(load)
         <div class="panel-head"><h3>观测与保留</h3></div>
         <div class="form-grid">
           <label>成功 trace 采样率 <input v-model.number="form.trace_success_sample_rate" type="number" min="0" max="1" step="0.05" /></label>
+          <p v-if="form && form.trace_success_sample_rate < 1" class="warn">采样率小于 1 时，命中率/零结果率仅作趋势参考。</p>
           <label>成功 trace 保留天数 <input v-model.number="form.trace_retention_days" type="number" min="1" max="365" /></label>
           <label>错误/零结果保留天数 <input v-model.number="form.trace_error_retention_days" type="number" min="1" max="365" /></label>
         </div>

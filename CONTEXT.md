@@ -58,3 +58,34 @@ _Avoid_：收藏、订阅、收藏夹
 **RAG 开关**：
 会话级「引用知识库」开关（默认关），可对单条消息临时切换；关闭时不检索、不注入。
 _Avoid_：知识库模式、检索开关
+
+## 后台管理 / RAG 运营观测（ADR-0020）
+
+**后台管理（Admin Console）**：
+原“RAG 运营”的新名称；承载 RAG 总览、知识资产、检索追踪、任务监控、会话观测、路由测试、评测、设置等 Tab。
+_Avoid_：RAG 运营（旧名）
+
+**RAG 状态（RAG status）**：
+一次检索的最终状态，取值 hit / no_hit / error / skipped / not_needed；替代把非 RAG 对话计为 zero 的旧口径。
+_Avoid_：zero（口语状态）
+
+**命中率（Hit rate）**：
+RAG 调用中最终有命中的比例；仅统计实际触发 RAG 的检索，不混入非 RAG 对话。
+
+**零结果率（Zero-result rate）**：
+RAG 调用中零命中的比例；非 RAG 对话不参与。
+
+**漏检率（RAG miss rate）**：
+需要 RAG 但被跳过的比例（`needs_rag=true` 且 `rag_decision` 以 `skipped_` 开头）。
+
+**组件协同（Component synergy）**：
+同一轮中 RAG、工具、Skill、MCP 的组合情况统计，如纯 RAG、纯工具、RAG+工具同轮。
+
+**会话观测（Session observability）**：
+按会话聚合 Agent 对话与运行数据，支持“会话 → 轮次 → 轮次详情”三级钻取。
+
+**轮次（Run / Turn）**：
+一次用户消息触发的 Agent 运行（`agent_run_traces` 一条记录），内部包含模型/工具/RAG/MCP/Skill 等 span。
+
+**RAG 证据（RAG evidence）**：
+任务型对话详情中可折叠展示的检索命中区块，通过 `retrieval_trace_id` 关联。

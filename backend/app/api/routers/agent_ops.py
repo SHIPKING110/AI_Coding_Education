@@ -38,6 +38,13 @@ def _run_out(run: AgentRunTrace) -> dict:
         "intent_source": run.intent_source,
         "needs_rag": bool(run.needs_rag),
         "rag_decision": run.rag_decision,
+        "rag_status": (
+            "used" if run.rag_decision in ("used", "auto")
+            else "skipped" if str(run.rag_decision or "").startswith("skipped_")
+            else "error" if run.rag_decision == "error"
+            else "needed" if run.needs_rag
+            else "not_needed"
+        ),
         "rag_skip_reason": run.rag_skip_reason,
         "retrieval_trace_id": run.retrieval_trace_id,
         "task_kind": run.task_kind,
@@ -97,6 +104,7 @@ def list_runs(
     task_kind: str | None = None,
     status: str | None = None,
     rag_decision: str | None = None,
+    rag_status: str | None = None,
     needs_rag: bool | None = None,
     ppt_aligned: bool | None = None,
     agent_id: str | None = None,
@@ -121,6 +129,7 @@ def list_runs(
         task_kind=task_kind,
         status=status,
         rag_decision=rag_decision,
+        rag_status=rag_status,
         needs_rag=needs_rag,
         ppt_aligned=ppt_aligned,
         agent_id=agent_id,
@@ -135,16 +144,39 @@ def list_runs(
     }
 
 
+@router.get("/runs/{run_id}")
+def get_run(run_id: str, db: Session = Depends(get_db)) -> dict:
+    run = crud.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    return {"run": _run_out(run), "spans": [_span_out(s) for s in crud.list_spans(db, run_id)]}
+
+
 @router.get("/stats")
 def get_stats(days: int = Query(7, ge=1, le=90), db: Session = Depends(get_db)) -> dict:
     since = datetime.now(UTC) - timedelta(days=days)
     return crud.stats(db, since=since)
 
 
-@router.get("/runs/{run_id}")
-def get_run(run_id: str, db: Session = Depends(get_db)) -> dict:
-    run = crud.get_run(db, run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="运行记录不存在")
-    spans = crud.list_spans(db, run_id)
-    return {"run": _run_out(run), "spans": [_span_out(s) for s in spans]}
+@router.get("/sessions")
+def list_sessions(
+    page: int = 1,
+    page_size: int = Query(20, ge=1, le=100),
+    agent_id: str | None = None,
+    q: str | None = None,
+    days: int = Query(30, ge=1, le=90),
+    db: Session = Depends(get_db),
+) -> dict:
+    return crud.list_sessions(db, page=page, page_size=page_size, agent_id=agent_id, q=q, days=days)
+
+
+@router.get("/sessions/{conversation_id}")
+def get_session(conversation_id: str, db: Session = Depends(get_db)) -> dict:
+    detail = crud.get_session_detail(db, conversation_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {
+        "conversation": detail["conversation"],
+        "messages": detail["messages"],
+        "runs": [_run_out(r) for r in detail["runs"]],
+    }

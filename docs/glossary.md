@@ -31,7 +31,17 @@ Child Code 项目里反复出现的领域概念与统一叫法。新增术语请
 - **工作区（Workspace）**：对话右侧的大纲 / 素材 / 成果面板。
 - **素材（Material）**：Agent 绑定的业务数据（报告 / 班级评估），存于 `context_ref`。
 
-## 智能助手工具层（ADR-0001 / ADR-0002）
+## 后台管理 / RAG 运营观测
+
+- **后台管理（Admin Console）**：原“RAG 运营”的新名称；承载 RAG 总览、知识资产、检索追踪、任务监控、会话观测、路由测试、评测、设置等 Tab。
+- **RAG 状态（RAG status）**：一次检索的最终状态，取值 `hit / no_hit / error / skipped / not_needed`；替代把非 RAG 对话计为 `zero` 的旧口径。
+- **命中率（Hit rate）**：RAG 调用中最终有命中的比例；仅统计实际触发 RAG 的检索，不混入非 RAG 对话。
+- **零结果率（Zero-result rate）**：RAG 调用中零命中的比例；非 RAG 对话不参与。
+- **漏检率（RAG miss rate）**：需要 RAG 但被跳过的比例（`needs_rag=true` 且 `rag_decision` 以 `skipped_` 开头）。
+- **组件协同（Component synergy）**：同一轮中 RAG、工具、Skill、MCP 的组合情况统计，如纯 RAG、纯工具、RAG+工具同轮。
+- **会话观测（Session observability）**：按会话聚合 Agent 对话与运行数据，支持“会话 → 轮次 → 轮次详情”三级钻取。
+- **轮次（Run / Turn）**：一次用户消息触发的 Agent 运行（`agent_run_traces` 一条记录），内部包含模型/工具/RAG/MCP/Skill 等 span。
+- **RAG 证据（RAG evidence）**：任务型对话详情中可折叠展示的检索命中区块，通过 `retrieval_trace_id` 关联。
 
 - **工具 / Skill（工具）**：一层**只读**的业务数据查询能力，声明 `name / description / 参数 schema / 处理函数`。
   例：`my_schedule_overview`、`find_students`。注册于 `app/services/agent_tools.py`。

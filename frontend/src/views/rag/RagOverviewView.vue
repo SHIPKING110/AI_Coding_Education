@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import RagTabs from '@/components/RagTabs.vue'
 import { getAgentOpsStats, type AgentOpsStats } from '@/api/agentOps'
 import { getRagOverview, type RagOverview } from '@/api/ragAdmin'
 
@@ -46,6 +47,8 @@ onMounted(load)
       </template>
     </PageHead>
 
+    <RagTabs />
+
     <p v-if="error" class="error">{{ error }}</p>
 
     <template v-if="data">
@@ -58,7 +61,7 @@ onMounted(load)
         <div class="card">
           <div class="card-label">24h 检索量</div>
           <div class="card-value">{{ data.retrieval_24h.queries }}</div>
-          <div class="card-sub">命中率 {{ pct(data.retrieval_24h.hit_rate) }} · 零结果 {{ pct(data.retrieval_24h.zero_result_rate) }}</div>
+          <div class="card-sub">hit_rate {{ pct(data.retrieval_24h.hit_rate) }} | zero {{ pct(data.retrieval_24h.zero_result_rate) }} | hit {{ data.retrieval_24h.rag_status_counts?.hit ?? 0 }} / no_hit {{ data.retrieval_24h.rag_status_counts?.no_hit ?? 0 }} / error {{ data.retrieval_24h.rag_status_counts?.error ?? 0 }}</div>
         </div>
         <div class="card">
           <div class="card-label">24h 平均时延</div>

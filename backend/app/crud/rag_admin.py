@@ -37,6 +37,14 @@ def list_audit(db: Session, *, limit: int = 100) -> list[dict]:
     ]
 
 
+def _rag_status(r: RagRetrievalTrace) -> str:
+    if r.is_error:
+        return "error"
+    if r.zero_result:
+        return "no_hit"
+    return "hit"
+
+
 def trace_to_dict(r: RagRetrievalTrace) -> dict:
     return {
         "id": str(r.id),
@@ -61,6 +69,7 @@ def trace_to_dict(r: RagRetrievalTrace) -> dict:
         "rerank_model": r.rerank_model,
         "zero_result": r.zero_result,
         "is_error": r.is_error,
+        "rag_status": _rag_status(r),
         "error": r.error,
         "latency_ms": r.latency_ms,
         "stage_timings": r.stage_timings,
@@ -72,7 +81,7 @@ def trace_to_dict(r: RagRetrievalTrace) -> dict:
 
 def list_traces(
     db: Session, *, domain: str | None = None, owner_id=None, conversation_id=None,
-    zero_only: bool = False, error_only: bool = False, q: str | None = None,
+    zero_only: bool = False, error_only: bool = False, rag_status: str | None = None, q: str | None = None,
     created_from: datetime | None = None, created_to: datetime | None = None,
     page: int = 1, page_size: int = 20,
 ) -> dict:
@@ -83,7 +92,16 @@ def list_traces(
         conds.append(RagRetrievalTrace.owner_id == owner_id)
     if conversation_id:
         conds.append(RagRetrievalTrace.conversation_id == conversation_id)
-    if zero_only:
+    if rag_status:
+        if rag_status == "error":
+            conds.append(RagRetrievalTrace.is_error.is_(True))
+        elif rag_status == "no_hit":
+            conds.append(RagRetrievalTrace.zero_result.is_(True))
+            conds.append(RagRetrievalTrace.is_error.is_(False))
+        elif rag_status == "hit":
+            conds.append(RagRetrievalTrace.zero_result.is_(False))
+            conds.append(RagRetrievalTrace.is_error.is_(False))
+    elif zero_only:
         conds.append(RagRetrievalTrace.zero_result.is_(True))
     if error_only:
         conds.append(RagRetrievalTrace.is_error.is_(True))
@@ -155,16 +173,23 @@ def trace_stats(db: Session, *, since: datetime) -> dict:
             RagRetrievalTrace.rerank_candidates > 0,
         )
     ) or 0)
+    hit = max(0, total - zero - errors)
     return {
         "queries": total,
         "zero_results": zero,
         "errors": errors,
+        "hits": hit,
         "hit_rate": round((total - zero) / total, 4) if total else None,
         "zero_result_rate": round(zero / total, 4) if total else None,
         "avg_latency_ms": round(float(avg_latency), 2) if avg_latency is not None else None,
         "vector_fail": vector_fail,
         "keyword_used": keyword,
         "rerank_fail": rerank_fail,
+        "rag_status_counts": {
+            "hit": hit,
+            "no_hit": zero,
+            "error": errors,
+        },
     }
 
 
@@ -333,6 +358,101 @@ def delete_eval_run(db: Session, run_id) -> bool:
     db.delete(row)
     db.commit()
     return True
+
+
+def list_parent_sessions(
+    db: Session, *, page: int = 1, page_size: int = 20, status: str | None = None, risk: bool | None = None, days: int = 30,
+) -> dict:
+    from datetime import UTC, datetime, timedelta
+
+    from app.models.parent_service import ParentServiceMessage, ParentServiceThread
+
+    since = datetime.now(UTC) - timedelta(days=days)
+    conds = [ParentServiceThread.updated_at >= since]
+    if status:
+        conds.append(ParentServiceThread.status == status)
+    if risk is not None:
+        conds.append(ParentServiceThread.risk_flag.is_(risk))
+    base = select(ParentServiceThread)
+    count_stmt = select(func.count()).select_from(ParentServiceThread)
+    if conds:
+        base = base.where(*conds)
+        count_stmt = count_stmt.where(*conds)
+    total = int(db.scalar(count_stmt) or 0)
+    rows = db.scalars(
+        base.order_by(ParentServiceThread.updated_at.desc())
+        .offset(max(0, (page - 1) * page_size))
+        .limit(page_size)
+    ).all()
+    items = []
+    for th in rows:
+        msg_count = int(db.scalar(
+            select(func.count()).select_from(ParentServiceMessage).where(ParentServiceMessage.thread_id == th.id)
+        ) or 0)
+        trace_count = int(db.scalar(
+            select(func.count()).select_from(RagRetrievalTrace).where(
+                RagRetrievalTrace.conversation_id == th.id,
+                RagRetrievalTrace.domain == "parent_service",
+            )
+        ) or 0)
+        items.append({
+            "thread_id": str(th.id),
+            "parent_id": str(th.parent_id) if th.parent_id else None,
+            "status": th.status,
+            "risk_flag": bool(th.risk_flag),
+            "owner_teacher_id": str(th.owner_teacher_id) if th.owner_teacher_id else None,
+            "created_at": th.created_at.isoformat() if th.created_at else None,
+            "updated_at": th.updated_at.isoformat() if th.updated_at else None,
+            "message_count": msg_count,
+            "trace_count": trace_count,
+        })
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
+
+
+def get_parent_session_detail(db: Session, thread_id) -> dict | None:
+    from uuid import UUID
+
+    from app.models.parent_service import ParentServiceMessage, ParentServiceThread
+
+    try:
+        tid = UUID(str(thread_id))
+    except (ValueError, TypeError):
+        return None
+    th = db.get(ParentServiceThread, tid)
+    if th is None:
+        return None
+    msgs = db.scalars(
+        select(ParentServiceMessage).where(ParentServiceMessage.thread_id == tid).order_by(ParentServiceMessage.created_at.asc())
+    ).all()
+    traces = db.scalars(
+        select(RagRetrievalTrace).where(
+            RagRetrievalTrace.conversation_id == tid,
+            RagRetrievalTrace.domain == "parent_service",
+        ).order_by(RagRetrievalTrace.created_at.asc())
+    ).all()
+    return {
+        "thread": {
+            "id": str(th.id),
+            "parent_id": str(th.parent_id) if th.parent_id else None,
+            "status": th.status,
+            "risk_flag": bool(th.risk_flag),
+            "owner_teacher_id": str(th.owner_teacher_id) if th.owner_teacher_id else None,
+            "created_at": th.created_at.isoformat() if th.created_at else None,
+            "updated_at": th.updated_at.isoformat() if th.updated_at else None,
+        },
+        "messages": [
+            {
+                "id": str(m.id),
+                "role": m.role,
+                "content": m.content,
+                "tokens": m.tokens,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "retrieval_diag": m.retrieval_diag,
+            }
+            for m in msgs
+        ],
+        "traces": [trace_to_dict(t) for t in traces],
+    }
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

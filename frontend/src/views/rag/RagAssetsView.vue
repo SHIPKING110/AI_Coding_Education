@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import RagTabs from '@/components/RagTabs.vue'
 import {
   deleteRagDocument,
   getRagDocument,
@@ -185,6 +186,8 @@ onMounted(() => {
         <button class="btn" :disabled="loading" @click="loadDocs">{{ loading ? '刷新中…' : '刷新' }}</button>
       </template>
     </PageHead>
+
+    <RagTabs />
 
     <div class="tabs">
       <button :class="{ on: tab === 'documents' }" @click="tab = 'documents'">文档接入</button>

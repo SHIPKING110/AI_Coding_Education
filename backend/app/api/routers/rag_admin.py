@@ -441,6 +441,7 @@ def list_traces(
     conversation_id: uuid.UUID | None = None,
     zero_only: bool = False,
     error_only: bool = False,
+    rag_status: str | None = None,
     q: str | None = None,
     created_from: datetime | None = None,
     created_to: datetime | None = None,
@@ -450,7 +451,7 @@ def list_traces(
 ) -> dict:
     return crud.list_traces(
         db, domain=domain, owner_id=owner_id, conversation_id=conversation_id,
-        zero_only=zero_only, error_only=error_only, q=q,
+        zero_only=zero_only, error_only=error_only, rag_status=rag_status, q=q,
         created_from=created_from, created_to=created_to,
         page=page, page_size=page_size,
     )
@@ -461,7 +462,28 @@ def trace_detail(trace_id: str, db: Session = Depends(get_db)) -> dict:
     row = crud.get_trace(db, trace_id)
     if row is None:
         raise HTTPException(status_code=404, detail="trace 不存在")
-    return crud.trace_to_dict(row)
+    out = crud.trace_to_dict(row)
+    # 关联的 Agent 运行（任务型对话可查看完整执行过程）
+    try:
+        from app.crud import agent_ops as agent_ops_crud
+        runs = agent_ops_crud.list_runs_by_trace(db, trace_id)
+        out["related_runs"] = [
+            {
+                "run_id": r.run_id,
+                "agent_id": r.agent_id,
+                "intent": r.intent,
+                "task_kind": r.task_kind,
+                "status": r.status,
+                "needs_rag": bool(r.needs_rag),
+                "rag_decision": r.rag_decision,
+                "latency_ms": r.latency_ms,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in runs
+        ]
+    except Exception:
+        out["related_runs"] = []
+    return out
 
 
 class TraceFeedbackIn(BaseModel):
@@ -485,6 +507,26 @@ def cleanup_traces(user: User = Depends(get_current_user), db: Session = Depends
         result["agent_runs"] = {"deleted": 0}
     crud.add_audit(db, action="maintenance.cleanup_traces", target="trace", detail=result, operator_id=user.id)
     return result
+
+
+@router.get("/parent-sessions")
+def list_parent_sessions(
+    page: int = 1,
+    page_size: int = 20,
+    status: str | None = None,
+    risk: bool | None = None,
+    days: int = 30,
+    db: Session = Depends(get_db),
+) -> dict:
+    return crud.list_parent_sessions(db, page=page, page_size=page_size, status=status, risk=risk, days=days)
+
+
+@router.get("/parent-sessions/{thread_id}")
+def parent_session_detail(thread_id: str, db: Session = Depends(get_db)) -> dict:
+    detail = crud.get_parent_session_detail(db, thread_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return detail
 
 
 @router.get("/config")

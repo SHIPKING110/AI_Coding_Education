@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
+import RagTabs from '@/components/RagTabs.vue'
 import {
   getAgentOpsStats,
   getAgentRun,
@@ -27,6 +28,7 @@ const filters = ref({
   task_kind: '',
   status: '',
   rag_decision: '',
+  rag_status: '',
   needs_rag: '' as '' | 'true' | 'false',
   ppt_aligned: '' as '' | 'true' | 'false',
 })
@@ -126,6 +128,8 @@ onMounted(load)
       </template>
     </PageHead>
 
+    <RagTabs />
+
     <p v-if="error" class="error">{{ error }}</p>
 
     <section v-if="stats" class="grid cards">
@@ -174,6 +178,17 @@ onMounted(load)
       </div>
     </section>
 
+    <section v-if="stats" class="panel">
+      <div class="panel-head"><h3>Component synergy</h3></div>
+      <div class="bars">
+        <div class="bar-row"><span>RAG only</span><div class="bar"><i :style="{ width: `${stats.total_runs ? (stats.component_synergy.pure_rag / stats.total_runs) * 100 : 0}%` }" /></div><b>{{ stats.component_synergy.pure_rag }}</b></div>
+        <div class="bar-row"><span>Tool only</span><div class="bar"><i :style="{ width: `${stats.total_runs ? (stats.component_synergy.pure_tool / stats.total_runs) * 100 : 0}%` }" /></div><b>{{ stats.component_synergy.pure_tool }}</b></div>
+        <div class="bar-row"><span>RAG + Tool</span><div class="bar"><i :style="{ width: `${stats.total_runs ? (stats.component_synergy.rag_plus_tool / stats.total_runs) * 100 : 0}%` }" /></div><b>{{ stats.component_synergy.rag_plus_tool }}</b></div>
+        <div class="bar-row"><span>Skill runs</span><div class="bar"><i :style="{ width: `${stats.total_runs ? (stats.component_synergy.skill_runs / stats.total_runs) * 100 : 0}%` }" /></div><b>{{ stats.component_synergy.skill_runs }}</b></div>
+        <div class="bar-row"><span>MCP runs</span><div class="bar"><i :style="{ width: `${stats.total_runs ? (stats.component_synergy.mcp_runs / stats.total_runs) * 100 : 0}%` }" /></div><b>{{ stats.component_synergy.mcp_runs }}</b></div>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel-head">
         <h3>运行列表</h3>
@@ -207,6 +222,14 @@ onMounted(load)
           <option value="">全部 RAG 决策</option>
           <option v-for="(v, k) in DECISION_LABEL" :key="k" :value="k">{{ v }}</option>
         </select>
+        <select v-model="filters.rag_status" @change="applyFilters">
+          <option value="">all RAG statuses</option>
+          <option value="used">used</option>
+          <option value="skipped">skipped</option>
+          <option value="error">error</option>
+          <option value="needed">needed</option>
+          <option value="not_needed">not_needed</option>
+        </select>
         <select v-model="filters.needs_rag" @change="applyFilters">
           <option value="">RAG 需求不限</option>
           <option value="true">需要 RAG</option>
@@ -221,7 +244,7 @@ onMounted(load)
       <table class="table">
         <thead>
           <tr>
-            <th>时间</th><th>意图</th><th>任务</th><th>RAG</th><th>模型/工具</th><th>PPT</th><th>时延</th><th>状态</th><th></th>
+            <th>时间</th><th>意图</th><th>任务</th><th>RAG</th><th>RAG状态</th><th>模型/工具</th><th>PPT</th><th>时延</th><th>状态</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -230,6 +253,7 @@ onMounted(load)
             <td>{{ intentLabel(r.intent) }}</td>
             <td>{{ r.task_kind }}</td>
             <td>{{ decisionLabel(r.rag_decision) }}</td>
+            <td>{{ r.rag_status || '-' }}</td>
             <td>{{ r.model_calls }} / {{ r.tool_calls }}</td>
             <td>
               <span v-if="r.task_kind === 'ppt'" class="tag" :class="{ active: r.ppt_aligned }">
@@ -241,7 +265,7 @@ onMounted(load)
             <td><span class="tag" :class="{ active: r.status === 'ok', danger: r.status === 'error' }">{{ r.status }}</span></td>
             <td><button class="link-btn" @click="openRun(r)">详情</button></td>
           </tr>
-          <tr v-if="!items.length"><td colspan="9" class="muted">暂无运行记录</td></tr>
+          <tr v-if="!items.length"><td colspan="10" class="muted">暂无运行记录</td></tr>
         </tbody>
       </table>
       <div class="pager">

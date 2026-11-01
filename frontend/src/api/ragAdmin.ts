@@ -16,12 +16,14 @@ export interface RagTraceStats {
   queries: number
   zero_results: number
   errors: number
+  hits?: number
   hit_rate: number | null
   zero_result_rate: number | null
   avg_latency_ms: number | null
   vector_fail: number
   keyword_used: number
   rerank_fail: number
+  rag_status_counts?: { hit: number; no_hit: number; error: number }
 }
 
 export interface RagDomainStats {
@@ -108,11 +110,13 @@ export interface RagTrace {
   rerank_model: string
   zero_result: boolean
   is_error: boolean
+  rag_status: string
   error: string | null
   latency_ms: number
   stage_timings: Record<string, number> | null
   hits: RagTraceHit[] | null
   feedback: string | null
+  related_runs?: { run_id: string; agent_id: string; intent: string; task_kind: string; status: string; needs_rag: boolean; rag_decision: string; latency_ms: number; created_at: string | null }[]
   created_at: string | null
 }
 
@@ -210,6 +214,16 @@ export async function listRagTraces(params: Record<string, unknown> = {}): Promi
 
 export async function getRagTrace(traceId: string): Promise<RagTrace> {
   const { data } = await http.get(`/admin/rag/traces/${traceId}`)
+  return data
+}
+
+export async function listParentSessions(params: Record<string, unknown> = {}): Promise<{ total: number; page: number; page_size: number; items: any[] }> {
+  const { data } = await http.get('/admin/rag/parent-sessions', { params })
+  return data
+}
+
+export async function getParentSession(threadId: string): Promise<{ thread: any; messages: any[]; traces: RagTrace[] }> {
+  const { data } = await http.get(`/admin/rag/parent-sessions/${threadId}`)
   return data
 }
 

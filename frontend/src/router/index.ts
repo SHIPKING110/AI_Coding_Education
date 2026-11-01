@@ -77,6 +77,18 @@ const router = createRouter({
           meta: { adminOnly: true },
         },
         {
+          path: 'rag/sessions',
+          name: 'rag-sessions',
+          component: () => import('@/views/rag/RagSessionsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/parent-sessions',
+          name: 'rag-parent-sessions',
+          component: () => import('@/views/rag/RagParentSessionsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
           path: 'rag/routes',
           name: 'rag-routes',
           component: () => import('@/views/rag/RagRoutesView.vue'),

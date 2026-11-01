@@ -47,13 +47,36 @@ const campus = ref('')
 const dateFrom = ref('')
 const dateTo = ref('')
 
-function defaultRange(days = 13) {
+function defaultRange(_days = 13) {
   const to = new Date()
-  const from = new Date()
-  from.setDate(from.getDate() - days)
-  const fmt = (d: Date) => d.toISOString().slice(0, 10)
+  const from = new Date(to.getFullYear(), to.getMonth(), 1)
+  const fmt = (d: Date) => {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
   dateFrom.value = fmt(from)
   dateTo.value = fmt(to)
+}
+
+function last30Range() {
+  const to = new Date()
+  const from = new Date()
+  from.setDate(from.getDate() - 29)
+  const fmt = (d: Date) => {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
+  dateFrom.value = fmt(from)
+  dateTo.value = fmt(to)
+}
+
+function clearRange() {
+  dateFrom.value = ''
+  dateTo.value = ''
 }
 
 // ---- 订单管理 ----
@@ -482,6 +505,9 @@ onUnmounted(() => {
       <input v-model="dateFrom" type="date" class="filter-input" @change="reloadActive()" />
       <span class="filter-sep">—</span>
       <input v-model="dateTo" type="date" class="filter-input" @change="reloadActive()" />
+      <button class="btn ghost sm" @click="defaultRange(); reloadActive()">本月</button>
+      <button class="btn ghost sm" @click="last30Range(); reloadActive()">近30天</button>
+      <button class="btn ghost sm" @click="clearRange(); reloadActive()">全部</button>
       <select v-model="campus" class="filter-select" @change="reloadActive()">
         <option value="">全部校区</option>
         <option v-for="c in campuses" :key="c.id" :value="c.name">{{ c.name }}</option>
