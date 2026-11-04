@@ -4,6 +4,13 @@
 
 ## 进行中
 
+- [x] **8080 部署核对与提交（2026-11-04，完成）**
+  - [x] **端口口径**：8080=docker-compose `web`(nginx)，`/api`、`/uploads` 反代 `backend` 容器（容器内 8000）；与开发 5173→8000 是两套独立环境。改代码后必须 `docker compose up -d --build` 才生效，仅 restart 不会更新源码
+  - [x] **三项已确认在 8080 生效**：后端容器关键文件与本地 sha256 一致；`/api/openapi.json` 含 `parent-embedding-config/index/rebuild`；构建产物含「家长客服专属」「页数对齐」「无法加载 SVG 源码」文案；index.html 引用最新 hash（构建于 11-04 00:03）
+  - [x] **“感觉没变化”排查口径**：优先 Ctrl+F5 强刷；PPT 页数对齐仅对新运行生效不追溯；家长 Embedding 未配置时本就显示“回退系统级”；Skill SVG 仅技能实际产出 .svg 才预览；设置页三项（对话/Embedding/Rerank）是后端直连所填 base_url，与 8080 无关
+  - [x] **提交**：`23ca26c`（三项+快捷术语+RAG 观测口径，44 files）与 `bb77cfc`（testout.txt / adr-0021.md 占位）已推送 `origin/chore/production-deploy`
+  - [x] **遗留**：8080 库 `alembic_version` 仍为 c0ffee000052（053 表已由启动 create_all 建好，不影响；重建镜像前可跑 `alembic upgrade head` 对齐）；仓库遗留 `testout.txt`（UTF-16 pytest 输出）与 0 字节占位 `docs/adr/adr-0021.md` **已于 2026-11-04 清理**
+
 - [x] **家长客服专属 Embedding / PPT 页数对齐 / Skill SVG 预览（2026-11-03，完成）**
   - [x] **家长客服 Embedding**：新增 `system_parent_embedding_config` 单例表与 CRUD/接口；配置后家长 RAG 使用独立集合 `parent_knowledge__{fingerprint}`，只索引家长可见文档，后台按哈希增量重建父索引；未配置回退系统级。设置页「家长客服共享模型」新增 Embedding 行与索引状态/重建入口
   - [x] **PPT 页数对齐**：无契约但已出片时按实际页数补写 run 指标并补任务契约；`build-ppt` 也写 run/契约；任务监控分母改为带目标页数的任务/运行并展示交付数，避免一直显示 0
