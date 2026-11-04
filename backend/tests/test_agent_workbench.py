@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Agent 工作台四项优化回归测试：
 1) 广场收录 Skill 可被收录者解析/执行（物化到使用者目录，效果与发布者一致）；
 2) 原生工具调用标记净化（二次编辑不再吐乱码）；
@@ -48,7 +47,7 @@ def test_plaza_skill_collect_and_materialize(factory, tmp_path, monkeypatch):
     """收录者能解析到作者的广场 Skill，并把文件包物化到自己目录（效果与作者一致）。"""
     from app.core.config import get_settings
     from app.crud import agent_ext as ext
-    from app.services import skill_bundle, agent_tools
+    from app.services import agent_tools, skill_bundle
 
     monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
     db = factory()
@@ -109,7 +108,7 @@ def test_plaza_skill_inventory_visible_to_collector(factory, tmp_path, monkeypat
 
 def test_sanitizer_strips_toolcall_markup():
     """二次编辑乱码根因修复：原生工具调用标记被剔除（含跨 chunk 流式）。"""
-    from app.services.llm import strip_toolcall_markup, _StreamSanitizer
+    from app.services.llm import _StreamSanitizer, strip_toolcall_markup
 
     assert strip_toolcall_markup("好的。<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name=Bash") == "好的。"
     assert strip_toolcall_markup("正文<|tool\u2581calls\u2581begin|>garbage<|tool\u2581calls\u2581end|>结尾") == "正文结尾"
@@ -124,8 +123,8 @@ def test_sanitizer_strips_toolcall_markup():
 
 def test_derive_spec_from_tools_builds_outline():
     """Skill 用 write_skill_file 逐页写 svg → 提炼大纲，使大纲每页对应成品、svg 页可预览。"""
-    from app.services.agent_planner import PlanOutcome, Step
     from app.api.routers.agents import _derive_spec_from_tools
+    from app.services.agent_planner import PlanOutcome, Step
 
     steps = [
         Step(tool="write_skill_file", args={"skill": "ppt-master", "path": "projects/demo/svg/01_cover.svg"}, ok=True, result={}),
@@ -143,8 +142,8 @@ def test_derive_spec_from_tools_builds_outline():
 
 def test_derive_spec_no_svg_returns_empty():
     """没有写 svg 的工具轨迹 → 不臆造大纲（保持原有 json 解析结果）。"""
-    from app.services.agent_planner import PlanOutcome, Step
     from app.api.routers.agents import _derive_spec_from_tools
+    from app.services.agent_planner import PlanOutcome, Step
 
     steps = [Step(tool="my_schedule_overview", args={}, ok=True, result={})]
     assert _derive_spec_from_tools(PlanOutcome(steps=steps)) == {}
@@ -167,10 +166,10 @@ def test_looks_like_ppt_edit_gate():
 
 def test_existing_pptx_block_lists_sources(factory, tmp_path, monkeypatch):
     """PPT 二次编辑：把已有 .pptx 源文件路径注入上下文，供「就地改」。"""
+    from app.api.routers.agents import _existing_pptx_block
     from app.core.config import get_settings
     from app.crud import agent_ext as ext
     from app.services import skill_bundle
-    from app.api.routers.agents import _existing_pptx_block
 
     monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
     db = factory()
@@ -190,10 +189,91 @@ def test_existing_pptx_block_lists_sources(factory, tmp_path, monkeypatch):
         db.close()
 
 
-def test_existing_pptx_block_empty_without_pptx(factory, tmp_path, monkeypatch):
+def test_contract_absorbs_added_and_deleted_pages(factory):
+    """多轮增删页不再触发无休止修复：新增页并入契约，用户删页则收缩契约。"""
+    import uuid as _uuid
+
+    from app.models.ppt_task import AgentPptTask
+    from app.services import ppt_task
+    from app.services.agent_planner import PlanOutcome, Step
+
+    db = factory()
+    try:
+        def _mk(n=3):
+            task = AgentPptTask(
+                conversation_id=_uuid.uuid4(), owner_id=_uuid.uuid4(), agent_id="assistant",
+                status="exported", target_page_count=n, current_page_count=n,
+                outline=[
+                    {"page_id": f"p{i+1}", "order": i+1, "title": t, "kind": "content",
+                     "key_points": "", "status": "generated", "svg_file": "", "actual_title": "", "error": ""}
+                    for i, t in enumerate(["封面", "正文", "结尾"][:n])
+                ],
+            )
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+            return task
+
+        def _out(pages):
+            return PlanOutcome(steps=[Step(
+                tool="run_skill_script", ok=True, args={},
+                result={
+                    "页清单": [f"{i+1:02d}_{p}.svg" for i, p in enumerate(pages)],
+                    "生成文件": [{"名": "deck.pptx", "下载": "/u/deck.pptx"}],
+                },
+            )])
+
+        # 加一页：第 4 页作为新增页并入契约
+        t1 = _mk(3)
+        v1 = ppt_task.sync_from_outcome(db, t1, _out(["封面", "正文", "加页", "结尾"]), message="加一页练习")
+        assert v1["aligned"] is True
+        assert v1["target_page_count"] == 4 and v1["current_page_count"] == 4
+
+        # 删一页：用户主动删除后收缩契约，不再把缺页补回来
+        t2 = _mk(3)
+        v2 = ppt_task.sync_from_outcome(db, t2, _out(["封面", "正文"]), message="删掉第 3 页")
+        assert v2["aligned"] is True
+        assert v2["target_page_count"] == 2 and v2["current_page_count"] == 2
+    finally:
+        db.close()
+
+
+def test_existing_pptx_block_isolated_by_conversation(factory, tmp_path, monkeypatch):
+    """跨会话串任务根因：二次编辑只能看到本会话的 pptx，不能扫到别的对话。"""
+    import uuid as _uuid
+
+    from app.api.routers.agents import _existing_pptx_block
     from app.core.config import get_settings
     from app.crud import agent_ext as ext
+    from app.services import skill_bundle
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    db = factory()
+    try:
+        user = _mk_user(db, name="ppt-scope")
+        skill = ext.create_skill(db, owner_id=user.id, name="ppt-master", description="",
+                                 content="", files=[])
+        desk = skill_bundle.skill_dir(user.id, skill.id)
+        conv_id = _uuid.uuid4()
+        prefix = "conversations/conv_" + str(conv_id).replace("-", "")[:12]
+        current = desk / prefix / "projects" / "list-deck"
+        current.mkdir(parents=True)
+        (current / "list-deck.pptx").write_bytes(b"PK\x03\x04")
+        other = desk / "conversations/conv_ffffffffffff/projects/operators-deck"
+        other.mkdir(parents=True)
+        (other / "operators-deck.pptx").write_bytes(b"PK\x03\x04")
+
+        block = _existing_pptx_block(db, user, conv_id)
+        assert "projects/list-deck/list-deck.pptx" in block
+        assert "operators-deck" not in block
+    finally:
+        db.close()
+
+
+def test_existing_pptx_block_empty_without_pptx(factory, tmp_path, monkeypatch):
     from app.api.routers.agents import _existing_pptx_block
+    from app.core.config import get_settings
+    from app.crud import agent_ext as ext
 
     monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
     db = factory()
@@ -245,8 +325,8 @@ def test_svg_page_title_picks_largest_text():
 
 def test_derive_spec_uses_full_page_list_from_build():
     """调整后续写：以 build 回执的整份页清单为准，未改动的旧页也进大纲（不再只剩本次写过的页）。"""
-    from app.services.agent_planner import PlanOutcome, Step
     from app.api.routers.agents import _derive_spec_from_tools
+    from app.services.agent_planner import PlanOutcome, Step
 
     svg = "<svg><text font-size='56'>变量是什么</text></svg>"
     steps = [
@@ -279,10 +359,11 @@ def test_derive_spec_uses_full_page_list_from_build():
 def test_conversation_ppt_block_lists_conv_project(factory, tmp_path, monkeypatch):
     """二次编辑基线：本会话隔离目录里的项目/页数/成品要被列出，且不掺别的会话。"""
     import uuid as _uuid
+
+    from app.api.routers.agents import _conversation_ppt_block
     from app.core.config import get_settings
     from app.crud import agent_ext as ext
     from app.services import skill_bundle
-    from app.api.routers.agents import _conversation_ppt_block
 
     monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
     db = factory()
@@ -327,10 +408,9 @@ def test_looks_like_ppt_continue_gate():
 
 def test_auto_build_ppt_picks_fresh_project(factory, tmp_path, monkeypatch):
     """问题3兜底：模型写了 svg 但没导出时，auto_build_ppt 能找到项目并跑 build 出片。"""
-    import time
     from app.core.config import get_settings
     from app.crud import agent_ext as ext
-    from app.services import skill_bundle, agent_tools
+    from app.services import agent_tools, skill_bundle
 
     monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
     db = factory()
@@ -367,13 +447,15 @@ def test_auto_build_ppt_picks_fresh_project(factory, tmp_path, monkeypatch):
         db.close()
 
 
-def test_auto_build_ppt_skips_stale_project(factory, tmp_path, monkeypatch):
-    """问题2/3：太旧的项目（>60 分钟）不自动抓，避免串到别的旧会话。"""
+def test_auto_build_ppt_uses_current_conversation_even_if_old(factory, tmp_path, monkeypatch):
+    """当前会话项目即使较旧，用户回来点「继续修复」也应能自动出片；隔离靠会话目录而非时间窗。"""
     import os
     import time
+    import uuid
+
     from app.core.config import get_settings
     from app.crud import agent_ext as ext
-    from app.services import skill_bundle, agent_tools
+    from app.services import agent_tools, skill_bundle
 
     monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
     db = factory()
@@ -387,7 +469,9 @@ def test_auto_build_ppt_skips_stale_project(factory, tmp_path, monkeypatch):
         wrap = desk / "ppt-master-main/skills/ppt-master/scripts/ppt_oneshot.py"
         wrap.parent.mkdir(parents=True, exist_ok=True)
         wrap.write_text("print('ok')\n", encoding="utf-8")
-        proj = desk / "projects" / "old"
+        conv_id = uuid.uuid4()
+        agent_tools.use_conversation(conv_id)
+        proj = desk / ("conversations/conv_" + str(conv_id).replace("-", "")[:12]) / "projects" / "old"
         sd = proj / "svg_output"
         sd.mkdir(parents=True, exist_ok=True)
         old_svg = sd / "01_cover.svg"
@@ -395,8 +479,9 @@ def test_auto_build_ppt_skips_stale_project(factory, tmp_path, monkeypatch):
         old = time.time() - 3 * 3600
         os.utime(old_svg, (old, old))
         out = agent_tools.auto_build_ppt(db, user)
-        assert out is None, "旧项目不应被自动抓取"
+        assert out is not None, "本会话旧项目仍应能自动出片"
     finally:
+        agent_tools.use_conversation(None)
         db.close()
 
 def test_conversation_scoped_paths():
@@ -413,11 +498,32 @@ def test_conversation_scoped_paths():
     A.use_conversation(None)
     assert A._scope_path("projects/x") == "projects/x"
 
+
+def test_read_text_file_previews_svg_and_rejects_images(tmp_path, monkeypatch):
+    """Skill 页面源文件（SVG）应按文本预览；图片仍走下载链接，不误报「该类型不支持预览」。"""
+    from app.core.config import get_settings
+    from app.services import skill_bundle
+
+    monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
+    owner, skill = uuid.uuid4(), uuid.uuid4()
+    d = skill_bundle.skill_dir(owner, skill)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "01_cover.svg").write_text("<svg><text>封面</text></svg>", encoding="utf-8")
+    (d / "index.html").write_text("<html>ok</html>", encoding="utf-8")
+    assert "封面" in skill_bundle.read_text_file(owner, skill, "01_cover.svg")
+    assert "ok" in skill_bundle.read_text_file(owner, skill, "index.html")
+    (d / "bg.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    try:
+        skill_bundle.read_text_file(owner, skill, "bg.png")
+        raise AssertionError("图片不应按文本预览")
+    except ValueError as e:
+        assert "图片" in str(e)
+
 def test_skill_allowlist_blocks_unselected(factory, tmp_path, monkeypatch):
     """问题1：Agent 没勾选某 Skill 时，executor/inventory/autobuild 都不得使用它。"""
     from app.core.config import get_settings
     from app.crud import agent_ext as ext
-    from app.services import skill_bundle, agent_tools
+    from app.services import agent_tools
 
     monkeypatch.setattr(get_settings(), "UPLOAD_DIR", str(tmp_path), raising=False)
     db = factory()
@@ -564,7 +670,8 @@ def test_scope_path_handles_dot_and_backslash():
 def test_sanitize_svg_fonts_removes_zero_placeholder():
     """质量门禁阻断修复：font-size=0 的空白占位文本会让 DrawingML 判非法整单失败。
     空白占位 → 整段移除；非空但字号过小 → 提升到 12px。"""
-    import re, tempfile
+    import re
+    import tempfile
     from pathlib import Path
     src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
     m = re.search(r"def _sanitize_svg_fonts.*?(?=\ndef _qc_errors_only)", src, re.S)
@@ -588,7 +695,8 @@ def test_sanitize_svg_fonts_removes_zero_placeholder():
 
 def test_sanitize_pptx_role_ids_fixes_missing_ids():
     """质量门禁自愈：data-pptx-role 元素缺 id（唯一常见 error）自动补齐，出片不再卡死。"""
-    import re, tempfile
+    import re
+    import tempfile
     from pathlib import Path
     src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
     m = re.search(r"def _sanitize_pptx_role_ids.*?(?=\ndef _qc_errors_only)", src, re.S)
@@ -616,7 +724,8 @@ def test_sanitize_pptx_role_ids_fixes_missing_ids():
 
 def test_sanitize_svg_colors_fixes_invalid():
     """问题1/2：模型写出非法颜色(如 #33island) 时，build 前自动修正，避免质量门禁整单失败。"""
-    import re, tempfile
+    import re
+    import tempfile
     from pathlib import Path
     src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
     m = re.search(r"def _sanitize_svg_colors.*?(?=\ndef cmd_build)", src, re.S)
@@ -635,7 +744,8 @@ def test_sanitize_svg_colors_fixes_invalid():
 
 def test_sanitize_root_bounds_overlap_drops_smaller():
     """质量门禁自愈：根级 <g> data-pptx-bounds 重叠（error）→ 移除较小那组声明，降级为 warning。"""
-    import re, tempfile
+    import re
+    import tempfile
     from pathlib import Path
     src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
     m = re.search(r"def _sanitize_root_bounds_overlap.*?(?=\ndef _qc_errors_only)", src, re.S)
@@ -660,7 +770,8 @@ def test_sanitize_root_bounds_overlap_drops_smaller():
 
 def test_sanitize_svg_xml_fixes_unescaped_amp():
     """质量门禁自愈：未转义 & / 控制字符导致 Invalid XML → 无损转义修复。"""
-    import re, tempfile
+    import re
+    import tempfile
     from pathlib import Path
     src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
     m = re.search(r"def _sanitize_svg_xml.*?(?=\ndef _sanitize_svg_overflow)", src, re.S)
@@ -678,7 +789,8 @@ def test_sanitize_svg_xml_fixes_unescaped_amp():
 
 def test_sanitize_svg_overflow_clamps_into_viewbox():
     """质量门禁自愈：元素越出画布（error）→ 坐标/尺寸回收到 viewBox 内。"""
-    import re, tempfile
+    import re
+    import tempfile
     from pathlib import Path
     src = open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py", encoding="utf-8").read()
     m = re.search(r"def _sanitize_svg_overflow.*?(?=\ndef _qc_errors_only)", src, re.S)
@@ -702,7 +814,6 @@ def test_sanitize_svg_overflow_clamps_into_viewbox():
     assert 'x="120" y="200"' in out                          # 合法元素不动
 
 def test_qc_errors_only():
-    from pathlib import Path
     import re
     src=open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py",encoding="utf-8").read()
     m=re.search(r"def _qc_errors_only.*?(?=\ndef cmd_build)", src, re.S)
@@ -775,7 +886,7 @@ def test_tool_schema_for_skill_task_excludes_business():
 def test_derive_spec_attaches_svg_urls_by_name():
     """svg↔大纲对齐：_derive_spec 按文件名把每页 svg 下载 url 挂到 slides/outline。"""
     from app.api.routers.agents import _derive_spec_from_tools
-    from app.services.agent_planner import Step, PlanOutcome
+    from app.services.agent_planner import PlanOutcome, Step
 
     steps = [
         Step(tool="write_skill_file", args={"path": "projects/x/svg_output/01_cover.svg"}, ok=True, result={}),
@@ -796,7 +907,7 @@ def test_derive_spec_attaches_svg_urls_by_name():
 def test_synthesize_ppt_summary_includes_download():
     """空回复兜底：合成交付说明含页数、逐页标题、pptx 下载链接。"""
     from app.api.routers.agents import _synthesize_ppt_summary
-    from app.services.agent_planner import Step, PlanOutcome
+    from app.services.agent_planner import PlanOutcome, Step
 
     steps = [
         Step(tool="write_skill_file", args={"path": "projects/x/svg_output/01_cover.svg"}, ok=True, result={}),

@@ -4,7 +4,7 @@ import { useRoute } from 'vue-router'
 
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
-import { getRagTrace, listRagTraces, setRagTraceFeedback, type RagTrace } from '@/api/ragAdmin'
+import { getRagOverview, getRagTrace, listRagTraces, setRagTraceFeedback, type RagOverview, type RagTrace } from '@/api/ragAdmin'
 
 const route = useRoute()
 const loading = ref(false)
@@ -17,6 +17,7 @@ const domain = ref('')
 const q = ref('')
 const ragStatus = ref('')
 const selected = ref<RagTrace | null>(null)
+const overview = ref<RagOverview | null>(null)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
@@ -24,15 +25,19 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const res = await listRagTraces({
-      domain: domain.value || undefined,
-      q: q.value || undefined,
-      rag_status: ragStatus.value || undefined,
-      page: page.value,
-      page_size: pageSize,
-    })
+    const [res, ov] = await Promise.all([
+      listRagTraces({
+        domain: domain.value || undefined,
+        q: q.value || undefined,
+        rag_status: ragStatus.value || undefined,
+        page: page.value,
+        page_size: pageSize,
+      }),
+      getRagOverview(),
+    ])
     items.value = res.items
     total.value = res.total
+    overview.value = ov
   } catch (e) {
     error.value = e instanceof Error ? e.message : '加载失败'
   } finally {
@@ -103,6 +108,15 @@ onMounted(async () => {
     <RagTabs />
 
     <p v-if="error" class="error">{{ error }}</p>
+
+    <section v-if="overview" class="health-strip">
+      <div><span>命中率（排除错误）</span><b>{{ pct(overview.retrieval_24h.hit_rate_excl_errors) }}</b></div>
+      <div><span>零结果率</span><b>{{ pct(overview.retrieval_24h.zero_result_rate) }}</b></div>
+      <div><span>检索错误率</span><b>{{ pct(overview.retrieval_24h.error_rate) }}</b></div>
+      <div><span>P95 时延</span><b>{{ overview.retrieval_24h.p95_latency_ms == null ? '-' : `${overview.retrieval_24h.p95_latency_ms} ms` }}</b></div>
+      <div><span>向量成功率</span><b>{{ pct(overview.retrieval_24h.vector_success_rate) }}</b></div>
+      <div><span>重排成功率</span><b>{{ pct(overview.retrieval_24h.rerank_success_rate) }}</b></div>
+    </section>
 
     <section class="toolbar">
       <input v-model="q" placeholder="搜索 query" @keyup.enter="search" />
@@ -217,6 +231,12 @@ onMounted(async () => {
 
 <style scoped>
 .btn { padding: 8px 14px; border-radius: 9px; border: 1px solid var(--brand); background: var(--brand); color: #fff; font-weight: 600; cursor: pointer; font-size: 13px; }
+.health-strip { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.health-strip > div { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 3px; }
+.health-strip span { font-size: 11px; color: var(--ink-3); }
+.health-strip b { font-size: 16px; color: var(--ink); }
+@media (max-width: 1000px) { .health-strip { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 600px) { .health-strip { grid-template-columns: repeat(2, 1fr); } }
 .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .toolbar input[type='text'], .toolbar input:not([type]), .toolbar select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); }
 label { font-size: 12.5px; color: var(--ink-2); display: flex; gap: 5px; align-items: center; }

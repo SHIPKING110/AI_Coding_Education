@@ -205,6 +205,16 @@ def ensure_contract(
             title = planned["title"]
             theme = planned["theme"]
     if not outline:
+        # 规划模型不可用/未配置 key 时，明确页数的请求仍要冻结契约（占位页序），
+        # 否则生成完成后目标页数永远是 0，PPT 对齐率指标失去分母。
+        target = _target_from_message(text)
+        if target:
+            outline = _clean_outline(
+                [{"title": f"第 {i + 1} 页", "kind": "cover" if i == 0 else "content"}
+                 for i in range(target)],
+                target,
+            )
+    if not outline:
         return None
 
     task = crud.create_task(
@@ -261,9 +271,115 @@ def _steps_pages(outcome) -> tuple[list[dict], str, str, str]:
     return pages, pptx_url, skill_name, project_key
 
 
-def sync_from_outcome(db: Session, task: AgentPptTask, outcome) -> dict:
-    """把本轮 build 产物写回契约，并返回校验结果。"""
+def _renumber_outline(outline: list[dict]) -> list[dict]:
+    for i, item in enumerate(outline):
+        item["page_id"] = f"p{i + 1}"
+        item["order"] = i + 1
+    return outline
+
+
+def _disk_svg_pages(task: AgentPptTask) -> list[str]:
+    """从磁盘扫描该项目 svg_output 下的 SVG 文件名（按序号排序）。
+
+    build 回执缺失/不完整时，以磁盘实际文件为事实源，避免「文件已生成却仍判缺失」。
+    会话隔离路径 + 多 Skill 包：遍历 owner 下所有 skill 目录，按 project_key 匹配。
+    """
+    from pathlib import Path
+
+    from app.core.config import get_settings
+
+    try:
+        base = Path(get_settings().UPLOAD_DIR) / "skills" / str(task.owner_id)
+    except Exception:
+        return []
+    if not base.is_dir():
+        return []
+
+    project_key = str(task.project_key or "").replace("\\", "/").strip("/")
+    # 候选 svg_output 目录
+    cand_dirs: list[Path] = []
+
+    def _collect(d: Path) -> None:
+        if d.is_dir():
+            if any(p.is_file() and p.suffix.lower() == ".svg" for p in d.iterdir()):
+                cand_dirs.append(d)
+
+    # 1) 精确路径匹配（scoped + unscoped）
+    keys_to_try: list[str] = []
+    if project_key:
+        keys_to_try.append(project_key)
+        # 去掉会话前缀 → projects/...
+        prefix = ""
+        if project_key.startswith("conversations/"):
+            parts = project_key.split("/", 2)
+            if len(parts) >= 3:
+                keys_to_try.append(parts[2])
+    for skill_dir in base.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        for k in keys_to_try:
+            _collect(skill_dir / k / "svg_output")
+        # 2) 兜底：遍历所有 svg_output，按项目名/路径包含匹配
+        try:
+            for svg_dir in skill_dir.rglob("svg_output"):
+                if not svg_dir.is_dir():
+                    continue
+                rel = str(svg_dir.relative_to(skill_dir)).replace("\\", "/")
+                if project_key and (project_key in rel or (keys_to_try and any(kt in rel for kt in keys_to_try))):
+                    _collect(svg_dir)
+        except Exception:
+            pass
+
+    if not cand_dirs:
+        # 最后兜底：owner 下最近修改的 svg_output
+        try:
+            all_dirs = [d for d in base.rglob("svg_output") if d.is_dir() and any(p.suffix.lower() == ".svg" for p in d.iterdir())]
+            if all_dirs:
+                all_dirs.sort(key=lambda d: max((p.stat().st_mtime for p in d.glob("*.svg")), default=0.0), reverse=True)
+                cand_dirs = all_dirs[:1]
+        except Exception:
+            pass
+
+    if not cand_dirs:
+        return []
+
+    # 选 SVG 最多 / 最新 的目录
+    def _score(d: Path) -> tuple[int, float]:
+        svgs = list(d.glob("*.svg"))
+        mt = max((p.stat().st_mtime for p in svgs), default=0.0)
+        return (len(svgs), mt)
+
+    best = max(cand_dirs, key=_score)
+    import re as _re
+
+    def _key(p: Path):
+        m = _re.match(r"^(\d+)", p.name)
+        return (int(m.group(1)) if m else 10 ** 9, p.name.lower())
+
+    return [p.name for p in sorted(best.glob("*.svg"), key=_key)]
+
+
+def sync_from_outcome(db: Session, task: AgentPptTask, outcome, *, message: str = "") -> dict:
+    """把本轮 build 产物写回契约，并返回校验结果。
+
+    ``message`` 用于区分「用户主动增删页」与「构建漏页」：
+      - 新增页：把成品里的额外页并入契约（否则会被判成 extra，陷入反复修复）；
+      - 用户要求删页：接受成品页数变少并收缩契约（否则会把删掉的页又补回来）；
+      - 其余缺页：保留为 missing，交给补齐流程。
+    """
     pages, pptx_url, skill_name, project_key = _steps_pages(outcome)
+    # 磁盘观测兜底：build 回执缺失/页数不全时，以磁盘实际 SVG 文件为准，
+    # 避免「文件已生成却仍判缺失、后续继续规划要补页」。
+    disk_pages = _disk_svg_pages(task)
+    if disk_pages:
+        existing_names = {str(p.get("name") or "") for p in pages}
+        if not pages:
+            pages = [{"name": n, "title": "", "url": ""} for n in disk_pages]
+        elif len(disk_pages) > len(pages):
+            for n in disk_pages:
+                if n not in existing_names:
+                    pages.append({"name": n, "title": "", "url": ""})
+                    existing_names.add(n)
     target_outline = list(task.outline or [])
     target_count = int(task.target_page_count or len(target_outline) or 0)
 
@@ -310,9 +426,34 @@ def sync_from_outcome(db: Session, task: AgentPptTask, outcome) -> dict:
             item["svg_file"] = page.get("name") or ""
             item["actual_title"] = page.get("title") or ""
             item["error"] = ""
-    extra = [p for i, p in enumerate(pages) if i not in matched_page_indices]
 
-    aligned = not missing and not extra and len(pages) == target_count
+    extra = [p for i, p in enumerate(pages) if i not in matched_page_indices]
+    # 用户主动新增的页：并入契约，避免 extra 被当成错误反复重做。
+    for page in extra:
+        target_outline.append({
+            "page_id": "",
+            "order": 0,
+            "title": str(page.get("title") or page.get("name") or "新增页")[:120],
+            "kind": "content",
+            "key_points": "",
+            "status": "generated",
+            "svg_file": page.get("name") or "",
+            "actual_title": page.get("title") or "",
+            "error": "",
+        })
+    # 用户明确要求删页：接受页数减少并收缩契约，不再把删掉的页补回来。
+    user_deleted = any(k in (message or "") for k in ("删", "去掉", "移除", "删掉"))
+    wants_fill = any(
+        k in (message or "") for k in ("补齐", "补全", "缺页", "页数不对", "继续修复", "补页")
+    ) or (not user_deleted and bool(_target_from_message(message or "")))
+    if user_deleted and not wants_fill:
+        target_outline = [x for x in target_outline if x.get("status") != "missing"]
+        missing = []
+    _renumber_outline(target_outline)
+    target_count = len(target_outline)
+    remaining_missing = [x for x in target_outline if x.get("status") != "generated"]
+
+    aligned = not remaining_missing and len(pages) == target_count
     status = "exported" if aligned and pptx_url else ("needs_patch" if pages or target_count else task.status)
     task = crud.update_task(
         db, task,
@@ -324,11 +465,12 @@ def sync_from_outcome(db: Session, task: AgentPptTask, outcome) -> dict:
         project_key=project_key or task.project_key,
         status=status,
         last_build_id=uuid.uuid4().hex[:16],
-        last_error="" if aligned else f"缺 {len(missing)} 页 / 多 {len(extra)} 页",
+        last_error="" if aligned else f"缺 {len(remaining_missing)} 页 / 多 {len(extra)} 页",
     )
     crud.add_event(db, task_id=task.id, action="build.sync", detail={
         "target": target_count, "current": len(pages), "aligned": aligned,
-        "missing": missing[:20], "extra": len(extra), "pptx": bool(pptx_url),
+        "missing": remaining_missing[:20], "extra": len(extra), "pptx": bool(pptx_url),
+        "user_deleted": user_deleted,
     })
     return validate(task)
 
@@ -404,6 +546,20 @@ def skill_hint(task: AgentPptTask | None) -> dict:
     return {"skill_id": task.skill_id, "skill_name": task.skill_name, "project_key": task.project_key}
 
 
+def target_page_count_from_text(message: str) -> int | None:
+    """从用户消息里解析显式页数（如「20 页/20页/20p」）；无显式页数返回 None。"""
+    return _target_from_message(message or "")
+
+
+def pages_from_outcome(outcome) -> tuple[list[dict], str, str, str]:
+    """对外暴露工具轨迹里的成品页清单/pptx 地址/技能名/项目路径。
+
+    用于「没有契约但已出片」的运行补写观测指标，避免页面明明生成、
+    后台 PPT 页数对齐却一直是 0。
+    """
+    return _steps_pages(outcome)
+
+
 __all__ = [
     "ensure_contract",
     "sync_from_outcome",
@@ -411,5 +567,7 @@ __all__ = [
     "contract_block",
     "repair_prompt",
     "skill_hint",
+    "target_page_count_from_text",
+    "pages_from_outcome",
 ]
 

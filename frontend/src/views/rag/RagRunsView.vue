@@ -69,6 +69,32 @@ function decisionLabel(v: string) {
   return DECISION_LABEL[v] || v || '-'
 }
 
+const pptDisplay = computed(() => {
+  const s = stats.value
+  if (!s) return { rate: null as number | null, aligned: 0, denom: 0, delivered: 0, note: '' }
+  const taskRuns = s.ppt_task_runs ?? 0
+  if (taskRuns > 0) {
+    return {
+      rate: s.ppt_task_alignment_rate ?? null,
+      aligned: s.ppt_task_aligned ?? 0,
+      denom: taskRuns,
+      delivered: s.ppt_task_delivered ?? 0,
+      note: `PPT 任务契约 ${taskRuns} 个，交付 ${s.ppt_task_delivered ?? 0} 个`,
+    }
+  }
+  const planned = s.ppt_planned_runs ?? 0
+  const extra = Math.max(0, (s.ppt_runs ?? 0) - planned)
+  return {
+    rate: planned ? (s.ppt_alignment_rate ?? null) : null,
+    aligned: s.ppt_aligned ?? 0,
+    denom: planned,
+    delivered: s.ppt_delivered ?? 0,
+    note: extra
+      ? `另有 ${extra} 次运行未指定目标页数，不计入分母；已交付 ${s.ppt_delivered ?? 0} 次`
+      : `已交付 ${s.ppt_delivered ?? 0} 次`,
+  }
+})
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -145,8 +171,9 @@ onMounted(load)
       </div>
       <div class="card">
         <div class="card-label">PPT 页数对齐</div>
-        <div class="card-value">{{ pct(stats.ppt_alignment_rate) }}</div>
-        <div class="card-sub">{{ stats.ppt_aligned }} / {{ stats.ppt_runs }} 次任务对齐</div>
+        <div class="card-value">{{ pct(pptDisplay.rate) }}</div>
+        <div class="card-sub">{{ pptDisplay.aligned }} / {{ pptDisplay.denom }} 个带目标页数任务对齐 · 已交付 {{ pptDisplay.delivered }} 次</div>
+        <div class="card-sub">{{ pptDisplay.note }}</div>
       </div>
       <div class="card">
         <div class="card-label">时延 / Token</div>

@@ -4,6 +4,12 @@
 
 ## 进行中
 
+- [x] **家长客服专属 Embedding / PPT 页数对齐 / Skill SVG 预览（2026-11-03，完成）**
+  - [x] **家长客服 Embedding**：新增 `system_parent_embedding_config` 单例表与 CRUD/接口；配置后家长 RAG 使用独立集合 `parent_knowledge__{fingerprint}`，只索引家长可见文档，后台按哈希增量重建父索引；未配置回退系统级。设置页「家长客服共享模型」新增 Embedding 行与索引状态/重建入口
+  - [x] **PPT 页数对齐**：无契约但已出片时按实际页数补写 run 指标并补任务契约；`build-ppt` 也写 run/契约；任务监控分母改为带目标页数的任务/运行并展示交付数，避免一直显示 0
+  - [x] **Skill SVG 预览**：`read_text_file` 白名单补 `.svg/.xml/.html/.htm/.css/.csv`；`read_skill_file`/预览接口在磁盘文件真实存在时允许读取（脚本新生成页面不回写 files 也不再误报）
+  - [x] 迁移：新增 `c0ffee000053_parent_embedding.py`；文档：ADR-0021 + CONTEXT 术语
+  - [x] 验证：`test_ppt_alignment/test_parent_service/test_agent_ops/test_agent_workbench` 全绿；前端 build 通过
 - [x] **报告总结 AI 后台任务 + 年度季度缺 Q1 修复（2026-09-20，完成）**
   - [x] **Q1 丢失根因**：后端区间查询默认 UTC，Q1 起始 `01-01 00:00+08` 存为 `12-31 16:00Z` 早于下界被丢弃；前端又按浏览器本地时区二次过滤年份。修复：crud 统一按北京时间解释 naive 入参（`BEIJING`），季度查询两侧放宽 1 天；前端按北京时间边界+容差过滤并 Q1→Q4 正序；新增 `test_yearly_includes_q1_boundary` 回归用例
   - [x] **AI 生成进度**：后端新增 `POST /{id}/ai-draft-jobs`（202 返回 job_id，后台线程执行）+ `GET /{id}/ai-draft-jobs/{job_id}` 轮询；同步 `ai-draft` 保留给测试/旧客户端。前端 SummaryView 与 ReportsView 提交即关弹窗，顶部任务条显示已用时（约 20-60 秒），完成后自动回填，localStorage 持久化支持刷新回来继续等

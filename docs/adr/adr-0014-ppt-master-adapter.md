@@ -1,4 +1,4 @@
-﻿# ADR-0014：ppt-master 兼容适配版（工作台 one-shot 包装）
+# ADR-0014：ppt-master 兼容适配版（工作台 one-shot 包装）
 
 - 状态：已采纳
 - 日期：2026-10-23
@@ -40,3 +40,22 @@
     **不含**确认UI/模板候选/图片生成等高级能力（这些仍可走官方完整流程，但工作台里不易用）。
   - `build` 仅导出当前 `svg_output/` 里已有的页；换主题/加页需由模型改 SVG 后再 build（这正是二次编辑路径）。
 - 已验证：容器内通过工作台 `run_skill_script` 工具跑 `ppt_oneshot.py build`，成功导出 .pptx。
+
+## 补充修正（2026-11-02：跨会话串任务与反复修复不出片）
+
+线上反馈「问 Python 列表却导出旧会话的运算符课件」「多轮调整后反复继续修复仍拿不到成品」。根因与修正：
+
+1. **二次编辑源文件跨会话泄漏**：`_existing_pptx_block` 与 `run_skill_script` 的「已有PPT源文件」
+   原先扫描整个用户 Skill 目录，历史对话的旧 `.pptx` 进入上下文后，模型会把旧主题当成当前任务继续改。
+   现在只扫描**当前会话** `conversations/conv_xxx/projects/`，且优先绑定当前 PPT 契约项目；
+   无契约时只取本会话最近修改项目。
+2. **构建路径回退跨会话**：`ppt_oneshot._resolve_project` 原先在项目缺失时遍历所有
+   `conversations/*/projects` 并挑最新，可能抓到别的对话。现在只允许**同一会话作用域内**回退。
+3. **门禁 error 阻断出片**：`build` 在自动修复 5 轮后若仍有 error，原先直接失败；现在会继续尝试
+   `svg_to_pptx --quick-generate` 宽松导出，成功即交付并提示剩余非阻断问题，避免用户无限「继续修复」。
+   导出后校验 PPTX 文件确实被本次构建更新，防止把旧成品误报成功。
+4. **自动出片时间窗收紧过度**：`auto_build_ppt` 原先只认「60 分钟内改过」的项目，用户隔一会儿回来
+   点「继续修复」就会找不到项目。会话作用域已能隔离，现改为优先使用当前 PPT 契约项目，否则用本会话
+   最近项目；并在多轮规划/修复仍无成品时由路由层再强制兜底 build 一次。
+
+回归：`tests/test_ppt_fallback.py`、`tests/test_agent_workbench.py`。

@@ -120,27 +120,37 @@ def _newest_pptx(project):
 
 
 def _resolve_project(project: Path) -> Path:
-    """容忍路径不一致：若给定 project 目录不存在，但 SKILL_ROOT 下有
-    conversations/*/projects/<同名> 或 projects/<同名>，回退到实际存在且有 svg_output 的那个。
+    """容忍路径不一致，但**只在同一会话作用域内**回退，绝不跨会话抓项目。
 
     背景：模型可能把 SVG 写到「会话隔离目录 conversations/conv_xxx/projects/X」，
-    但 build 用了未隔离的「projects/X」；这里做一次确定性回退，避免"写了页却 build 空目录"。
+    但 build 用了未隔离的「projects/X」；这里做一次确定性回退。
+    旧实现会遍历所有 conversations/*/projects 并选最新，结果会抓到别的对话里
+    刚生成的旧 PPT，造成「问列表却导出运算符课件」的串任务。现在：
+      - 路径里带 conversations/conv_xxx/ → 只在该会话的 projects/ 下找同名项目；
+      - 未隔离的 projects/X → 只找根 projects/X，不跨会话。
     """
     if (project / "svg_output").is_dir():
         return project
     name = project.name
+    bases: list[Path] = []
+    parts = project.parts
+    for i, part in enumerate(parts):
+        if part == "conversations" and i + 1 < len(parts) and parts[i + 1].startswith("conv_"):
+            bases = [Path(*parts[: i + 2]) / "projects"]
+            break
+    if not bases:
+        bases = [SKILL_ROOT / "projects"]
     candidates = []
-    for base in [SKILL_ROOT / "projects", *list((SKILL_ROOT / "conversations").glob("*/projects"))]:
+    for base in bases:
         cand = base / name
         if (cand / "svg_output").is_dir():
-            # 选 svg 最近改过的那个（当前会话产物最新）
             svgs = list((cand / "svg_output").glob("*.svg"))
             mtime = max((p.stat().st_mtime for p in svgs), default=0)
             candidates.append((mtime, cand))
     if candidates:
         candidates.sort(reverse=True)
         chosen = candidates[0][1]
-        print(f"[路径回退] {project} 不存在，改用 {chosen}")
+        print(f"[路径回退] {project} 不存在，改用同会话项目 {chosen}")
         return chosen
     return project
 
@@ -811,22 +821,29 @@ def cmd_build(args):
     project = _resolve_project(Path(args.project).resolve())
     _normalize_svg_order(project)
     _repair_pass(project)
+    before_pptx = {
+        str(p): p.stat().st_mtime
+        for p in project.rglob("*.pptx")
+    }
     qc = [str(SCRIPTS / "svg_quality_checker.py"), str(project),
           "--quick-generate", "--canonical-authoring", "--stage", "final", "--json"]
     code, out = _run(qc)
     # 质量门禁：**仅 warning 不阻断出片**（errors:0 即放行）；只有存在 error 才停。
-    # 自愈：报 error 时再走一轮确定性修复并复检（多轮，最多 3 次）——用户要的是成品，
+    # 自愈：报 error 时再走一轮确定性修复并复检（多轮，最多 5 次）——用户要的是成品，
     # 不该因可自动修的规范问题反复卡住、反复找用户确认。
-    for attempt in range(3):
+    for attempt in range(5):
         if code == 0 or _qc_errors_only(out):
             break
         print(f"[质量检查发现 error，自动修复第 {attempt + 1} 轮并复检]")
         _repair_pass(project)
         code, out = _run(qc)
-    if code != 0 and not _qc_errors_only(out):
-        print("[质量检查未通过（自动修复后仍有 error）]\n" + _tail(out))
-        return code
-    if code != 0:
+    qc_blocked = code != 0 and not _qc_errors_only(out)
+    if qc_blocked:
+        # 关键兜底：即使仍有版式/门禁 error，也先尝试真实导出一次成品。
+        # 很多 error 只影响细节（文字越界、分组滤镜等），盲目返回失败会让用户
+        # 反复说「继续修复」却始终拿不到文件；导出成功即交付，并如实提示剩余问题。
+        print("[质量检查仍有 error，尝试宽松导出保底]\n" + _tail(out)[:1200])
+    elif code != 0:
         print("[质量检查：仅有 warning，已放行出片]\n" + _tail(out)[:600])
     # 导出（--quick-generate 自带宽松导出；不能再叠 --enable-dangerous-nonconforming，二者冲突）
     code, out = _run([str(SCRIPTS / "svg_to_pptx.py"), str(project), "--quick-generate"])
@@ -835,8 +852,20 @@ def cmd_build(args):
         return code
     _print_pages(project)
     pptx = _newest_pptx(project)
+    # 只认本次 build 新产出/更新过的文件，避免导出失败时误把旧成品当成功。
     if pptx:
-        print("\n[PPTX]" + pptx)
+        path_s = str(pptx)
+        mtime = os.path.getmtime(pptx)
+        before = before_pptx.get(path_s)
+        if before is not None and mtime <= before + 0.01:
+            print("[错误] 导出未产生新的 PPTX 文件：" + path_s)
+            return 3
+        print("\n[PPTX]" + path_s)
+    else:
+        print("[错误] 导出脚本返回成功，但没有找到 PPTX 成品")
+        return 3
+    if qc_blocked:
+        print("[提示] 成品已导出；质量门禁仍有非阻断 error，建议后续按报告微调个别页。")
     return 0
 
 

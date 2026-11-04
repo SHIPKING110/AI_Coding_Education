@@ -18,11 +18,19 @@ export interface RagTraceStats {
   errors: number
   hits?: number
   hit_rate: number | null
+  hit_rate_excl_errors?: number | null
   zero_result_rate: number | null
+  error_rate?: number | null
   avg_latency_ms: number | null
+  p95_latency_ms?: number | null
+  avg_candidates?: number | null
   vector_fail: number
+  vector_success_rate?: number | null
   keyword_used: number
+  keyword_rate?: number | null
   rerank_fail: number
+  rerank_attempts?: number
+  rerank_success_rate?: number | null
   rag_status_counts?: { hit: number; no_hit: number; error: number }
 }
 
@@ -48,6 +56,17 @@ export interface RagOverview {
   collections: { active: string; collections: RagCollectionStat[] }
   risks: { level: string; title: string; detail: string }[]
   recent_errors: RagTrace[]
+  latest_eval?: {
+    id: string
+    status: string
+    top_k: number
+    rerank: boolean
+    answer_eval: boolean
+    metrics: Record<string, any> | null
+    compare: Record<string, any> | null
+    created_at: string | null
+    finished_at: string | null
+  } | null
 }
 
 export interface RagDoc {

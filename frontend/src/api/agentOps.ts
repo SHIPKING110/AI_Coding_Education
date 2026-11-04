@@ -74,10 +74,25 @@ export interface AgentOpsStats {
   rag_miss_rate: number | null
   rag_status_counts: { used: number; skipped: number; error: number; needed: number; not_needed: number }
   ppt_runs: number
+  ppt_planned_runs?: number
+  ppt_delivered?: number
   ppt_aligned: number
   ppt_alignment_rate: number | null
+  ppt_delivery_rate?: number | null
+  ppt_pages_target?: number
+  ppt_pages_current?: number
+  ppt_task_runs?: number
+  ppt_task_aligned?: number
+  ppt_task_delivered?: number
+  ppt_task_alignment_rate?: number | null
+  ppt_task_delivery_rate?: number | null
+  ppt_task_pages_target?: number
+  ppt_task_pages_current?: number
   avg_latency_ms: number | null
   p95_latency_ms: number | null
+  latency_by_task?: Record<string, { runs: number; avg_ms: number | null; p50_ms: number | null; p95_ms: number | null; first_token_p95_ms?: number | null }>
+  interactive_latency?: { runs: number; p50_ms: number | null; p95_ms: number | null; first_token_p95_ms: number | null }
+  long_task_latency?: { runs: number; p50_ms: number | null; p95_ms: number | null }
   input_tokens: number
   output_tokens: number
   cost_estimate: number

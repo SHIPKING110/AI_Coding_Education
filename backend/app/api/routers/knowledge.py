@@ -136,6 +136,8 @@ def retry_index(doc_id: uuid.UUID, db: Session = Depends(get_db), user: User = D
         file_path=doc.file_path, file_name=doc.file_name or "",
         mark_done=_mark_done, mark_progress=_mark_progress,
     )
+    if getattr(doc, "visible_to_parents", False):
+        rag.start_parent_index_sync()
     return _doc_out(doc)
 
 
@@ -178,7 +180,13 @@ def toggle_parent_visible(
     doc = kb_crud.get_document(db, doc_id=doc_id, owner_id=user.id)
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
-    return _doc_out(kb_crud.set_parent_visible(db, doc, not bool(getattr(doc, "visible_to_parents", False))))
+    visible = not bool(getattr(doc, "visible_to_parents", False))
+    doc = kb_crud.set_parent_visible(db, doc, visible)
+    if visible:
+        rag.start_parent_index_sync()
+    else:
+        rag.delete_document_vectors(doc.id, parent=True)
+    return _doc_out(doc)
 
 
 @router.delete("/documents/{doc_id}")
@@ -187,6 +195,7 @@ def remove_document(doc_id: uuid.UUID, db: Session = Depends(get_db), user: User
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
     rag.delete_document_vectors(doc.id)
+    rag.delete_document_vectors(doc.id, parent=True)
     try:
         Path(doc.file_path).unlink(missing_ok=True)
     except OSError:

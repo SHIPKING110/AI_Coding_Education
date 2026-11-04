@@ -466,38 +466,62 @@ def _attachment_block(attachments: list[dict]) -> str:
     return block
 
 
-def _existing_pptx_block(db, user) -> str:
-    """列出当前用户可用 Skill 包内已有的 .pptx 源文件，供「就地二次编辑」定位源文件。
+def _existing_pptx_block(db, user, conv_id=None) -> str:
+    """列出**当前会话**已生成的 .pptx 源文件，供「就地二次编辑」定位源文件。
 
-    出现条件：用户已有生成过 PPT（包内存在 projects/**/*.pptx 或 *_outputs/*.pptx）。
-    模型据此走 ppt-master 的 Edit Native PPTX 路由（pptx_to_svg --roundtrip → 改页 → svg_to_pptx --roundtrip），
-    保留原设计、只重建改动页，而不是从头重做。
+    只扫本会话隔离目录，绝不跨会话：历史对话里的旧 PPT 一旦进入上下文，
+    模型就会把旧主题当成当前任务继续改，造成「不同会话串任务」。
+    无会话 id 时仅回退到旧的根 projects/（兼容测试/脚本），仍不扫其他会话。
     """
     try:
         from app.crud import agent_ext as _ext
         from app.services import skill_bundle as _bundle
 
+        prefix = ""
+        preferred = ""
+        if conv_id is not None:
+            prefix = "conversations/conv_" + str(conv_id).replace("-", "")[:12] + "/"
+            try:
+                active = ppt_task_crud.get_active(db, conversation_id=conv_id)
+                if active is not None:
+                    preferred = str(active.project_key or "").replace("\\", "/").strip("/")
+            except Exception:
+                preferred = ""
+
         found: list[tuple[str, str]] = []
         for s in _ext.list_skills(db, owner_id=user.id):
             if not s.enabled:
                 continue
-            has_pptx_file = any(str(f).lower().endswith(".pptx") for f in (s.files or []))
-            if not has_pptx_file:
-                continue
             desk = _bundle.skill_dir(user.id, s.id)
-            for p in desk.rglob("*.pptx"):
-                rel = str(p.relative_to(desk)).replace("\\", "/")
-                found.append((s.name, rel))
+            if preferred:
+                roots = [desk / prefix / preferred]
+            else:
+                roots = [desk / prefix / "projects"] if prefix else [desk / "projects"]
+            for root in roots:
+                if not root.is_dir():
+                    continue
+                for p in root.rglob("*.pptx"):
+                    rel = str(p.relative_to(desk)).replace("\\", "/")
+                    if prefix and rel.startswith(prefix):
+                        rel = rel[len(prefix):]
+                    if "_outputs/" in rel:
+                        continue
+                    found.append((s.name, rel))
+                    if len(found) >= 8:
+                        break
+                if len(found) >= 8:
+                    break
             if len(found) >= 8:
                 break
         if not found:
             return ""
         lines = [f"- Skill「{n}」：{rel}" for n, rel in found[:8]]
         return (
-            "【当前已有的 PPT 源文件（可用于二次编辑）】\n" + "\n".join(lines)
+            "【本会话已有的 PPT 源文件（可用于二次编辑）】\n" + "\n".join(lines)
             + "\n若用户本次是「修改/加页/删页/调顺序/换文字」，请基于上面的 .pptx 源文件走 ppt-master 的"
             "「Edit Native PPTX」路由：pptx_to_svg.py \"<该路径>\" ... --roundtrip 导入 → 只改需要的页 → "
             "svg_to_pptx.py ... --roundtrip 导出；不要重新从头生成整份。若用户要全新主题/整体重做，则走生成路由。"
+            "\n注意：这里只会出现**当前会话**的源文件，禁止引用其他对话的 PPT。"
         )
     except Exception:
         return ""
@@ -554,12 +578,17 @@ def _conv_ppt_data(db, user, conv_id) -> list[dict]:
                     except OSError:
                         t = ""
                     pages.append((fp.name, t))
+                try:
+                    mtime = max(p.stat().st_mtime for p in files)
+                except OSError:
+                    mtime = 0.0
                 data.append({
                     "skill": s.name,
                     "rel": "projects/" + proj.name,
                     "n_pages": len(pages),
                     "latest": str(pptx[-1].relative_to(desk)).replace("\\", "/") if pptx else "",
                     "pages": pages,
+                    "mtime": mtime,
                 })
             if len(data) >= 6:
                 break
@@ -567,10 +596,12 @@ def _conv_ppt_data(db, user, conv_id) -> list[dict]:
         return []
     # 有 active 契约时，只用契约指向的项目作为基线；否则多项目目录会让「补齐」
     # 误读旧项目，进而另起一版（用户感知就是「又给了我一份不同的 PPT」）。
+    # 契约项目找不到时返回空，绝不回退到本会话其他旧项目。
     if preferred:
-        same = [d for d in data if str(d.get("rel") or "").strip("/") == preferred]
-        if same:
-            return same
+        return [d for d in data if str(d.get("rel") or "").strip("/") == preferred]
+    # 无契约时只把「最近修改」的项目作为当前基线，避免同一会话里的旧尝试串进来。
+    if data:
+        return [max(data, key=lambda d: float(d.get("mtime") or 0))]
     return data
 
 
@@ -819,6 +850,108 @@ def _has_pptx_result(plan_outcome) -> bool:
         if isinstance(f, dict) and str(f.get("名") or "").lower().endswith(".pptx") and f.get("下载"):
             return True
     return False
+
+
+def _pptx_slide_count(url: str) -> int:
+    """从下载地址反查 pptx 实际页数（工具回执缺页清单时的兜底事实源）。"""
+    raw = str(url or "").strip()
+    if not raw:
+        return 0
+    try:
+        from pptx import Presentation as _PptxReader
+
+        from app.core.config import get_settings
+
+        rel = raw.split("/uploads/", 1)[-1] if "/uploads/" in raw else raw.lstrip("/")
+        path = Path(get_settings().UPLOAD_DIR) / rel
+        if path.is_file():
+            return len(_PptxReader(str(path)).slides)
+    except Exception:
+        return 0
+    return 0
+
+
+def _ppt_outcome_metrics(
+    message: str,
+    plan_outcome,
+    *,
+    validation: dict | None = None,
+    artifact_url: str = "",
+    project_key: str = "",
+) -> dict:
+    """把本轮 Skill 产物折算成可观测的 PPT 页数指标。
+
+    口径：
+    - 有契约：以契约的目标/实际/对齐为准；
+    - 无契约但已出片：用户显式页数=目标，否则以实际成品页数作为目标（交付即对齐），
+      避免「页数明明按要求完成，后台却因为 target_page_count=0 一直显示 0」。
+    """
+    pages, pptx_url, _skill, proj = ppt_task.pages_from_outcome(plan_outcome)
+    artifact = (artifact_url or pptx_url or "").strip()
+    current = len(pages) if pages else 0
+    if not current:
+        current = _pptx_slide_count(artifact)
+    target = 0
+    aligned = False
+    if validation:
+        target = int(validation.get("target_page_count") or 0)
+        current = int(validation.get("current_page_count") or 0) or current
+        aligned = bool(validation.get("aligned"))
+        if not aligned and artifact and target > 0 and current == target and not validation.get("missing"):
+            aligned = True
+    else:
+        explicit = ppt_task.target_page_count_from_text(message or "")
+        target = int(explicit or current or 0)
+        aligned = bool(artifact and current > 0 and target == current)
+    if not artifact and current <= 0:
+        target = 0
+        aligned = False
+    return {
+        "ppt_target_pages": target,
+        "ppt_current_pages": current,
+        "ppt_aligned": aligned,
+        "ppt_project_key": (project_key or proj or "")[:512],
+        "artifact_url": artifact[:512],
+    }
+
+
+def _ensure_ppt_task_from_outcome(db: Session, conv, user: User, plan_outcome, message: str, metrics: dict) -> None:
+    """没有契约但已经出片时补一份任务契约，让后台「PPT 任务」口径也能看到交付。"""
+    if ppt_task_crud.get_active(db, conversation_id=conv.id) is not None:
+        return
+    pages, _pptx_url, skill_name, project_key = ppt_task.pages_from_outcome(plan_outcome)
+    current = int(metrics.get("ppt_current_pages") or 0)
+    if current <= 0:
+        return
+    outline = []
+    for i in range(current):
+        page = pages[i] if i < len(pages) else {}
+        outline.append({
+            "page_id": f"p{i + 1}",
+            "order": i + 1,
+            "title": str(page.get("title") or page.get("name") or f"第 {i + 1} 页")[:120],
+            "kind": "cover" if i == 0 else ("ending" if i == current - 1 else "content"),
+            "key_points": "",
+            "status": "generated",
+            "svg_file": str(page.get("name") or ""),
+            "actual_title": str(page.get("title") or ""),
+            "error": "",
+        })
+    aligned = bool(metrics.get("ppt_aligned"))
+    ppt_task_crud.create_task(
+        db,
+        conversation_id=conv.id,
+        owner_id=user.id,
+        agent_id=conv.agent_id,
+        skill_name=skill_name,
+        project_key=(project_key or metrics.get("ppt_project_key") or "")[:512],
+        title=(message or "智能生成 PPT").strip().replace("\n", " ")[:200],
+        status="exported" if aligned and metrics.get("artifact_url") else "needs_patch",
+        target_page_count=int(metrics.get("ppt_target_pages") or current),
+        current_page_count=current,
+        outline=outline,
+        current_pptx_url=metrics.get("artifact_url") or "",
+    )
 
 
 def _build_error_lines(plan_outcome) -> list[str]:
@@ -1416,6 +1549,77 @@ def conversation_build_ppt(
         pages = len(_PptxReader(str(_path)).slides)
     except Exception:
         pass
+    # 一键构建同样是真实的 PPT 任务：补一份契约 + run 观测，
+    # 让后台「PPT 页数对齐」不因走的是 build-ppt 接口而没有数据。
+    try:
+        target = len(outline)
+        entries = []
+        for i, o in enumerate(outline):
+            if not isinstance(o, dict):
+                continue
+            entries.append({
+                "page_id": f"p{len(entries) + 1}",
+                "order": len(entries) + 1,
+                "title": str(o.get("title") or f"第 {i + 1} 页")[:120],
+                "kind": str(o.get("kind") or ("cover" if i == 0 else "content")),
+                "key_points": "",
+                "status": "generated" if i < pages else "missing",
+                "svg_file": "",
+                "actual_title": "",
+                "error": "",
+            })
+        aligned = bool(target and pages == target)
+        status = "exported" if aligned else "needs_patch"
+        task = ppt_task_crud.get_active(db, conversation_id=conv.id)
+        if task is None:
+            task = ppt_task_crud.create_task(
+                db,
+                conversation_id=conv.id,
+                owner_id=user.id,
+                agent_id=conv.agent_id,
+                title=title[:200],
+                theme=theme,
+                status=status,
+                target_page_count=target,
+                current_page_count=pages,
+                outline=entries,
+                current_pptx_url=ppt_url,
+            )
+        else:
+            task = ppt_task_crud.update_task(
+                db, task,
+                title=title[:200],
+                theme=theme,
+                status=status,
+                target_page_count=target,
+                current_page_count=pages,
+                outline=entries,
+                current_pptx_url=ppt_url,
+                last_error="" if aligned else f"目标 {target} 页，成品 {pages} 页",
+            )
+        build_run_id = agent_ops.start_run(
+            conversation_id=conv.id,
+            agent_id=conv.agent_id,
+            user_id=user.id,
+            owner_id=user.id,
+            intent="ppt_build",
+            intent_confidence=1.0,
+            intent_source="api",
+            needs_rag=False,
+            rag_decision="not_applicable",
+            task_kind="ppt",
+        )
+        agent_ops.finish_run(
+            build_run_id,
+            status="ok",
+            ppt_target_pages=target,
+            ppt_current_pages=pages,
+            ppt_aligned=aligned,
+            ppt_project_key="",
+            artifact_url=f"/uploads/{ppt_url}",
+        )
+    except Exception:
+        logger.exception("build-ppt metrics/contract failed conv=%s", conv.id)
     return {"ppt_url": ppt_url, "download": f"/uploads/{ppt_url}", "pages": pages, "theme": theme}
 
 
@@ -1639,7 +1843,10 @@ def conversation_chat(
     except Exception:
         _recent_tool_names = []
     try:
-        _has_docs = bool(knowledge_crud.collected_doc_ids(db, user_id=user.id))
+        _has_docs = bool(
+            knowledge_crud.collected_doc_ids(db, user_id=user.id)
+            or knowledge_crud.owned_ready_doc_ids(db, user_id=user.id)
+        )
     except Exception:
         _has_docs = False
     intent_info = agent_intent.classify(
@@ -1746,10 +1953,14 @@ def conversation_chat(
             # 寒暄类消息跳过检索：省一次向量化，首字更快
             if rag_service.needs_retrieval(message.strip()):
                 collected = knowledge_crud.collected_doc_ids(db, user_id=user.id)
+                # 未收藏任何文档时，不应直接判「无知识库」——默认检索本人已就绪文档。
+                # 这正是「检索开关打开了却完全不检索」的根因：collected 为空被提前短路。
+                if not collected:
+                    collected = knowledge_crud.owned_ready_doc_ids(db, user_id=user.id)
                 if not collected:
                     agent_ops.update_run(
                         run_id, rag_decision="skipped_no_docs",
-                        rag_skip_reason="no_collected_docs",
+                        rag_skip_reason="no_ready_docs",
                     )
                 else:
                     # 压入教师个人配置：检索向量化走自配 embedding 模型
@@ -1867,14 +2078,12 @@ def conversation_chat(
     # 否则「补充讲师/日期/条款」这类较长内容更新会被当成普通聊天，丢掉基线后越改越差。
     conv_ppt_block = ""
     prev_ppt_pages: list[str] = []
-    prev_ppt_count = 0
     if has_skill_tools:
         try:
             _ppt_data = _conv_ppt_data(db, user, conv.id)
             conv_ppt_block = _render_conv_ppt_block(_ppt_data)
             if _ppt_data:
                 prev_ppt_pages = [t for _, t in _ppt_data[0]["pages"]]
-                prev_ppt_count = _ppt_data[0]["n_pages"]
         except Exception:
             conv_ppt_block = ""
         if conv_ppt_block and not skill_mode:
@@ -1886,7 +2095,7 @@ def conversation_chat(
             mem_block = (mem_block + "\n\n" + conv_ppt_block).strip() if mem_block else conv_ppt_block
     if skill_mode and agent_tools.looks_like_ppt_edit(_msg_stripped):
         try:
-            pptx_block = _existing_pptx_block(db, user)
+            pptx_block = _existing_pptx_block(db, user, conv.id)
             if pptx_block:
                 mem_block = (mem_block + "\n\n" + pptx_block).strip() if mem_block else pptx_block
         except Exception:
@@ -2059,7 +2268,7 @@ def conversation_chat(
                     if contract is not None:
                         def _sync_contract(o):
                             nonlocal contract
-                            v = ppt_task.sync_from_outcome(sdb, contract, o)
+                            v = ppt_task.sync_from_outcome(sdb, contract, o, message=_msg)
                             contract = ppt_task_crud.get_by_id(sdb, contract.id) or contract
                             plan_box["contract"] = contract
                             plan_box["contract_validation"] = v
@@ -2081,6 +2290,21 @@ def conversation_chat(
                             out = _plan_once(prompt, hist)
                             validation = _sync_contract(out)
                         plan_box["contract_validation"] = validation
+                    # ④ 最终出片兜底：多轮规划/修复后仍没有可下载 pptx，但本会话已有写好的
+                    # SVG 项目时，直接替模型跑一次 build，避免用户只得到「继续修复」的旁白。
+                    if skill_mode and not _has_pptx_result(out):
+                        try:
+                            built = agent_tools.auto_build_ppt(sdb, suser)
+                        except Exception:
+                            built = None
+                        if built is not None:
+                            out.steps.append(agent_planner.Step(
+                                tool="run_skill_script",
+                                args={"auto": True},
+                                ok=bool(built.get("成功")),
+                                result=built if built.get("成功") else None,
+                                error=None if built.get("成功") else str(built.get("错误") or built),
+                            ))
                     plan_box["outcome"] = out
                     logger.info("plan done agent=%s skill_mode=%s steps=%s",
                                 conv.agent_id, skill_mode, [s.tool for s in out.steps])
@@ -2384,7 +2608,9 @@ def conversation_chat(
                 latest = ppt_task_crud.get_by_id(db, _contract_ref.id) or _contract_ref
                 if any(s.tool in ("write_skill_file", "delete_skill_file", "run_skill_script")
                        for s in plan_outcome.steps):
-                    plan_box["contract_validation"] = ppt_task.sync_from_outcome(db, latest, plan_outcome)
+                    plan_box["contract_validation"] = ppt_task.sync_from_outcome(
+                        db, latest, plan_outcome, message=message
+                    )
                     latest = ppt_task_crud.get_by_id(db, latest.id) or latest
                 v = plan_box.get("contract_validation") or ppt_task.validate(latest)
                 target_n = int(v.get("target_page_count") or 0)
@@ -2402,16 +2628,26 @@ def conversation_chat(
                 if "契约校验" not in (full or ""):
                     full = ((full or "").rstrip() + "\n\n" + note).strip()
                 plan_box["contract"] = latest
-                agent_ops.update_run(
-                    run_id,
-                    ppt_target_pages=target_n,
-                    ppt_current_pages=current_n,
-                    ppt_aligned=bool(v.get("aligned")),
-                    ppt_project_key=latest.project_key or "",
+                metrics = _ppt_outcome_metrics(
+                    message, plan_outcome, validation=v,
                     artifact_url=latest.current_pptx_url or "",
+                    project_key=latest.project_key or "",
                 )
+                agent_ops.update_run(run_id, task_kind="ppt", **metrics)
             except Exception:
                 logger.exception("contract final validation failed conv=%s", conv.id)
+        elif plan_outcome.steps:
+            # 没有契约（如历史会话/非标准 Skill 路径）但已经出片：仍要补写页数指标，
+            # 否则后台「PPT 页数对齐」会一直是 0。
+            try:
+                metrics = _ppt_outcome_metrics(message, plan_outcome)
+                if metrics["ppt_current_pages"] > 0 or metrics["artifact_url"]:
+                    _ensure_ppt_task_from_outcome(db, conv, user, plan_outcome, message, metrics)
+                    agent_ops.update_run(run_id, task_kind="ppt", **metrics)
+                elif skill_mode and _wants_deliverable:
+                    agent_ops.update_run(run_id, task_kind="ppt")
+            except Exception:
+                logger.exception("ppt metrics fallback failed conv=%s", conv.id)
         # 无成品兜底：PPT/Skill 任务跑了但没导出 pptx 时，绝不把「内部过程旁白」丢给用户。
         #  - 旁白式回复（「我先把报告读出来/再重跑」）或空内容 → 换成可执行的下一步说明；
         #  - 已自愈两轮仍失败时，正文里也不允许出现空洞的成功口径（有「已生成/下载」但无成品 → 追加真实状态）。

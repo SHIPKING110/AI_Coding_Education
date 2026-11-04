@@ -31,6 +31,9 @@ RERANK_OVERSAMPLE = 5
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models" / "Qwen3-Embedding-0.6B"
 CHROMA_DIR = Path(__file__).resolve().parents[2] / "data" / "chroma"
 COLLECTION_BASE = "knowledge"
+# 家长客服独立检索域：配置专属 Embedding 后落到独立集合，只索引家长可见文档；
+# 未配置（或与系统 Embedding 指纹一致）时复用系统集合，行为与现状一致。
+PARENT_COLLECTION_BASE = "parent_knowledge"
 # 未配置 embedding（回退本地 Qwen）时的默认集合名，保持与历史数据兼容
 DEFAULT_COLLECTION = COLLECTION_BASE
 
@@ -192,25 +195,82 @@ def invalidate_embedding_cache() -> None:
         _embed_resolved_cache = (0.0, None)
 
 
-def _collection_name() -> str:
+_parent_embed_resolved_cache: tuple[float, object] = (0.0, None)
+
+
+def _resolve_parent_embedding(force: bool = False):
+    """解析家长客服专属 embedding；未配置返回 None（由调用方回退系统级）。"""
+    global _parent_embed_resolved_cache
+    now = time.time()
+    if not force and now - _parent_embed_resolved_cache[0] < _EMBED_TTL_S:
+        return _parent_embed_resolved_cache[1]
+    resolved = None
+    try:
+        from app.core.database import SessionLocal
+        from app.crud import retrieval_config as crud
+
+        db = SessionLocal()
+        try:
+            resolved = crud.resolve_parent_embedding(db)
+        finally:
+            db.close()
+    except Exception:
+        resolved = None
+    with _EMBED_CACHE_LOCK:
+        _parent_embed_resolved_cache = (now, resolved)
+    return resolved
+
+
+def _effective_parent_embedding(force: bool = False):
+    """家长域实际使用的 embedding：专属配置优先，未配置回退系统级。"""
+    return _resolve_parent_embedding(force) or _resolve_embedding(force)
+
+
+def invalidate_parent_embedding_cache() -> None:
+    """家长客服 embedding 配置变更后调用：立即生效。"""
+    global _parent_embed_resolved_cache
+    with _EMBED_CACHE_LOCK:
+        _parent_embed_resolved_cache = (0.0, None)
+
+
+def _parent_uses_dedicated_collection() -> bool:
+    """家长专属 Embedding 是否真正独立（配置了且与系统指纹不同）。"""
+    parent = _resolve_parent_embedding()
+    if parent is None:
+        return False
+    system = _resolve_embedding()
+    if system is not None and parent.fingerprint() == system.fingerprint():
+        return False
+    return True
+
+
+def _collection_name(parent: bool = False) -> str:
     """集合名按 embedding 指纹分片：不同向量空间绝不混存（修跨教师串味/维度错）。"""
+    if parent:
+        parent_resolved = _resolve_parent_embedding()
+        if parent_resolved is None:
+            return _collection_name(False)
+        system = _resolve_embedding()
+        if system is not None and parent_resolved.fingerprint() == system.fingerprint():
+            return _collection_name(False)
+        return f"{PARENT_COLLECTION_BASE}__{parent_resolved.fingerprint()}"
     resolved = _resolve_embedding()
     if resolved is None:
         return DEFAULT_COLLECTION
     return f"{COLLECTION_BASE}__{resolved.fingerprint()}"
 
 
-def get_collection():
+def get_collection(parent: bool = False):
     import chromadb
 
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    return client.get_or_create_collection(_collection_name())
+    return client.get_or_create_collection(_collection_name(parent=parent))
 
 
-def active_collection_name() -> str:
+def active_collection_name(parent: bool = False) -> str:
     """当前生效集合名（embedding 指纹分片）。"""
-    return _collection_name()
+    return _collection_name(parent=parent)
 
 
 def collection_stats() -> dict:
@@ -219,16 +279,23 @@ def collection_stats() -> dict:
 
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    active_system = _collection_name(False)
+    active_parent = _collection_name(True)
     items: list[dict] = []
     for col in client.list_collections():
-        if not col.name.startswith(COLLECTION_BASE):
+        if not (col.name.startswith(COLLECTION_BASE) or col.name.startswith(PARENT_COLLECTION_BASE)):
             continue
         try:
             count = int(col.count())
         except Exception:
             count = 0
-        items.append({"name": col.name, "count": count, "active": col.name == _collection_name()})
-    return {"active": _collection_name(), "collections": items}
+        items.append({
+            "name": col.name,
+            "count": count,
+            "active": col.name in {active_system, active_parent},
+            "domain": "parent" if col.name.startswith(PARENT_COLLECTION_BASE) else "teacher",
+        })
+    return {"active": active_system, "parent_active": active_parent, "collections": items}
 
 
 def get_document_chunks(doc_id: uuid.UUID | str, *, limit: int = 500) -> list[dict]:
@@ -584,18 +651,17 @@ def _get_embed_cache(fingerprint: str) -> _EmbedCache:
         return c
 
 
-def embed_texts(texts: list[str], resolved=None) -> list[list[float]]:
+def embed_texts(texts: list[str], resolved=None, *, parent: bool = False) -> list[list[float]]:
     """向量化（带持久化缓存 + 并发/批量/退避）。
 
     - **持久化缓存**：按 (embedding 指纹, 分片内容哈希) 缓存向量到本地 npz，
       文档更新时未变化的分片直接命中缓存，避免重复调用 API、重复消耗 Token。
     - **并发/批量/退避**：分批 + 多线程，失败指数退避重试，应对限流。
-    - 回退链：系统级 Embedding（remote/local）→ 全局 env → 本地 Qwen。
+    - 回退链：家长专属 Embedding / 系统级 Embedding（remote/local）→ 全局 env → 本地 Qwen。
     """
-    from app.services.llm import LLMConfigError
 
     if resolved is None:
-        resolved = _resolve_embedding()
+        resolved = _effective_parent_embedding() if parent else _resolve_embedding()
 
     # 本地 provider（sentence-transformers / Qwen）自带批处理，无需远程缓存与并发
     if resolved is not None and resolved.provider == "local" and resolved.model_path:
@@ -748,12 +814,13 @@ def extract_text(file_path: str, file_name: str = "") -> str:
 
 def index_document(
     *, doc_id: uuid.UUID, owner_id: uuid.UUID, title: str, text: str,
-    on_progress=None,
+    on_progress=None, parent: bool = False,
 ) -> int:
     """切块 → 向量化 → 写入 Chroma（当前 embedding 分片集合），返回 chunk 数。
 
     采用语义切片（标题/段落感知 + 重叠）；向量化走 embed_texts 的持久化缓存，
     文档更新时未变化的分片命中缓存、不重复消耗 Token。
+    parent=True 时写入家长客服独立集合，并使用家长专属 Embedding（未配置回退系统级）。
     """
     try:
         from app.services import rag_settings
@@ -770,11 +837,11 @@ def index_document(
     if not chunks:
         return 0
     parent_texts = _build_parent_texts(chunks, parent_size)
-    col = get_collection()
-    delete_document_vectors(doc_id)
+    col = get_collection(parent=True) if parent else get_collection()
+    delete_document_vectors(doc_id, parent=parent)
     if on_progress is not None:
         on_progress("embed", 65, "向量化中…")
-    embs = embed_texts(chunks)
+    embs = embed_texts(chunks, parent=True) if parent else embed_texts(chunks)
     ids = [f"{doc_id}:{i}" for i in range(len(chunks))]
     metas = []
     for i in range(len(chunks)):
@@ -786,14 +853,14 @@ def index_document(
     return len(chunks)
 
 
-def delete_document_vectors(doc_id: uuid.UUID) -> None:
+def delete_document_vectors(doc_id: uuid.UUID, *, parent: bool = False) -> None:
     """删除某文档的全部分片向量（当前 embedding 分片集合）。
 
     注：若换过 embedding 模型，历史分片在旧集合里，切换后不会自动清理
     （数据不串味，但残留可在运维层离线清理）。
     """
     try:
-        col = get_collection()
+        col = get_collection(parent=True) if parent else get_collection()
     except Exception:
         return
     try:
@@ -962,7 +1029,7 @@ def rerank_documents(query: str, documents: list[str], resolved) -> tuple[list[i
     return order, scores
 
 
-def _apply_rerank(query: str, cands: list[dict], db, owner_id) -> tuple[list[dict], dict]:
+def _apply_rerank(query: str, cands: list[dict], db, owner_id, *, parent_mode: bool = False) -> tuple[list[dict], dict]:
     """对过召回候选做重排；任何失败/超时/熔断 → 原样返回向量序（静默降级）。
     返回 (重排后候选, 诊断)。诊断含是否真的重排成功、所用模型、候选数，
     供上层观测「向量检索与重排到底有没有生效」。重排命中的分片会带上 rerank_score。
@@ -973,7 +1040,7 @@ def _apply_rerank(query: str, cands: list[dict], db, owner_id) -> tuple[list[dic
     try:
         from app.crud import retrieval_config as crud
 
-        resolved = crud.resolve_rerank(db, owner_id)
+        resolved = crud.resolve_parent_rerank(db) if parent_mode else crud.resolve_rerank(db, owner_id)
         if resolved is None:
             return cands, meta
         order, scores = rerank_documents(query, [c["text"] for c in cands], resolved)
@@ -1047,6 +1114,7 @@ def retrieve(
     query: str, *, db, owner_id: uuid.UUID, collected_ids: list[uuid.UUID] | None = None,
     top_k: int | None = None, min_similarity: float | None = None, per_doc_cap: int | None = None,
     rerank: bool = True, diag: dict | None = None, route_key: str | None = None,
+    parent_mode: bool = False,
 ) -> list[dict]:
     """两阶段检索：向量过召回（top_k*oversample）→（可选）rerank 精排 → 取 top_k。
 
@@ -1116,7 +1184,7 @@ def retrieve(
             query=query,
             rewritten_query=search_query,
             filters=where,
-            embedding_fingerprint=active_collection_name() if not error else "",
+            embedding_fingerprint=active_collection_name(parent=parent_mode) if not error else "",
             vector_candidates=int(d.get("vector_in", 0) or 0),
             keyword_candidates=keyword_candidates,
             rerank_candidates=rerank_in,
@@ -1138,8 +1206,9 @@ def retrieve(
         cands: list[dict] = []
         t_vec = time.time()
         try:
-            col = get_collection()
-            q_emb = embed_texts([search_query])[0]
+            col = get_collection(parent=True) if parent_mode else get_collection()
+            q_emb = (embed_texts([search_query], parent=True) if parent_mode
+                     else embed_texts([search_query]))[0]
             res = col.query(query_embeddings=[q_emb], n_results=n_fetch, where=where)
             docs = (res.get("documents") or [[]])[0]
             metas = (res.get("metadatas") or [[]])[0]
@@ -1173,6 +1242,7 @@ def retrieve(
             kw = _keyword_search(
                 search_query, db=db, owner_id=owner_id,
                 collected_ids=collected_ids, top_k=int(cfg.get("hybrid_candidates", 50)),
+                parent=parent_mode,
             )
             keyword_candidates = len(kw)
             if kw:
@@ -1188,6 +1258,7 @@ def retrieve(
                 out = _keyword_search(
                     search_query, db=db, owner_id=owner_id,
                     collected_ids=collected_ids, top_k=int(top_k),
+                    parent=parent_mode,
                 )
                 keyword_candidates = len(out)
                 d["stage_timings"]["keyword_fallback"] = round((time.time() - t_kw) * 1000, 2)
@@ -1209,7 +1280,7 @@ def retrieve(
         if rerank:
             t_rr = time.time()
             rerank_in = len(cands)
-            cands, rmeta = _apply_rerank(search_query, cands, db, owner_id)
+            cands, rmeta = _apply_rerank(search_query, cands, db, owner_id, parent_mode=parent_mode)
             d.update(rmeta)
             d["rerank_in"] = rerank_in
             d["stage_timings"]["rerank"] = round((time.time() - t_rr) * 1000, 2)
@@ -1306,22 +1377,64 @@ def _query_terms(query: str) -> list[str]:
     return [t for t in terms if len(t) >= 2]
 
 
-def _keyword_search(query: str, *, db, owner_id, collected_ids=None, top_k: int = TOP_K_DEFAULT) -> list[dict]:
+def _keyword_collections(parent: bool = False) -> list:
+    """关键词兜底可读的集合：当前集合为空时，自动兼容旧版 ``knowledge`` 集合。
+
+    背景：配置/更换 Embedding 后，指纹会切到新的空集合；此时文档仍 ready，
+    但新集合还没有向量。若关键词兜底也只读新集合，用户会看到「明明有文档却检索不到」。
+    关键词检索是纯文本、与向量空间无关，因此可安全地回退到旧集合读取。
+    家长域同理：父索引尚未建好时，用系统集合做纯文本兜底（白名单仍二次过滤）。
+    """
+    cols = []
+    try:
+        active = get_collection(parent=True) if parent else get_collection()
+        cols.append(active)
+        if parent:
+            try:
+                sys_col = get_collection()
+                if sys_col.name != active.name:
+                    cols.append(sys_col)
+            except Exception:
+                pass
+        elif active.name != DEFAULT_COLLECTION:
+            try:
+                import chromadb
+
+                client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+                legacy = client.get_collection(DEFAULT_COLLECTION)
+                if int(legacy.count()) > 0 and int(active.count()) == 0:
+                    cols.append(legacy)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return cols
+
+
+def _keyword_search(
+    query: str, *, db, owner_id, collected_ids=None, top_k: int = TOP_K_DEFAULT,
+    parent: bool = False,
+) -> list[dict]:
     """关键词兜底：在本人可见分片上按词元命中打分（无需 embedding，纯本地）。
 
     适用于向量检索不可用（未配 embedding / 接口异常）或向量召回为空时，
     保证 Agent 仍有可用检索结果，不因模型故障而完全失忆。
     """
+    docs: list = []
+    metas: list = []
     try:
-        col = get_collection()
         collected = [str(d) for d in (collected_ids or [])]
         if collected:
             where = {"$or": [{"owner_id": str(owner_id)}, {"doc_id": {"$in": collected}}]}
         else:
             where = {"owner_id": str(owner_id)}
-        got = col.get(where=where, include=["documents", "metadatas"])
-        docs = got.get("documents") or []
-        metas = got.get("metadatas") or []
+        for col in _keyword_collections(parent=parent):
+            try:
+                got = col.get(where=where, include=["documents", "metadatas"])
+            except Exception:
+                continue
+            docs.extend(got.get("documents") or [])
+            metas.extend(got.get("metadatas") or [])
     except Exception:
         return []
     if not docs:
@@ -1404,7 +1517,137 @@ def list_knowledge_collections() -> list[str]:
 
     CHROMA_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    return [c.name for c in client.list_collections() if c.name.startswith(COLLECTION_BASE)]
+    return [
+        c.name for c in client.list_collections()
+        if c.name.startswith(COLLECTION_BASE) or c.name.startswith(PARENT_COLLECTION_BASE)
+    ]
+
+
+# —— 家长客服独立索引（配置专属 Embedding 后才有意义） ——
+
+_parent_sync_state: dict = {"running": False, "result": None}
+_parent_sync_lock = threading.Lock()
+
+
+def _parent_dedicated_fingerprint() -> str:
+    """家长专属集合的 embedding 指纹；复用系统集合/未配置时返回空串。"""
+    if not _parent_uses_dedicated_collection():
+        return ""
+    resolved = _resolve_parent_embedding()
+    return resolved.fingerprint() if resolved else ""
+
+
+def parent_index_status(db=None) -> dict:
+    """家长索引状态：可见文档数、已按当前指纹索引数、待同步数。"""
+    from app.core.database import SessionLocal
+    from app.crud import knowledge as _kb
+
+    own = db is None
+    if own:
+        db = SessionLocal()
+    try:
+        try:
+            docs = _kb.list_parent_visible_documents(db=db)
+        except Exception:
+            # 存量库尚未迁移出 visible_to_parents 等字段时，不让状态接口 500
+            return {
+                "configured": _resolve_parent_embedding() is not None,
+                "dedicated": False, "fingerprint": "", "collection": _collection_name(parent=True),
+                "documents": 0, "indexed": 0, "pending": 0,
+                "running": bool(_parent_sync_state.get("running")),
+                "last_result": _parent_sync_state.get("result"),
+                "error": "家长可见字段缺失，请先执行数据库迁移（upgrade head）",
+            }
+        fp = _parent_dedicated_fingerprint()
+        dedicated = bool(fp)
+        if dedicated:
+            indexed = sum(
+                1 for d in docs
+                if (d.extra or {}).get("parent_index_fingerprint") == fp
+            )
+        else:
+            indexed = len(docs)
+        return {
+            "configured": _resolve_parent_embedding() is not None,
+            "dedicated": dedicated,
+            "fingerprint": fp,
+            "collection": _collection_name(parent=True),
+            "documents": len(docs),
+            "indexed": indexed,
+            "pending": max(0, len(docs) - indexed),
+            "running": bool(_parent_sync_state.get("running")),
+            "last_result": _parent_sync_state.get("result"),
+        }
+    finally:
+        if own:
+            db.close()
+
+
+def sync_parent_index(limit: int = 200) -> dict:
+    """把家长可见文档按当前家长 Embedding 重建到独立集合（增量：未变跳过）。"""
+    from app.core.database import SessionLocal
+    from app.crud import knowledge as _kb
+
+    fp = _parent_dedicated_fingerprint()
+    if not fp:
+        return {
+            "dedicated": False, "documents": 0, "indexed": 0, "skipped": 0, "failed": 0,
+            "hint": "未配置家长专属 Embedding（或与系统一致），家长端复用系统索引，无需重建",
+        }
+    with _parent_sync_lock:
+        if _parent_sync_state.get("running"):
+            return {"dedicated": True, "running": True, "documents": 0, "indexed": 0, "skipped": 0, "failed": 0}
+        _parent_sync_state["running"] = True
+    stats = {"dedicated": True, "documents": 0, "indexed": 0, "skipped": 0, "failed": 0}
+    db = SessionLocal()
+    try:
+        try:
+            docs = _kb.list_parent_visible_documents(db=db, limit=limit)
+        except Exception as exc:  # noqa: BLE001 —— 存量库未迁移时给出可读错误
+            stats["error"] = f"读取家长可见文档失败：{exc}"
+            return stats
+        stats["documents"] = len(docs)
+        for doc in docs:
+            extra = dict(doc.extra or {})
+            fh = _file_hash(doc.file_path)
+            if extra.get("parent_index_fingerprint") == fp and extra.get("parent_indexed_hash") == fh:
+                stats["skipped"] += 1
+                continue
+            try:
+                if not doc.file_path or not Path(doc.file_path).exists():
+                    raise FileNotFoundError("源文件已丢失")
+                text = extract_text(doc.file_path, doc.file_name or "")
+                index_document(
+                    doc_id=doc.id, owner_id=doc.owner_id, title=doc.title,
+                    text=text, parent=True,
+                )
+                extra["parent_index_fingerprint"] = fp
+                extra["parent_indexed_hash"] = fh
+                extra.pop("parent_index_error", None)
+                doc.extra = extra
+                db.commit()
+                stats["indexed"] += 1
+            except Exception as exc:  # noqa: BLE001 —— 单篇失败不阻断其余文档
+                extra["parent_index_error"] = str(exc)[:500]
+                doc.extra = extra
+                db.commit()
+                stats["failed"] += 1
+    finally:
+        db.close()
+        with _parent_sync_lock:
+            _parent_sync_state["running"] = False
+            _parent_sync_state["result"] = stats
+    return stats
+
+
+def start_parent_index_sync() -> bool:
+    """后台异步重建家长索引；未启用独立 Embedding 时直接返回 False。"""
+    if not _parent_dedicated_fingerprint():
+        return False
+    if _parent_sync_state.get("running"):
+        return True
+    threading.Thread(target=sync_parent_index, name="parent-index-sync", daemon=True).start()
+    return True
 
 
 def index_in_background(*, doc_id: uuid.UUID, owner_id: uuid.UUID, title: str,
@@ -1455,6 +1698,10 @@ __all__ = [
     "collection_stats",
     "get_document_chunks",
     "invalidate_embedding_cache",
+    "invalidate_parent_embedding_cache",
     "sweep_orphan_vectors",
     "list_knowledge_collections",
+    "parent_index_status",
+    "sync_parent_index",
+    "start_parent_index_sync",
 ]

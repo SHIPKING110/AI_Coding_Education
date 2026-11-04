@@ -26,6 +26,22 @@ import {
   type RetrievalConfigOut,
 } from '@/api/retrievalConfig'
 import {
+  getParentLLMConfig,
+  setParentLLMConfig,
+  getParentRerankConfig,
+  saveParentRerankConfig,
+  deleteParentRerankConfig,
+  getParentEmbeddingConfig,
+  saveParentEmbeddingConfig,
+  deleteParentEmbeddingConfig,
+  testParentEmbeddingConfig,
+  getParentIndexStatus,
+  rebuildParentIndex,
+  type ParentLLMConfigOut,
+  type ParentEmbeddingConfigOut,
+  type ParentIndexStatus,
+} from '@/api/parentService'
+import {
   deleteSearchConfig,
   getSearchConfig,
   saveSearchConfig,
@@ -198,6 +214,164 @@ const testingEmb = ref(false)
 const testingRrk = ref(false)
 const embTestMsg = ref('')
 const rrkTestMsg = ref('')
+
+/* —— 家长客服共享模型（管理员） —— */
+const isAdmin = computed(() => auth.user?.role === 'admin')
+const parentLlm = ref<ParentLLMConfigOut | null>(null)
+const parentLlmSelected = ref<string | null>(null)
+const savingParentLlm = ref(false)
+const parentRrk = ref<RetrievalConfigOut | null>(null)
+const parentRrkForm = ref<RetrievalConfigIn>({ provider: 'remote', base_url: '', api_key: '', model: '', model_path: '', enabled: true })
+const showParentRrkForm = ref(false)
+const savingParentRrk = ref(false)
+const testingParentRrk = ref(false)
+const parentRrkTestMsg = ref('')
+
+/* —— 家长客服专属 Embedding（管理员）：独立父索引 —— */
+const parentEmb = ref<ParentEmbeddingConfigOut | null>(null)
+const parentEmbForm = ref<RetrievalConfigIn>({ provider: 'remote', base_url: '', api_key: '', model: '', model_path: '', enabled: true })
+const showParentEmbForm = ref(false)
+const savingParentEmb = ref(false)
+const testingParentEmb = ref(false)
+const parentEmbTestMsg = ref('')
+const parentIndex = ref<ParentIndexStatus | null>(null)
+const rebuildingParentIndex = ref(false)
+
+async function loadParentConfigs() {
+  if (!isAdmin.value) return
+  try {
+    parentLlm.value = await getParentLLMConfig()
+    parentLlmSelected.value = parentLlm.value.config_id
+  } catch { /* ignore */ }
+  try {
+    const cfg = await getParentRerankConfig()
+    parentRrk.value = cfg
+    parentRrkForm.value = cfg
+      ? { provider: cfg.provider, base_url: cfg.base_url, api_key: '', model: cfg.model, model_path: cfg.model_path || '', enabled: cfg.enabled }
+      : { provider: 'remote', base_url: '', api_key: '', model: '', model_path: '', enabled: true }
+  } catch { /* ignore */ }
+  try {
+    const cfg = await getParentEmbeddingConfig()
+    parentEmb.value = cfg
+    parentEmbForm.value = cfg.configured
+      ? { provider: cfg.provider, base_url: cfg.base_url, api_key: '', model: cfg.model, model_path: cfg.model_path || '', enabled: cfg.enabled }
+      : { provider: 'remote', base_url: '', api_key: '', model: '', model_path: '', enabled: true }
+  } catch { /* ignore */ }
+  try {
+    parentIndex.value = await getParentIndexStatus()
+  } catch { /* ignore */ }
+}
+
+async function saveParentEmb() {
+  if (parentEmbForm.value.provider === 'remote' && (!parentEmbForm.value.base_url.trim() || !parentEmbForm.value.model.trim())) {
+    toast.error('接口地址与模型名不能为空')
+    return
+  }
+  if (parentEmbForm.value.provider === 'remote' && !parentEmb.value?.configured && !parentEmbForm.value.api_key.trim()) {
+    toast.error('API Key 不能为空')
+    return
+  }
+  savingParentEmb.value = true
+  try {
+    const r = await saveParentEmbeddingConfig(parentEmbForm.value)
+    parentEmb.value = r.item
+    toast.success(r.indexing_started ? '已保存，正在后台重建家长索引' : '已保存家长客服专属 Embedding')
+    showParentEmbForm.value = false
+    await loadParentConfigs()
+  } catch (e) {
+    toastApiError(e, '保存失败')
+  } finally {
+    savingParentEmb.value = false
+  }
+}
+
+async function removeParentEmb() {
+  if (!confirm('删除家长客服专属 Embedding？删除后家长端将回退系统级 Embedding 与系统索引。')) return
+  try {
+    await deleteParentEmbeddingConfig()
+    parentEmb.value = null
+    toast.success('已删除，已回退系统级 Embedding')
+    await loadParentConfigs()
+  } catch (e) {
+    toastApiError(e, '删除失败')
+  }
+}
+
+async function testParentEmb() {
+  testingParentEmb.value = true
+  parentEmbTestMsg.value = ''
+  try {
+    const r = await testParentEmbeddingConfig()
+    parentEmbTestMsg.value = r.ok
+      ? `连通正常 · 维度 ${r.dim ?? '-'} · ${r.latency_ms ?? '-'} ms`
+      : `连接失败：${r.error || '未知错误'}`
+  } catch (e) {
+    parentEmbTestMsg.value = `连接失败：${e instanceof Error ? e.message : '未知错误'}`
+  } finally {
+    testingParentEmb.value = false
+  }
+}
+
+async function rebuildParentIndexNow() {
+  rebuildingParentIndex.value = true
+  try {
+    const r = await rebuildParentIndex()
+    parentIndex.value = r
+    toast.success(r.started ? '已开始重建家长索引' : '当前无需重建（未启用专属 Embedding）')
+    setTimeout(loadParentConfigs, 1200)
+  } catch (e) {
+    toastApiError(e, '重建失败')
+  } finally {
+    rebuildingParentIndex.value = false
+  }
+}
+
+async function saveParentLlm() {
+  savingParentLlm.value = true
+  try {
+    await setParentLLMConfig(parentLlmSelected.value)
+    toast.success('已保存家长客服共享对话模型')
+    await loadParentConfigs()
+  } catch (e) {
+    toastApiError(e, '保存失败')
+  } finally {
+    savingParentLlm.value = false
+  }
+}
+
+async function saveParentRrk() {
+  if (parentRrkForm.value.provider === 'remote' && (!parentRrkForm.value.base_url.trim() || !parentRrkForm.value.model.trim())) {
+    toast.error('接口地址与模型名不能为空')
+    return
+  }
+  if (parentRrkForm.value.provider === 'remote' && !parentRrk.value && !parentRrkForm.value.api_key.trim()) {
+    toast.error('API Key 不能为空')
+    return
+  }
+  savingParentRrk.value = true
+  try {
+    parentRrk.value = await saveParentRerankConfig(parentRrkForm.value)
+    toast.success('已保存家长客服共享 Rerank')
+    showParentRrkForm.value = false
+    await loadParentConfigs()
+  } catch (e) {
+    toastApiError(e, '保存失败')
+  } finally {
+    savingParentRrk.value = false
+  }
+}
+
+async function removeParentRrk() {
+  if (!confirm('删除家长客服共享 Rerank？删除后家长客服检索退化为单层向量召回。')) return
+  try {
+    await deleteParentRerankConfig()
+    parentRrk.value = null
+    toast.success('已删除')
+    await loadParentConfigs()
+  } catch (e) {
+    toastApiError(e, '删除失败')
+  }
+}
 
 async function loadRetrieval() {
   try {
@@ -414,6 +588,7 @@ onMounted(async () => {
   load()
   void loadRetrieval()
   void loadSearch()
+  if (auth.user?.role === 'admin') void loadParentConfigs()
 })
 </script>
 
@@ -453,7 +628,7 @@ onMounted(async () => {
 
     <section class="card">
       <h2>各模块选用模型</h2>
-      <p class="muted">不选 = 用上面的默认配置。Agent 工作台还可在对话时临时切换。「教学服务 · 家长客服」控制家长端问答用的对话模型，其 RAG 检索共用系统级 Embedding（下方配置）与归属教师的 Rerank；家长只能看到后台勾选为「家长可见」的文档。</p>
+      <p class="muted">不选 = 用上面的默认配置。Agent 工作台还可在对话时临时切换。「教学服务 · 家长客服」的对话模型、Embedding 与 Rerank 由下方「家长客服 · 共享模型」板块由管理员统一配置（全校共用，不随教师变化）；家长只能看到后台勾选为「家长可见」的文档。</p>
       <div class="map-grid">
         <label v-for="m in LLM_MODULES" :key="m.key" class="map-row">
           <span>{{ m.label }}</span>
@@ -519,6 +694,74 @@ onMounted(async () => {
         </div>
       </div>
       <div v-else class="empty-tip">未配置 Rerank（可选项）：当前为单层向量检索，完全正常工作。</div>
+    </section>
+
+    <!-- 家长客服共享模型（管理员） -->
+    <section v-if="isAdmin" class="card">
+      <div class="card-head">
+        <div>
+          <h2>家长客服 · 共享模型（管理员）</h2>
+          <p class="muted">
+            家长端客服 Agent 的对话模型、Embedding、Rerank 独立配置，全校共用，不与教师端混用。
+            <strong>Embedding 建议单独配置</strong>：家长域使用独立集合 parent_knowledge__指纹，只索引「家长可见」文档，互不干扰；
+            未配置时自动回退系统级 Embedding 与系统索引（仍可正常问答）。
+          </p>
+        </div>
+      </div>
+      <div class="cfg-row" style="margin-bottom:10px">
+        <div class="cfg-main">
+          <div class="cfg-head">
+            <strong>Embedding（家长域向量）</strong>
+            <span v-if="parentEmb?.configured" class="def-tag">专属</span>
+          </div>
+          <div class="cfg-meta" v-if="parentEmb?.configured">
+            {{ parentEmb.model }} ·
+            {{ parentEmb.provider === 'local' ? `本地模型 · ${parentEmb.model_path || '未设路径'}` : parentEmb.base_url }} ·
+            {{ parentEmb.enabled ? '启用' : '停用' }}
+          </div>
+          <div class="cfg-meta" v-else>未配置：回退系统级 Embedding 与系统索引（家长端仍可用）</div>
+          <div v-if="parentEmbTestMsg" class="test-line">{{ parentEmbTestMsg }}</div>
+          <div class="cfg-meta" v-if="parentIndex">
+            家长可见文档 {{ parentIndex.documents }} 篇 · 已索引 {{ parentIndex.indexed }} 篇
+            <span v-if="parentIndex.dedicated">（独立集合 {{ parentIndex.collection }}）</span>
+            <span v-else>（复用系统索引）</span>
+            <span v-if="parentIndex.pending > 0"> · 待同步 {{ parentIndex.pending }} 篇</span>
+            <span v-if="parentIndex.running"> · 后台重建中…</span>
+          </div>
+        </div>
+        <div class="cfg-actions">
+          <button v-if="parentEmb?.configured" class="link-btn" :disabled="testingParentEmb" @click="testParentEmb">{{ testingParentEmb ? '检查中…' : '检查' }}</button>
+          <button v-if="parentEmb?.configured" class="link-btn" @click="showParentEmbForm = true">编辑</button>
+          <button v-else class="btn primary sm" @click="showParentEmbForm = true">配置 Embedding</button>
+          <button v-if="parentEmb?.configured" class="link-btn" :disabled="rebuildingParentIndex || !parentIndex?.dedicated" @click="rebuildParentIndexNow">{{ rebuildingParentIndex ? '重建中…' : '重建索引' }}</button>
+          <button v-if="parentEmb?.configured" class="link-btn danger" @click="removeParentEmb">删除</button>
+        </div>
+      </div>
+      <div class="cfg-row" style="margin-bottom:10px">
+        <div class="cfg-main">
+          <div class="cfg-head"><strong>对话模型</strong></div>
+          <div class="cfg-meta">当前：{{ parentLlm?.resolved_name || '未配置（回退系统默认）' }} · {{ parentLlm?.resolved_model || '' }}</div>
+        </div>
+        <div class="cfg-actions">
+          <select v-model="parentLlmSelected" class="filter-select">
+            <option :value="null">系统默认</option>
+            <option v-for="c in items" :key="c.id" :value="c.id">{{ c.name }}（{{ c.model }}）</option>
+          </select>
+          <button class="btn primary sm" :disabled="savingParentLlm" @click="saveParentLlm">{{ savingParentLlm ? '保存中…' : '保存' }}</button>
+        </div>
+      </div>
+      <div class="cfg-row">
+        <div class="cfg-main">
+          <div class="cfg-head"><strong>Rerank（可选）</strong></div>
+          <div class="cfg-meta" v-if="parentRrk">{{ parentRrk.model }} · {{ parentRrk.base_url }} · {{ parentRrk.enabled ? '启用' : '停用' }}</div>
+          <div class="cfg-meta" v-else>未配置：家长客服检索退化为单层向量召回</div>
+        </div>
+        <div class="cfg-actions">
+          <button v-if="parentRrk" class="link-btn" @click="showParentRrkForm = true">编辑</button>
+          <button v-else class="btn primary sm" @click="showParentRrkForm = true">配置 Rerank</button>
+          <button v-if="parentRrk" class="link-btn danger" @click="removeParentRrk">删除</button>
+        </div>
+      </div>
     </section>
 
     <!-- 联网搜索 · Tavily（系统级：管理员 / 有模型配置权限的教师） -->
@@ -648,6 +891,60 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+    <!-- 家长客服共享 Rerank 编辑 -->
+    <div v-if="showParentRrkForm" class="overlay" @click.self="showParentRrkForm = false">
+      <div class="modal">
+        <h2>{{ parentRrk ? '编辑家长客服共享 Rerank' : '配置家长客服共享 Rerank' }}</h2>
+        <div class="form-grid">
+          <label class="check"><input v-model="parentRrkForm.provider" type="radio" value="remote" /> 云端 API</label>
+          <label class="check"><input v-model="parentRrkForm.provider" type="radio" value="local" /> 本地模型（预留）</label>
+          <template v-if="parentRrkForm.provider === 'remote'">
+            <label class="span2">接口地址<input v-model="parentRrkForm.base_url" placeholder="https://api.siliconflow.cn" /></label>
+            <label class="span2">API Key<input v-model="parentRrkForm.api_key" :type="parentRrkForm.api_key ? 'text' : 'password'" :placeholder="parentRrk ? '留空则不修改' : 'sk-…'" /></label>
+            <label class="span2">Rerank 模型名<input v-model="parentRrkForm.model" placeholder="如 BAAI/bge-reranker-v2-m3" /></label>
+          </template>
+          <template v-else>
+            <label class="span2">本地模型路径<input v-model="parentRrkForm.model_path" placeholder="如 /srv/app/models/bge-reranker-v2-m3" /></label>
+            <label class="span2">模型名（标识）<input v-model="parentRrkForm.model" placeholder="如 bge-reranker-local" /></label>
+          </template>
+          <label class="check"><input v-model="parentRrkForm.enabled" type="checkbox" /> 启用</label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showParentRrkForm = false">取消</button>
+          <button class="btn primary" :disabled="savingParentRrk" @click="saveParentRrk">{{ savingParentRrk ? '保存中…' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 家长客服专属 Embedding 编辑 -->
+    <div v-if="showParentEmbForm" class="overlay" @click.self="showParentEmbForm = false">
+      <div class="modal">
+        <h2>{{ parentEmb?.configured ? '编辑家长客服专属 Embedding' : '配置家长客服专属 Embedding' }}</h2>
+        <p class="muted">
+          保存后家长域改用独立集合，只索引「家长可见」文档；后台会自动重建家长索引。
+          未配置则回退系统级 Embedding 与系统索引。
+        </p>
+        <div class="form-grid">
+          <label class="check"><input v-model="parentEmbForm.provider" type="radio" value="remote" /> 云端 API</label>
+          <label class="check"><input v-model="parentEmbForm.provider" type="radio" value="local" /> 本地模型（预留）</label>
+          <template v-if="parentEmbForm.provider === 'remote'">
+            <label class="span2">接口地址<input v-model="parentEmbForm.base_url" placeholder="https://api.siliconflow.cn" /></label>
+            <label class="span2">API Key<input v-model="parentEmbForm.api_key" :type="parentEmbForm.api_key ? 'text' : 'password'" :placeholder="parentEmb?.configured ? '留空则不修改' : 'sk-…'" /></label>
+            <label class="span2">Embedding 模型名<input v-model="parentEmbForm.model" placeholder="如 BAAI/bge-m3" /></label>
+          </template>
+          <template v-else>
+            <label class="span2">本地模型路径<input v-model="parentEmbForm.model_path" placeholder="如 /srv/app/models/bge-m3" /></label>
+            <label class="span2">模型名（标识）<input v-model="parentEmbForm.model" placeholder="如 bge-m3-local" /></label>
+          </template>
+          <label class="check"><input v-model="parentEmbForm.enabled" type="checkbox" /> 启用</label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showParentEmbForm = false">取消</button>
+          <button class="btn primary" :disabled="savingParentEmb" @click="saveParentEmb">{{ savingParentEmb ? '保存中…' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 

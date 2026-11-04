@@ -89,3 +89,17 @@ RAG 调用中零命中的比例；非 RAG 对话不参与。
 
 **RAG 证据（RAG evidence）**：
 任务型对话详情中可折叠展示的检索命中区块，通过 `retrieval_trace_id` 关联。
+
+**PPT 页数对齐（PPT page alignment）**：
+目标页数与成品页数一致的任务占比。优先按「PPT 任务契约」统计；无契约但已出片时按实际成品页数补记目标，避免明明产出却显示 0；未指定页数的运行不进入分母。_Avoid_：PPT 产出率（语义不同）
+
+## 家长客服检索域（ADR-0021）
+
+**家长客服专属 Embedding（Parent embedding）**：
+管理员在「设置 · 模型配置 · 家长客服共享模型」单独为家长端配置的向量化模型。配置后家长 RAG 落到独立集合 `parent_knowledge__{fingerprint}`，只索引 `visible_to_parents=true` 的文档；未配置时回退系统级 Embedding 与系统集合。_Avoid_：家长向量库（口语）
+
+**父索引（Parent index）**：
+家长可见文档在家长专属 Embedding 下的向量索引，与教师知识库索引相互隔离；配置/更换家长 Embedding 后后台按文档哈希增量重建，未变化文档跳过。
+
+**Skill 页面源文件预览（Skill SVG preview）**：
+Agent 工作台执行链路里可查看的 Skill 包内文本文件（SVG/HTML/XML/CSS/CSV 等）；SVG 是 PPT 页面源，必须按文本读取，图片类仅提供下载链接。

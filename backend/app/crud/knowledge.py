@@ -153,6 +153,34 @@ def list_all_documents(db: Session, *, limit: int = 1000) -> list[KnowledgeDocum
     )
 
 
+def list_parent_visible_documents(db: Session, *, limit: int = 500) -> list[KnowledgeDocument]:
+    """家长客服可检索的文档（ready + 启用 + 家长可见），供父索引同步。"""
+    return list(
+        db.scalars(
+            select(KnowledgeDocument)
+            .where(
+                KnowledgeDocument.status == "ready",
+                KnowledgeDocument.enabled.is_(True),
+                KnowledgeDocument.visible_to_parents.is_(True),
+            )
+            .order_by(KnowledgeDocument.updated_at.asc())
+            .limit(limit)
+        ).all()
+    )
+
+
+def owned_ready_doc_ids(db: Session, *, user_id) -> list[uuid.UUID]:
+    """本人已就绪且启用检索的文档 id（未收藏时的默认检索范围）。"""
+    rows = db.scalars(
+        select(KnowledgeDocument.id).where(
+            KnowledgeDocument.owner_id == user_id,
+            KnowledgeDocument.status == "ready",
+            KnowledgeDocument.enabled.is_(True),
+        )
+    ).all()
+    return list(rows)
+
+
 def collected_doc_ids(db: Session, *, user_id) -> list[uuid.UUID]:
     stmt = select(KnowledgeCollection.doc_id).where(KnowledgeCollection.user_id == user_id)
     return list(db.scalars(stmt).all())
@@ -188,5 +216,6 @@ def uncollect(db: Session, *, user_id, doc_id) -> bool:
 __all__ = [
     "create_document", "get_document", "get_document_any", "list_my_documents",
     "list_plaza", "set_visibility", "mark_indexed", "delete_document",
-    "collected_doc_ids", "is_collected", "collect", "uncollect",
+    "collected_doc_ids", "owned_ready_doc_ids", "is_collected", "collect", "uncollect",
+    "list_all_documents", "list_parent_visible_documents",
 ]

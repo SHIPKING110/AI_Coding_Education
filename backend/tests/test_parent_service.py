@@ -5,7 +5,6 @@
 - 配额：count_today_user_messages 按日计 user 消息；超限判定逻辑在路由层（429），此处验计数口径。
 """
 
-import uuid
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -30,6 +29,7 @@ def session_factory():
     # 确保所有模型都已注册到 metadata（否则 create_all 缺表）
     import app.models.knowledge  # noqa: F401
     import app.models.parent_service  # noqa: F401
+    import app.models.retrieval_config  # noqa: F401
     import app.models.system_setting  # noqa: F401
     import app.models.user  # noqa: F401
 
@@ -197,7 +197,7 @@ def test_auto_close_stale_and_idle_limits(session_factory):
         # 造一个"很久没动"的 open 会话 → 应被自动关闭
         from datetime import datetime, timedelta
 
-        from app.models.parent_service import ParentServiceThread, THREAD_OPEN
+        from app.models.parent_service import THREAD_OPEN, ParentServiceThread
 
         th = ParentServiceThread(parent_id=None, anon_key="idle-test", status=THREAD_OPEN)
         db.add(th)
@@ -252,6 +252,31 @@ def test_quota_counts_only_user_messages(session_factory):
         assert ps.count_today_user_messages(db, anon_key="test-anon-1") == 1
         ps.add_message(db, thread_id=th.id, role="user", content="q2")
         assert ps.count_today_user_messages(db, anon_key="test-anon-1") == 2
+    finally:
+        db.close()
+
+
+def test_parent_embedding_config_crud(session_factory):
+    """家长客服专属 Embedding：可配、可解析、删除后回退（不污染系统级）。"""
+    from app.crud import retrieval_config as rc
+
+    db = session_factory()
+    try:
+        rc.delete_system_parent_embedding(db)
+        assert rc.resolve_parent_embedding(db) is None
+
+        row = rc.upsert_system_parent_embedding(
+            db, provider="remote", base_url="https://api.example.com/v1",
+            api_key="sk-test", model="bge-m3",
+        )
+        assert row.model == "bge-m3"
+        resolved = rc.resolve_parent_embedding(db)
+        assert resolved is not None
+        assert resolved.model == "bge-m3"
+        assert resolved.fingerprint()
+
+        rc.delete_system_parent_embedding(db)
+        assert rc.resolve_parent_embedding(db) is None
     finally:
         db.close()
 

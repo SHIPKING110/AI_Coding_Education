@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import pathlib
 import uuid
 from collections.abc import Callable
@@ -25,8 +26,6 @@ from app.models.evaluation import Evaluation, EvaluationStatus
 from app.models.schedule import Attendance, AttendanceStatus, Schedule, ScheduleStatus
 from app.models.user import Role, User
 from app.services import agent_sql
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -736,6 +735,7 @@ def _resolve_skill_for_exec(db: Session, user: User, ref: str):
 def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: str = "", args: list | None = None) -> dict:
     """执行用户 Skill 包内脚本（走用户沙箱配置：本地/百炼；产物自动取回给下载链接）。"""
     from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
     from app.services import skill_exec as _exec
 
     ref = (skill or "").strip()
@@ -872,15 +872,33 @@ def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: st
         pass
     if result.get("deps"):
         out["依赖"] = result["deps"]
-    # PPT 二次编辑支撑：把工作区里现成的 .pptx 源文件告诉模型，便于后续「编辑已有 PPT」而非重新生成。
-    # ppt-master 的 Edit Native PPTX 路由需要源 pptx 路径（pptx_to_svg.py --roundtrip <source.pptx>）。
+    # PPT 二次编辑支撑：把**当前会话**工作区里现成的 .pptx 源文件告诉模型，
+    # 便于后续「编辑已有 PPT」而非重新生成。绝不能跨会话扫描——否则模型会把
+    # 别的对话里生成的旧 PPT 拿来改，出现「问列表却交运算符课件」的串任务。
     try:
         desk = _bundle.skill_dir(user.id, target.id)
-        existing_pptx = sorted(
-            str(p.relative_to(desk)).replace("\\", "/")
-            for p in desk.rglob("*.pptx")
-            if "_outputs/" not in str(p.relative_to(desk)).replace("\\", "/")
-        )[:6]
+        current_project = ""
+        for a in (args or []):
+            norm = str(a).replace("\\", "/").lstrip("/")
+            while norm.startswith("./"):
+                norm = norm[2:]
+            if norm == "projects" or norm.startswith("projects/"):
+                current_project = _scope_path(norm)
+                break
+        if current_project:
+            root = desk / current_project
+        elif _conv_prefix():
+            root = desk / _conv_prefix() / "projects"
+        else:
+            root = desk / "projects"
+        existing_pptx: list[str] = []
+        if root.is_dir():
+            for p in root.rglob("*.pptx"):
+                rel = str(p.relative_to(desk)).replace("\\", "/")
+                if "_outputs/" in rel:
+                    continue
+                existing_pptx.append(_unscope_path(rel))
+        existing_pptx = sorted(set(existing_pptx))[:6]
         if existing_pptx:
             out["已有PPT源文件"] = existing_pptx
             out["二次编辑提示"] = (
@@ -981,7 +999,6 @@ def _tool_delete_skill_file(db: Session, user: User, *, skill: str = "", path: s
 
 def _tool_list_skill_files(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
     """列出 Skill 包内某个目录下的文件（用于发现已生成的项目、找到正确的脚本/源文件路径）。"""
-    from app.crud import agent_ext as _ext
     from app.services import skill_bundle as _bundle
 
     ref = (skill or "").strip()
@@ -1021,7 +1038,6 @@ def _tool_list_skill_files(db: Session, user: User, *, skill: str = "", path: st
 
 def _tool_read_skill_file(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
     """读用户 Skill 包内文本文件（先读 SKILL.md/入口脚本/参考资料，再决定跑哪个脚本、传什么参）。"""
-    from app.crud import agent_ext as _ext
     from app.services import skill_bundle as _bundle
 
     ref = (skill or "").strip()
@@ -1033,10 +1049,16 @@ def _tool_read_skill_file(db: Session, user: User, *, skill: str = "", path: str
         return {"错误": f"找不到 Skill：{ref}"}
     scoped = _scope_path(rel)  # projects/ 会话隔离
     if scoped not in list(target.files or []):
-        base = rel.rsplit("/", 1)[-1].lower()
-        same = [f for f in (target.files or []) if str(f).rsplit("/", 1)[-1].lower() == base][:3]
-        hint = f"（同名文件：{'、'.join(same)}，请用完整包内路径）" if same else ""
-        return {"错误": f"{target.name} 包内无此文件：{rel}{hint}"}
+        # 脚本运行后可能新生成页面/中间文件（如 svg_output 下新增的 SVG），
+        # 不一定回写到 AgentSkill.files；只要磁盘上真实存在且路径合法就允许读取，
+        # 否则会出现「文件明明在、却报包内无此文件/该类型不支持预览」的假失败。
+        dest = _bundle.skill_dir(user.id, target.id)
+        candidate = (dest / scoped).resolve()
+        if dest.resolve() not in candidate.parents or not candidate.is_file():
+            base = rel.rsplit("/", 1)[-1].lower()
+            same = [f for f in (target.files or []) if str(f).rsplit("/", 1)[-1].lower() == base][:3]
+            hint = f"（同名文件：{'、'.join(same)}，请用完整包内路径）" if same else ""
+            return {"错误": f"{target.name} 包内无此文件：{rel}{hint}"}
     try:
         text = _bundle.read_text_file(user.id, target.id, scoped)
     except ValueError as e:
@@ -1517,15 +1539,27 @@ def auto_build_ppt(db, user) -> dict | None:
 
     条件（全部满足才动手，避免误触发）：
       - 用户可用 Skill 里存在 ppt-master 适配版（含 scripts/ppt_oneshot.py）；
-      - 该 Skill 包内 projects/ 下能找到含 svg_output/*.svg 且**最近 60 分钟内**改过的项目
-        （时间窗防止误抓别的旧会话遗留的项目，缓解"串味"）；
-    动作：对「最近修改」的那个项目跑 `ppt_oneshot.py build <项目>`，返回 run_skill_script 的产物。
+      - 该 Skill 包内**当前会话** projects/ 下能找到含 svg_output/*.svg 的项目。
+    动作：优先对当前 PPT 契约绑定的项目跑 `ppt_oneshot.py build <项目>`；没有契约时
+    对本会话最近修改的项目执行。会话隔离已在路径层完成，不能再靠 60 分钟时间窗
+    （否则用户隔一会儿回来点「继续修复」就找不到项目）。
     """
-    import time as _time
     from app.crud import agent_ext as _ext
     from app.services import skill_bundle as _bundle
 
-    fresh_after = _time.time() - 60 * 60  # 只认最近 60 分钟内写过的项目
+    preferred = ""
+    try:
+        cid = _CONV_SCOPE.get()
+        if cid:
+            import uuid as _uuid
+
+            from app.crud import ppt_task as _ppt_crud
+
+            active = _ppt_crud.get_active(db, conversation_id=_uuid.UUID(str(cid)))
+            if active is not None:
+                preferred = str(active.project_key or "").replace("\\", "/").strip("/")
+    except Exception:
+        preferred = ""
 
     try:
         collected = {str(x) for x in _ext.collected_skill_ids(db, user_id=user.id)}
@@ -1545,29 +1579,34 @@ def auto_build_ppt(db, user) -> dict | None:
         wrapper = next((f for f in files if f.endswith("scripts/ppt_oneshot.py")), None)
         if not wrapper:
             continue
-        # 定位有 svg_output/*.svg 且最近修改的项目（物化后文件在**使用者本人**目录）
+        # 定位当前会话作用域下已有 SVG 页的项目（物化后文件在**使用者本人**目录）
         try:
             desk = _bundle.skill_dir(user.id, s.id)
         except Exception:
             continue
         if not desk.exists():
             continue
-        # 只在**当前会话**作用域下的 projects 里找（避免串到别的会话）
         proj_root = desk / _scope_path("projects")
+        if preferred:
+            cand = desk / _scope_path(preferred)
+            candidates = [cand] if cand.is_dir() else []
+        else:
+            candidates = [p for p in proj_root.glob("*") if p.is_dir()]
         best = None
         best_mtime = -1.0
-        for proj in proj_root.glob("*"):
+        for proj in candidates:
             svg_dir = proj / "svg_output"
-            if svg_dir.is_dir() and any(svg_dir.glob("*.svg")):
-                try:
-                    mt = max(p.stat().st_mtime for p in svg_dir.glob("*.svg"))
-                except OSError:
-                    continue
-                if mt < fresh_after:
-                    continue  # 太旧：跳过
-                if mt > best_mtime:
-                    best_mtime = mt
-                    best = proj
+            if not svg_dir.is_dir() or not any(svg_dir.glob("*.svg")):
+                continue
+            try:
+                mt = max(p.stat().st_mtime for p in svg_dir.glob("*.svg"))
+            except OSError:
+                continue
+            if preferred or mt > best_mtime:
+                best_mtime = mt
+                best = proj
+                if preferred:
+                    break
         if best is None:
             continue
         # 还原为模型可见的 projects/… 路径；run_skill_script 会再按会话作用域改写

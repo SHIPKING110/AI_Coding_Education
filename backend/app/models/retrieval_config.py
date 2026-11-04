@@ -70,9 +70,52 @@ class TeacherRerankConfig(Base):
     )
 
 
+class SystemParentRerankConfig(Base):
+    """家长客服共享 Rerank（管理员配置，全校共用）：查询期重排，可选。"""
+
+    __tablename__ = "system_parent_rerank_config"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(16), default=PROVIDER_REMOTE)
+    base_url: Mapped[str] = mapped_column(String(256), default="")
+    api_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    model_path: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SystemParentEmbeddingConfig(Base):
+    """家长客服专属 Embedding（单例，管理员配置，可选）。
+
+    家长域是独立检索域：文档白名单（visible_to_parents）与教师知识库隔离。
+    配置后家长 RAG 使用独立集合 parent_knowledge__{fingerprint}，
+    仅索引家长可见文档；未配置时回退系统级 Embedding 与系统集合（现状不变）。
+    """
+
+    __tablename__ = "system_parent_embedding_config"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(16), default=PROVIDER_REMOTE)
+    base_url: Mapped[str] = mapped_column(String(256), default="")
+    api_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    model_path: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 __all__ = [
     "PROVIDER_LOCAL",
     "PROVIDER_REMOTE",
     "SystemEmbeddingConfig",
+    "SystemParentEmbeddingConfig",
+    "SystemParentRerankConfig",
     "TeacherRerankConfig",
 ]

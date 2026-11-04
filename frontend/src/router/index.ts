@@ -110,7 +110,6 @@ const router = createRouter({
           path: 'settings',
           name: 'settings',
           component: () => import('@/views/settings/SettingsView.vue'),
-          meta: { perm: 'settings_manage' },
         },
         {
           path: 'personalize',
@@ -325,6 +324,14 @@ router.beforeEach(async (to) => {
   if (typeof to.meta.perm === 'string' && user.role === 'teacher') {
     const perms = await auth.fetchPerms()
     if (perms[to.meta.perm] !== true) {
+      return { name: 'students' }
+    }
+  }
+  // 设置页按 tab 细分权限：只要拥有任一设置 tab 权限即可进入（页面内部再控制可见 tab）
+  if (to.name === 'settings' && user.role === 'teacher') {
+    const perms = await auth.fetchPerms()
+    const allowed = ['settings_manage', 'settings_tab_personalize', 'settings_tab_model', 'settings_tab_business']
+    if (!allowed.some((k) => perms[k] === true)) {
       return { name: 'students' }
     }
   }

@@ -20,6 +20,7 @@ from app.models.parent_service import (
     ParentServiceMessage,
     ParentServiceThread,
 )
+from app.models.parent_quick_reply import ParentQuickReply
 from app.models.system_setting import SystemSetting
 from app.models.user import Role, User
 
@@ -351,18 +352,77 @@ def find_or_create_parent_by_openid(db: Session, *, openid: str, nickname: str =
     return user
 
 
+def list_quick_replies(db: Session, *, owner_id) -> list[ParentQuickReply]:
+    return list(db.scalars(
+        select(ParentQuickReply)
+        .where(ParentQuickReply.owner_id == owner_id, ParentQuickReply.enabled.is_(True))
+        .order_by(ParentQuickReply.sort_order.asc(), ParentQuickReply.created_at.asc())
+    ).all())
+
+
+def create_quick_reply(
+    db: Session, *, owner_id, title: str, content: str, category: str = ""
+) -> ParentQuickReply:
+    row = ParentQuickReply(
+        owner_id=owner_id, title=title.strip()[:64], content=content.strip(), category=category.strip()[:32]
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_quick_reply(db: Session, *, owner_id, reply_id) -> ParentQuickReply | None:
+    return db.scalars(select(ParentQuickReply).where(
+        ParentQuickReply.id == reply_id, ParentQuickReply.owner_id == owner_id
+    )).first()
+
+
+def update_quick_reply(
+    db: Session, row: ParentQuickReply, *, title: str | None = None,
+    content: str | None = None, category: str | None = None, enabled: bool | None = None
+) -> ParentQuickReply:
+    if title is not None:
+        row.title = title.strip()[:64]
+    if content is not None:
+        row.content = content.strip()
+    if category is not None:
+        row.category = category.strip()[:32]
+    if enabled is not None:
+        row.enabled = enabled
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_quick_reply(db: Session, row: ParentQuickReply) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def use_quick_reply(db: Session, row: ParentQuickReply) -> ParentQuickReply:
+    row.usage_count = int(row.usage_count or 0) + 1
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 __all__ = [
     "DEFAULT_RISK_WORDS",
     "add_message",
     "auto_close_stale",
     "count_today_user_messages",
+    "create_quick_reply",
+    "delete_quick_reply",
     "escalate",
     "find_or_create_parent_by_openid",
     "get_or_create_thread",
+    "get_quick_reply",
     "get_setting",
     "hit_risk_word",
     "idle_limits",
     "list_messages",
+    "list_quick_replies",
     "list_threads_for_staff",
     "non_biz_hint",
     "parent_identity",
@@ -372,4 +432,6 @@ __all__ = [
     "resolve_owner_teacher",
     "risk_words",
     "unsafe_output",
+    "update_quick_reply",
+    "use_quick_reply",
 ]

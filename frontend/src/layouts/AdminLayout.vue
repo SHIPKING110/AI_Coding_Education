@@ -259,7 +259,7 @@ const ADMIN_NAV = [
   { to: '/classes', label: '班级管理', icon: 'M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M9 12h.01M9 15h.01M15 9h.01M15 12h.01M15 15h.01', navKey: 'nav_classes' },
   { to: '/teachers', label: '教师管理', icon: 'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75', navKey: 'nav_teachers' },
   { to: '/permissions', label: '权限管理', icon: 'M12 2l7 4v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-4zM9 12l2 2 4-4', adminOnly: true },
-  { to: '/settings', label: '设置', icon: 'M12 21a9 9 0 1 0-9-9M12 21a9 9 0 0 0 9-9M12 3a9 9 0 0 1 9 9M12 3A9 9 0 0 0 3 12', perm: 'settings_manage', navKey: 'nav_settings' },
+  { to: '/settings', label: '设置', icon: 'M12 21a9 9 0 1 0-9-9M12 21a9 9 0 0 0 9-9M12 3a9 9 0 0 1 9 9M12 3A9 9 0 0 0 3 12', permAny: ['settings_manage', 'settings_tab_personalize', 'settings_tab_model', 'settings_tab_business'], navKey: 'nav_settings' },
   { to: '/schedules', label: '排课与考勤', navKey: 'nav_schedules', icon: 'M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z' },
   { to: '/packages', label: '课时包管理', navKey: 'nav_packages', icon: 'M20 12l-8-5-8 5 8 5 8-5zM4 12v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6' },
   { to: '/feedbacks', label: '课后反馈', navKey: 'nav_feedbacks', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 13h5' },
@@ -277,9 +277,11 @@ const ADMIN_NAV = [
 const navItems = computed(() =>
   ADMIN_NAV.filter((item) => {
     const perm = (item as { perm?: string }).perm
+    const permAny = (item as { permAny?: string[] }).permAny
     const navKey = (item as { navKey?: string }).navKey
     if (auth.user?.role === 'teacher') {
       if (perm && teacherPerms.value[perm] !== true) return false
+      if (permAny && !permAny.some((p) => teacherPerms.value[p] === true)) return false
       if (navKey && teacherPerms.value[navKey] !== true) return false
     }
     if ((item as { adminOnly?: boolean }).adminOnly && auth.user?.role !== 'admin') return false

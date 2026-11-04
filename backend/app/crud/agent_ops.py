@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.agent_trace import AgentRunSpan, AgentRunTrace
+from app.models.ppt_task import AgentPptTask
 
 
 def list_runs(
@@ -263,10 +264,56 @@ def stats(db: Session, *, since: datetime) -> dict:
     ppt_total = int(db.scalar(
         select(func.count()).select_from(AgentRunTrace).where(*conds, AgentRunTrace.task_kind == "ppt")
     ) or 0)
+    ppt_planned = int(db.scalar(
+        select(func.count()).select_from(AgentRunTrace).where(
+            *conds, AgentRunTrace.task_kind == "ppt", AgentRunTrace.ppt_target_pages > 0
+        )
+    ) or 0)
     ppt_aligned = int(db.scalar(
         select(func.count()).select_from(AgentRunTrace).where(
-            *conds, AgentRunTrace.task_kind == "ppt", AgentRunTrace.ppt_aligned.is_(True)
+            *conds, AgentRunTrace.task_kind == "ppt",
+            AgentRunTrace.ppt_current_pages > 0, AgentRunTrace.ppt_aligned.is_(True),
         )
+    ) or 0)
+    ppt_delivered = int(db.scalar(
+        select(func.count()).select_from(AgentRunTrace).where(
+            *conds, AgentRunTrace.task_kind == "ppt", AgentRunTrace.artifact_url != ""
+        )
+    ) or 0)
+    ppt_pages_target = int(db.scalar(
+        select(func.coalesce(func.sum(AgentRunTrace.ppt_target_pages), 0)).where(
+            *conds, AgentRunTrace.task_kind == "ppt"
+        )
+    ) or 0)
+    ppt_pages_current = int(db.scalar(
+        select(func.coalesce(func.sum(AgentRunTrace.ppt_current_pages), 0)).where(
+            *conds, AgentRunTrace.task_kind == "ppt"
+        )
+    ) or 0)
+    # PPT 任务契约（更准确的成品口径：按任务计数，交付且页数一致）
+    ppt_task_total = int(db.scalar(
+        select(func.count()).select_from(AgentPptTask).where(AgentPptTask.created_at >= since)
+    ) or 0)
+    ppt_task_aligned = int(db.scalar(
+        select(func.count()).select_from(AgentPptTask).where(
+            AgentPptTask.created_at >= since,
+            AgentPptTask.current_pptx_url != "",
+            or_(
+                AgentPptTask.target_page_count == 0,
+                AgentPptTask.current_page_count == AgentPptTask.target_page_count,
+            ),
+        )
+    ) or 0)
+    ppt_task_delivered = int(db.scalar(
+        select(func.count()).select_from(AgentPptTask).where(
+            AgentPptTask.created_at >= since, AgentPptTask.current_pptx_url != ""
+        )
+    ) or 0)
+    ppt_task_pages_target = int(db.scalar(
+        select(func.coalesce(func.sum(AgentPptTask.target_page_count), 0)).where(AgentPptTask.created_at >= since)
+    ) or 0)
+    ppt_task_pages_current = int(db.scalar(
+        select(func.coalesce(func.sum(AgentPptTask.current_page_count), 0)).where(AgentPptTask.created_at >= since)
     ) or 0)
     avg_latency = db.scalar(select(func.avg(AgentRunTrace.latency_ms)).where(*conds))
     p95 = None
@@ -279,6 +326,56 @@ def stats(db: Session, *, since: datetime) -> dict:
             .offset(offset)
             .limit(1)
         )
+
+    def _pct(values: list[int], p: float) -> int | None:
+        if not values:
+            return None
+        vals = sorted(values)
+        idx = min(len(vals) - 1, max(0, int(len(vals) * p) - 1))
+        return int(vals[idx])
+
+    def _segment(values: list[tuple[str, int, int]]) -> dict:
+        """按任务类型聚合时延/首字：交互应答与长任务分开统计，避免长任务把 P95 拖高。"""
+        by_kind: dict[str, dict] = {}
+        for kind, latency, first_token in values:
+            k = (kind or "unknown").strip() or "unknown"
+            cur = by_kind.setdefault(k, {"runs": 0, "latencies": [], "first_tokens": []})
+            cur["runs"] += 1
+            if latency:
+                cur["latencies"].append(int(latency))
+            if first_token:
+                cur["first_tokens"].append(int(first_token))
+        out = {}
+        for k, v in by_kind.items():
+            lats = v["latencies"]
+            fts = v["first_tokens"]
+            out[k] = {
+                "runs": v["runs"],
+                "avg_ms": round(sum(lats) / len(lats), 1) if lats else None,
+                "p50_ms": _pct(lats, 0.50),
+                "p95_ms": _pct(lats, 0.95),
+                "first_token_p95_ms": _pct(fts, 0.95) if fts else None,
+            }
+        return out
+
+    latency_rows = db.execute(
+        select(AgentRunTrace.task_kind, AgentRunTrace.latency_ms, AgentRunTrace.first_token_ms)
+        .where(*conds)
+    ).all()
+    latency_by_kind = _segment([(k, int(lat or 0), int(ft or 0)) for k, lat, ft in latency_rows])
+    interactive_kinds = ("chat", "rag_qa", "smalltalk", "knowledge_qa", "unknown")
+    interactive_lats = [
+        int(lat or 0) for k, lat, _ in latency_rows
+        if (k or "unknown") in interactive_kinds and lat
+    ]
+    long_lats = [
+        int(lat or 0) for k, lat, _ in latency_rows
+        if (k or "unknown") not in interactive_kinds and lat
+    ]
+    interactive_ft = [
+        int(ft or 0) for k, _, ft in latency_rows
+        if (k or "unknown") in interactive_kinds and ft
+    ]
     tokens_in = int(db.scalar(select(func.coalesce(func.sum(AgentRunTrace.input_tokens), 0)).where(*conds)) or 0)
     tokens_out = int(db.scalar(select(func.coalesce(func.sum(AgentRunTrace.output_tokens), 0)).where(*conds)) or 0)
     cost = float(db.scalar(select(func.coalesce(func.sum(AgentRunTrace.cost_estimate), 0)).where(*conds)) or 0)
@@ -354,10 +451,34 @@ def stats(db: Session, *, since: datetime) -> dict:
             "not_needed": not_needed_runs,
         },
         "ppt_runs": ppt_total,
+        "ppt_planned_runs": ppt_planned,
+        "ppt_delivered": ppt_delivered,
         "ppt_aligned": ppt_aligned,
-        "ppt_alignment_rate": (ppt_aligned / ppt_total) if ppt_total else None,
+        "ppt_alignment_rate": (ppt_aligned / ppt_planned) if ppt_planned else None,
+        "ppt_delivery_rate": (ppt_delivered / ppt_total) if ppt_total else None,
+        "ppt_task_runs": ppt_task_total,
+        "ppt_task_aligned": ppt_task_aligned,
+        "ppt_task_delivered": ppt_task_delivered,
+        "ppt_task_alignment_rate": (ppt_task_aligned / ppt_task_total) if ppt_task_total else None,
+        "ppt_task_delivery_rate": (ppt_task_delivered / ppt_task_total) if ppt_task_total else None,
+        "ppt_task_pages_target": ppt_task_pages_target,
+        "ppt_task_pages_current": ppt_task_pages_current,
+        "ppt_pages_target": ppt_pages_target,
+        "ppt_pages_current": ppt_pages_current,
         "avg_latency_ms": float(avg_latency) if avg_latency is not None else None,
         "p95_latency_ms": float(p95) if p95 is not None else None,
+        "latency_by_task": latency_by_kind,
+        "interactive_latency": {
+            "runs": len(interactive_lats),
+            "p50_ms": _pct(interactive_lats, 0.50),
+            "p95_ms": _pct(interactive_lats, 0.95),
+            "first_token_p95_ms": _pct(interactive_ft, 0.95),
+        },
+        "long_task_latency": {
+            "runs": len(long_lats),
+            "p50_ms": _pct(long_lats, 0.50),
+            "p95_ms": _pct(long_lats, 0.95),
+        },
         "input_tokens": tokens_in,
         "output_tokens": tokens_out,
         "cost_estimate": cost,

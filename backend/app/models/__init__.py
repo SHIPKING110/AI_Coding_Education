@@ -5,7 +5,14 @@ from app.models.agent import (
     AgentMessage,
     AgentWorkingMemory,
 )
-from app.models.agent_ext import AgentGlobalSetting, AgentMCP, AgentMCPCollection, AgentSkill, AgentSkillCollection, CustomAgent
+from app.models.agent_ext import (
+    AgentGlobalSetting,
+    AgentMCP,
+    AgentMCPCollection,
+    AgentSkill,
+    AgentSkillCollection,
+    CustomAgent,
+)
 from app.models.agent_trace import AgentRunSpan, AgentRunTrace
 from app.models.assignment import (
     Assignment,
@@ -40,8 +47,9 @@ from app.models.enrollment import (
 from app.models.evaluation import ClassPpt, Evaluation, EvaluationStatus
 from app.models.feedback import Feedback, FeedbackStatus
 from app.models.knowledge import KnowledgeCollection, KnowledgeDocument
-from app.models.llm_config import TeacherLLMConfig, TeacherModuleModel
+from app.models.llm_config import SystemParentLLMConfig, TeacherLLMConfig, TeacherModuleModel
 from app.models.notification import Notification, NotificationType
+from app.models.parent_quick_reply import ParentQuickReply
 from app.models.parent_service import ParentServiceMessage, ParentServiceThread
 from app.models.ppt_task import AgentPptTask, AgentPptTaskEvent
 from app.models.prompt import PromptScope, PromptTemplate
@@ -59,6 +67,8 @@ from app.models.retrieval_config import (
     PROVIDER_LOCAL,
     PROVIDER_REMOTE,
     SystemEmbeddingConfig,
+    SystemParentEmbeddingConfig,
+    SystemParentRerankConfig,
     TeacherRerankConfig,
 )
 from app.models.schedule import Attendance, AttendanceStatus, Schedule, ScheduleStatus
@@ -103,6 +113,7 @@ __all__ = [
     "NotificationType",
     "ParentServiceMessage",
     "ParentServiceThread",
+    "ParentQuickReply",
     "Order",
     "OrderStatus",
     "PackageStatus",
@@ -125,6 +136,8 @@ __all__ = [
     "RevenueLedger",
     "Role",
     "SystemEmbeddingConfig",
+    "SystemParentEmbeddingConfig",
+    "SystemParentRerankConfig",
     "TeacherRerankConfig",
     "PROVIDER_LOCAL",
     "PROVIDER_REMOTE",

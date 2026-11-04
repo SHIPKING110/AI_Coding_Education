@@ -1,4 +1,4 @@
-"""检索模型配置 CRUD：系统级 Embedding（单例）+ 教师级 Rerank。
+"""检索模型配置 CRUD：系统级 Embedding（单例）+ 家长客服专属 Embedding（单例）+ Rerank。
 
 resolved 对象与对话模型的 ResolvedLLM 分离，避免误用（embedding/rerank 的
 endpoint 与 schema 都不是 chat 兼容的）。
@@ -18,6 +18,8 @@ from app.models.retrieval_config import (
     PROVIDER_LOCAL,
     PROVIDER_REMOTE,
     SystemEmbeddingConfig,
+    SystemParentEmbeddingConfig,
+    SystemParentRerankConfig,
     TeacherRerankConfig,
 )
 
@@ -133,6 +135,73 @@ def resolve_embedding(db: Session) -> ResolvedEmbedding | None:
     return None
 
 
+# ---------------- 家长客服专属 Embedding（单例，可选，管理员） ----------------
+
+
+def get_system_parent_embedding(db: Session) -> SystemParentEmbeddingConfig | None:
+    return db.scalar(select(SystemParentEmbeddingConfig).limit(1))
+
+
+def upsert_system_parent_embedding(
+    db: Session,
+    *,
+    provider: str,
+    base_url: str,
+    api_key: str | None,
+    model: str,
+    model_path: str | None = None,
+    enabled: bool = True,
+) -> SystemParentEmbeddingConfig:
+    row = get_system_parent_embedding(db)
+    if row is None:
+        row = SystemParentEmbeddingConfig()
+        db.add(row)
+    row.provider = provider if provider in (PROVIDER_REMOTE, PROVIDER_LOCAL) else PROVIDER_REMOTE
+    row.base_url = (base_url or "").strip().rstrip("/")
+    if api_key:
+        row.api_key_enc = encrypt_secret(api_key.strip())
+    row.model = (model or "").strip()
+    row.model_path = (model_path or "").strip() or None
+    row.enabled = enabled
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_system_parent_embedding(db: Session) -> None:
+    row = get_system_parent_embedding(db)
+    if row is not None:
+        db.delete(row)
+        db.commit()
+
+
+def resolve_parent_embedding(db: Session) -> ResolvedEmbedding | None:
+    """只返回「家长客服专属」配置；未配置/停用返回 None（调用方回退系统级）。"""
+    row = get_system_parent_embedding(db)
+    if row is None or not row.enabled or not (row.model or "").strip():
+        return None
+    if row.provider == PROVIDER_LOCAL:
+        if not (row.model_path or "").strip():
+            return None
+        return ResolvedEmbedding(
+            provider=row.provider,
+            base_url=row.base_url or "",
+            api_key=None,
+            model=row.model,
+            model_path=row.model_path,
+        )
+    key = decrypt_secret(row.api_key_enc) if row.api_key_enc else ""
+    if not key:
+        return None
+    return ResolvedEmbedding(
+        provider=row.provider,
+        base_url=row.base_url or "",
+        api_key=key,
+        model=row.model,
+        model_path=row.model_path,
+    )
+
+
 # ---------------- 教师级 Rerank（可选） ----------------
 
 
@@ -189,15 +258,77 @@ def resolve_rerank(db: Session, owner_id: uuid.UUID) -> ResolvedRerank | None:
     return ResolvedRerank(row.provider, row.base_url, key, row.model, row.model_path)
 
 
+# ---------------- 家长客服共享 Rerank（系统级，管理员） ----------------
+
+
+def get_system_parent_rerank(db: Session) -> SystemParentRerankConfig | None:
+    return db.scalar(select(SystemParentRerankConfig).limit(1))
+
+
+def upsert_system_parent_rerank(
+    db: Session,
+    *,
+    provider: str,
+    base_url: str,
+    api_key: str | None,
+    model: str,
+    model_path: str | None = None,
+    enabled: bool = True,
+) -> SystemParentRerankConfig:
+    row = get_system_parent_rerank(db)
+    if row is None:
+        row = SystemParentRerankConfig()
+        db.add(row)
+    row.provider = provider if provider in (PROVIDER_REMOTE, PROVIDER_LOCAL) else PROVIDER_REMOTE
+    row.base_url = (base_url or "").strip().rstrip("/")
+    if api_key:
+        row.api_key_enc = encrypt_secret(api_key.strip())
+    row.model = (model or "").strip()
+    row.model_path = (model_path or "").strip() or None
+    row.enabled = enabled
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_system_parent_rerank(db: Session) -> None:
+    row = get_system_parent_rerank(db)
+    if row is not None:
+        db.delete(row)
+        db.commit()
+
+
+def resolve_parent_rerank(db: Session) -> ResolvedRerank | None:
+    row = get_system_parent_rerank(db)
+    if row is None or not row.enabled or not (row.model or "").strip():
+        return None
+    if row.provider == PROVIDER_LOCAL:
+        if not (row.model_path or "").strip():
+            return None
+        return ResolvedRerank(row.provider, "", None, row.model, row.model_path)
+    key = decrypt_secret(row.api_key_enc) if row.api_key_enc else ""
+    if not key or not (row.base_url or "").strip():
+        return None
+    return ResolvedRerank(row.provider, row.base_url, key, row.model, row.model_path)
+
+
 __all__ = [
     "ResolvedEmbedding",
     "ResolvedRerank",
     "delete_rerank",
     "delete_system_embedding",
+    "delete_system_parent_embedding",
+    "delete_system_parent_rerank",
     "get_rerank",
     "get_system_embedding",
+    "get_system_parent_embedding",
+    "get_system_parent_rerank",
     "resolve_embedding",
+    "resolve_parent_embedding",
+    "resolve_parent_rerank",
     "resolve_rerank",
     "upsert_rerank",
     "upsert_system_embedding",
+    "upsert_system_parent_embedding",
+    "upsert_system_parent_rerank",
 ]

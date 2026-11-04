@@ -345,7 +345,11 @@ def preview_skill_file(skill_id: uuid.UUID, path: str = Query(...), db: Session 
     if s is None:
         raise HTTPException(status_code=404, detail="Skill 不存在")
     if path not in list(s.files or []):
-        raise HTTPException(status_code=404, detail="文件不存在")
+        # 与 Agent 工具一致：脚本新生成的文件即使未回写 files 元数据，也允许预览。
+        dest = _bundle.skill_dir(user.id, skill_id)
+        candidate = (dest / path).resolve()
+        if dest.resolve() not in candidate.parents or not candidate.is_file():
+            raise HTTPException(status_code=404, detail="文件不存在")
     try:
         return {"path": path, "text": _bundle.read_text_file(user.id, skill_id, path)}
     except ValueError as e:

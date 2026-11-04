@@ -15,8 +15,14 @@ import io
 import pathlib
 import zipfile
 
-ALLOWED_SUFFIX = {".md", ".txt", ".json", ".yaml", ".yml", ".py", ".js", ".sh",
-                  ".png", ".jpg", ".jpeg", ".gif", ".webp"}
+# 文本类：上传/写入/预览共用。SVG 是 ppt-master 的页面源文件，必须可按文本读取；
+# html/xml/css/csv 与 write_skill_file 的白名单保持一致，避免「能写入却读不了」。
+TEXT_SUFFIX = {
+    ".md", ".txt", ".json", ".yaml", ".yml", ".py", ".js", ".sh",
+    ".svg", ".xml", ".html", ".htm", ".css", ".csv",
+}
+IMAGE_SUFFIX = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+ALLOWED_SUFFIX = TEXT_SUFFIX | IMAGE_SUFFIX
 # 无后缀的常见署名/说明文件也允许落盘（很多第三方 Skill 自带完整性校验，缺失会报 attribution 缺失）
 ALLOWED_BASENAMES = {"license", "licence", "notice", "authors", "copying", "attribution", "readme", "changelog"}
 MAX_FILES = 2000
@@ -232,10 +238,12 @@ def read_text_file(owner_id, skill_id, rel: str, limit: int = 6000) -> str:
     target = (dest / rel).resolve()
     if dest.resolve() not in target.parents:
         raise ValueError("非法路径")
-    if target.suffix.lower() not in ALLOWED_SUFFIX and target.name.lower() not in ALLOWED_BASENAMES:
-        if target.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
-            raise ValueError("图片类型不支持预览")
-        raise ValueError("该类型不支持预览")
+    suffix = target.suffix.lower()
+    if suffix not in TEXT_SUFFIX and target.name.lower() not in ALLOWED_BASENAMES:
+        if suffix in IMAGE_SUFFIX:
+            raise ValueError("图片类型不支持文本预览（可通过下载链接查看）")
+        allowed = "、".join(sorted(s.lstrip(".") for s in TEXT_SUFFIX))
+        raise ValueError(f"该类型不支持预览（仅支持文本类：{allowed}）")
     return target.read_text(encoding="utf-8", errors="ignore")[:limit]
 
 

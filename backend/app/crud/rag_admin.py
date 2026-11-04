@@ -174,17 +174,46 @@ def trace_stats(db: Session, *, since: datetime) -> dict:
         )
     ) or 0)
     hit = max(0, total - zero - errors)
+    rows = db.execute(
+        select(
+            RagRetrievalTrace.latency_ms,
+            RagRetrievalTrace.vector_candidates,
+            RagRetrievalTrace.keyword_candidates,
+            RagRetrievalTrace.rerank_candidates,
+            RagRetrievalTrace.rerank_ok,
+        ).where(RagRetrievalTrace.created_at >= since)
+    ).all()
+
+    def _pct(values: list[int], p: float) -> int | None:
+        if not values:
+            return None
+        vals = sorted(values)
+        idx = min(len(vals) - 1, max(0, int(len(vals) * p) - 1))
+        return int(vals[idx])
+
+    latencies = [int(r[0] or 0) for r in rows if r[0]]
+    candidates = [int(r[1] or 0) + int(r[2] or 0) for r in rows]
+    rerank_attempts = sum(1 for r in rows if int(r[3] or 0) > 0)
+    rerank_ok = sum(1 for r in rows if bool(r[4]))
     return {
         "queries": total,
         "zero_results": zero,
         "errors": errors,
         "hits": hit,
         "hit_rate": round((total - zero) / total, 4) if total else None,
+        "hit_rate_excl_errors": round(hit / max(0, total - errors), 4) if total - errors > 0 else None,
         "zero_result_rate": round(zero / total, 4) if total else None,
+        "error_rate": round(errors / total, 4) if total else None,
         "avg_latency_ms": round(float(avg_latency), 2) if avg_latency is not None else None,
+        "p95_latency_ms": _pct(latencies, 0.95),
+        "avg_candidates": round(sum(candidates) / len(candidates), 1) if candidates else None,
         "vector_fail": vector_fail,
+        "vector_success_rate": round((total - vector_fail) / total, 4) if total else None,
         "keyword_used": keyword,
+        "keyword_rate": round(keyword / total, 4) if total else None,
         "rerank_fail": rerank_fail,
+        "rerank_attempts": rerank_attempts,
+        "rerank_success_rate": round(rerank_ok / rerank_attempts, 4) if rerank_attempts else None,
         "rag_status_counts": {
             "hit": hit,
             "no_hit": zero,

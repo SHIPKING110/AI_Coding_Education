@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """PPT 三处对齐（正文页清单 / 工作区大纲 / 实际 SVG）+ 多轮续作 回归测试：
 
 1) 标题提炼不再把大号装饰数字（01/2000+）当页标题，多行标题能拼回完整一句；
@@ -91,6 +90,39 @@ def test_synthesize_marks_incomplete_build():
     ]
     text, has = _synthesize_ppt_summary(PlanOutcome(steps=steps))
     assert not has and "构建未完成" in text and "1 页" in text
+
+
+def test_ppt_metrics_without_contract_counts_delivered_deck():
+    """没有契约但已出片时，页数指标仍要补写（否则后台一直显示 0）。"""
+    from app.api.routers.agents import _ppt_outcome_metrics
+
+    steps = [
+        Step(tool="run_skill_script", args={}, ok=True, result={
+            "生成文件": [{"名": "deck.pptx", "下载": "/uploads/skills/x/deck.pptx"}],
+            "页清单": ["01_cover.svg", "02_body.svg"],
+            "页信息": [{"名": "01_cover.svg", "标题": "封面"}, {"名": "02_body.svg", "标题": "正文"}],
+        }),
+    ]
+    m = _ppt_outcome_metrics("生成一份 2 页 PPT", PlanOutcome(steps=steps))
+    assert m["ppt_target_pages"] == 2
+    assert m["ppt_current_pages"] == 2
+    assert m["ppt_aligned"] is True
+    assert m["artifact_url"].endswith("deck.pptx")
+
+
+def test_ppt_metrics_without_explicit_target_uses_actual_pages():
+    from app.api.routers.agents import _ppt_outcome_metrics
+
+    steps = [
+        Step(tool="run_skill_script", args={}, ok=True, result={
+            "生成文件": [{"名": "deck.pptx", "下载": "/uploads/skills/x/deck.pptx"}],
+            "页清单": ["01_cover.svg", "02_body.svg", "03_end.svg"],
+        }),
+    ]
+    m = _ppt_outcome_metrics("帮我做个 PPT", PlanOutcome(steps=steps))
+    assert m["ppt_target_pages"] == 3
+    assert m["ppt_current_pages"] == 3
+    assert m["ppt_aligned"] is True
 
 
 def test_strip_pseudo_toolcall_fences():

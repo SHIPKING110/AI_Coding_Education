@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -15,11 +15,9 @@ from app.core.database import SessionLocal, get_db
 from app.crud import knowledge as kb_crud
 from app.crud import rag_admin as crud
 from app.models.knowledge import KnowledgeDocument
-from app.models.rag_admin import RagEvalCase, RagEvalRun, RagEvalSet
 from app.models.user import Role, User
-from app.services import agent_ops
+from app.services import agent_ops, rag_evaluation, rag_settings, rag_trace
 from app.services import rag as rag_service
-from app.services import rag_evaluation, rag_settings, rag_trace
 
 router = APIRouter(
     prefix="/admin/rag",
@@ -70,7 +68,7 @@ def _mark_progress(doc_id, stage: str, percent: int, detail: str = "") -> None:
 
 @router.get("/overview")
 def overview(db: Session = Depends(get_db)) -> dict:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     status_rows = db.execute(
         select(KnowledgeDocument.status, func.count()).group_by(KnowledgeDocument.status)
     ).all()
@@ -91,6 +89,10 @@ def overview(db: Session = Depends(get_db)) -> dict:
     stats_7d = crud.trace_stats(db, since=now - timedelta(days=7))
     domains = crud.trace_domain_stats(db, since=now - timedelta(days=7))
     recent_errors = crud.list_traces(db, error_only=True, page_size=5)["items"]
+    latest_eval = next(
+        (crud.eval_run_to_dict(r) for r in crud.list_eval_runs(db, limit=20) if r.status == "done"),
+        None,
+    )
     try:
         collections = rag_service.collection_stats()
     except Exception:
@@ -122,6 +124,7 @@ def overview(db: Session = Depends(get_db)) -> dict:
         "collections": collections,
         "risks": risks,
         "recent_errors": recent_errors,
+        "latest_eval": latest_eval,
     }
 
 
@@ -239,6 +242,11 @@ def toggle_parent_visible(
         raise HTTPException(status_code=404, detail="文档不存在")
     new_value = (not bool(doc.visible_to_parents)) if visible is None else visible
     doc = kb_crud.set_parent_visible(db, doc, new_value)
+    if new_value:
+        # 开启家长可见 → 若配置了家长专属 Embedding，后台补建父索引
+        rag_service.start_parent_index_sync()
+    else:
+        rag_service.delete_document_vectors(doc.id, parent=True)
     crud.add_audit(
         db, action="document.parent_visible", target=str(doc.id),
         detail={"visible": new_value}, operator_id=user.id,
@@ -256,6 +264,7 @@ def delete_document(
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
     rag_service.delete_document_vectors(doc.id)
+    rag_service.delete_document_vectors(doc.id, parent=True)
     from pathlib import Path
 
     try:
@@ -286,7 +295,7 @@ def knowledge_bases(db: Session = Depends(get_db)) -> dict:
             buckets["private"]["docs"].append(d)
         if d.visible_to_parents:
             buckets["parent"]["docs"].append(d)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     domains = {x["domain"]: x for x in crud.trace_domain_stats(db, since=now - timedelta(days=7))}
     out = []
     for key, b in buckets.items():

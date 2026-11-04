@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -36,6 +37,7 @@ import {
   type TeacherLevelOut,
 } from '@/api/payroll'
 
+const route = useRoute()
 const activeTab = ref<'personalize' | 'business' | 'llm'>('personalize')
 
 // 设置 tab 可见与操作：教师按 settings_tab_* 键（settings_manage 为总开关）
@@ -394,7 +396,10 @@ onMounted(async () => {
       myPerms.value = {}
     }
     const first = (['personalize', 'llm', 'business'] as const).find((t) => visibleTabs.value[t])
-    if (first) activeTab.value = first
+    if (route.query.tab === 'llm' && visibleTabs.value.llm) activeTab.value = 'llm'
+    else if (first) activeTab.value = first
+  } else if (route.query.tab === 'llm') {
+    activeTab.value = 'llm'
   }
   await loadAll()
 })

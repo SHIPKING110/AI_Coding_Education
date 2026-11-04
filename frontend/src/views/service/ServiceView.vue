@@ -1,13 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
 import {
+  createQuickReply,
+  deleteQuickReply,
+  parentServiceConfigStatus,
+  staffQuickReplies,
   staffServiceClose,
   staffServiceMessages,
   staffServiceReply,
   staffServiceThreads,
+  updateQuickReply,
+  useQuickReply,
   type ParentMessage,
+  type ParentServiceConfigStatus,
   type ParentThread,
+  type QuickReply,
 } from '@/api/parentService'
 
 const threads = ref<ParentThread[]>([])
@@ -20,12 +28,86 @@ const loading = ref(false)
 const error = ref('')
 const filter = ref<'all' | 'escalated' | 'open'>('all')
 const campusFilter = ref('')
+const quickReplies = ref<QuickReply[]>([])
+const configStatus = ref<ParentServiceConfigStatus | null>(null)
+const showQrForm = ref(false)
+const qrForm = ref({ title: '', content: '', category: '' })
+const editingQr = ref<QuickReply | null>(null)
+const qrSaving = ref(false)
+const msgsEl = ref<HTMLElement | null>(null)
+let pollTimer: number | undefined
 
 const filtered = computed(() => {
   if (filter.value === 'all') return threads.value
   return threads.value.filter((t) => t.status === filter.value)
 })
 const escalatedCount = computed(() => threads.value.filter((t) => t.status === 'escalated').length)
+
+async function scrollMessages() {
+  await nextTick()
+  msgsEl.value?.scrollTo({ top: msgsEl.value.scrollHeight, behavior: 'smooth' })
+}
+
+async function loadQuickReplies() {
+  try {
+    quickReplies.value = await staffQuickReplies()
+  } catch { /* 快捷术语失败不阻塞接待 */ }
+}
+
+async function loadConfigStatus() {
+  try {
+    configStatus.value = await parentServiceConfigStatus()
+  } catch { configStatus.value = null }
+}
+
+function openCreateQr() {
+  editingQr.value = null
+  qrForm.value = { title: '', content: '', category: '' }
+  showQrForm.value = true
+}
+
+function openEditQr(q: QuickReply) {
+  editingQr.value = q
+  qrForm.value = { title: q.title, content: q.content, category: q.category }
+  showQrForm.value = true
+}
+
+async function saveQr() {
+  const content = qrForm.value.content.trim()
+  if (!content) {
+    error.value = '术语内容不能为空'
+    return
+  }
+  qrSaving.value = true
+  try {
+    if (editingQr.value) {
+      await updateQuickReply(editingQr.value.id, { ...qrForm.value })
+    } else {
+      await createQuickReply({ ...qrForm.value })
+    }
+    showQrForm.value = false
+    await loadQuickReplies()
+  } catch (e: any) {
+    error.value = e?.response?.data?.detail || '保存快捷术语失败'
+  } finally {
+    qrSaving.value = false
+  }
+}
+
+async function removeQr(q: QuickReply) {
+  if (!confirm(`删除快捷术语「${q.title || q.content.slice(0, 12)}」？`)) return
+  try {
+    await deleteQuickReply(q.id)
+    await loadQuickReplies()
+  } catch (e: any) {
+    error.value = e?.response?.data?.detail || '删除失败'
+  }
+}
+
+async function insertQr(q: QuickReply) {
+  reply.value = reply.value ? `${reply.value}\n${q.content}` : q.content
+  try { await useQuickReply(q.id) } catch { /* 使用次数统计失败忽略 */ }
+}
 
 async function loadThreads() {
   try {
@@ -46,6 +128,7 @@ async function openThread(id: string) {
     const r = await staffServiceMessages(id)
     active.value = r.thread
     messages.value = r.items
+    await scrollMessages()
   } catch (e: any) {
     error.value = e?.response?.data?.detail || '加载消息失败'
   } finally {
@@ -82,6 +165,10 @@ async function refreshSilent() {
     const r = await staffServiceThreads(campusFilter.value || undefined)
     threads.value = r.items
     campuses.value = r.campuses || []
+    if (activeId.value && r.items.some((t) => t.id === activeId.value)) {
+      // Keep the open conversation in sync so parent replies appear without a manual refresh.
+      await openThread(activeId.value)
+    }
   } catch { /* 忽略静默刷新失败 */ }
 }
 
@@ -105,7 +192,19 @@ function fmtTime(iso: string | null): string {
   return `${m}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-onMounted(loadThreads)
+onMounted(() => {
+  void loadThreads()
+  void loadQuickReplies()
+  void loadConfigStatus()
+  pollTimer = window.setInterval(() => {
+    void refreshSilent()
+    void loadConfigStatus()
+  }, 15000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) window.clearInterval(pollTimer)
+})
 </script>
 
 <template>
@@ -167,13 +266,20 @@ onMounted(loadThreads)
             </div>
           </div>
           <div v-if="active.risk_flag" class="risk-bar">该会话涉及敏感话题（退费 / 收费 / 安全类），请谨慎回复，必要时升级处理。</div>
-          <div class="msgs">
+          <div ref="msgsEl" class="msgs">
             <div v-for="m in messages" :key="m.id" class="msg" :class="m.role">
               <div class="bubble">{{ m.content }}</div>
             </div>
           </div>
+          <div v-if="configStatus" class="config-strip">
+            <span :class="{ ok: configStatus.llm.configured }">LLM {{ configStatus.llm.configured ? `已接通 · ${configStatus.llm.model}` : '未配置' }}</span>
+            <span :class="{ ok: configStatus.embedding.configured }">Embedding {{ configStatus.embedding.configured ? '已配置' : '未配置' }}</span>
+            <span :class="{ ok: configStatus.rerank.configured }">Rerank {{ configStatus.rerank.configured ? '已配置' : '未配置（可选）' }}</span>
+            <span :class="{ ok: configStatus.parent_visible_docs > 0 }">家长知识库 {{ configStatus.parent_visible_docs }} 篇</span>
+            <RouterLink to="/settings?tab=llm" class="config-link">配置模型</RouterLink>
+          </div>
           <div class="composer">
-            <input v-model="reply" type="text" placeholder="输入回复，家长端即时可见…" @keyup.enter="sendReply" />
+            <textarea v-model="reply" rows="2" placeholder="输入回复，家长端即时可见…（Ctrl+Enter 发送）" @keydown.ctrl.enter.prevent="sendReply" />
             <button class="btn primary" @click="sendReply">回复</button>
             <button class="ghost-btn" @click="closeThread">设为已解决</button>
           </div>
@@ -188,7 +294,30 @@ onMounted(loadThreads)
           <li>回复会即时同步到家长端会话。</li>
           <li>解决后点击「设为已解决」归档。</li>
         </ul>
+        <div class="quick-replies">
+          <div class="quick-head"><b>行业快捷术语</b><button class="add-quick" @click="openCreateQr">＋ 新增</button></div>
+          <div class="quick-list">
+            <button v-for="q in quickReplies" :key="q.id" class="quick-pill" :title="q.content" @click="insertQr(q)">
+              <span>{{ q.title || q.content.slice(0, 12) }}</span><i @click.stop="openEditQr(q)">编辑</i><i @click.stop="removeQr(q)">×</i>
+            </button>
+          </div>
+        </div>
       </aside>
+    </div>
+
+    <div v-if="showQrForm" class="overlay" @click.self="showQrForm = false">
+      <div class="modal">
+        <h2>{{ editingQr ? '编辑快捷术语' : '新增快捷术语' }}</h2>
+        <div class="form-grid">
+          <label>术语标题<input v-model="qrForm.title" placeholder="如：请假流程" maxlength="64" /></label>
+          <label>分类<input v-model="qrForm.category" placeholder="如：教务 / 课时 / 活动" maxlength="32" /></label>
+          <label class="span2">术语内容<textarea v-model="qrForm.content" rows="5" placeholder="输入可直接发送给家长的完整话术…" /></label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showQrForm = false">取消</button>
+          <button class="btn primary" :disabled="qrSaving" @click="saveQr">{{ qrSaving ? '保存中…' : '保存' }}</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -246,7 +375,35 @@ onMounted(loadThreads)
 .composer input:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
 .ghost-btn { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 9px 16px; cursor: pointer; white-space: nowrap; }
 .profile h3 { font-size: 15px; margin: 0 0 10px; }
-.profile ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink-3); display: flex; flex-direction: column; gap: 8px; }
+.profile ul { margin: 0 0 12px; padding-left: 18px; font-size: 13px; color: var(--ink-3); display: flex; flex-direction: column; gap: 8px; }
+.config-strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: #f8fafc; border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; }
+.config-strip span { font-size: 11.5px; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 999px; padding: 3px 9px; }
+.config-strip span.ok { color: #047857; background: #ecfdf5; border-color: #a7f3d0; }
+.config-link { margin-left: auto; font-size: 12px; color: var(--brand-strong); text-decoration: none; }
+.quick-replies { border: 1px dashed #c7d2fe; background: #f8faff; border-radius: 12px; padding: 8px 10px; }
+.quick-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.quick-head b { font-size: 12.5px; color: #3730a3; }
+.add-quick { border: none; background: none; color: #4338ca; font-size: 12px; cursor: pointer; }
+.quick-list { display: flex; flex-wrap: wrap; gap: 6px; max-height: 94px; overflow: auto; }
+.quick-pill { border: 1px solid #c7d2fe; background: #eef2ff; color: #3730a3; border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+.quick-pill:hover { background: #e0e7ff; }
+.quick-pill i { font-style: normal; font-size: 10.5px; color: #6366f1; }
+.quick-pill i:last-child { color: #b91c1c; font-size: 13px; }
+.composer { display: flex; gap: 10px; align-items: flex-end; }
+.composer textarea { flex: 1; border: 1px solid var(--line); border-radius: 14px; padding: 10px 14px; font-size: 14px; outline: none; resize: vertical; min-height: 44px; font-family: inherit; }
+.composer textarea:focus { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15); }
+.overlay { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
+.modal { background: #fff; border-radius: 18px; padding: 22px; width: min(560px, 100%); box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25); }
+.modal h2 { font-size: 16px; margin: 0 0 14px; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form-grid label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: #475569; }
+.form-grid .span2 { grid-column: span 2; }
+.form-grid input, .form-grid textarea { border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; font-size: 13.5px; outline: none; font-family: inherit; }
+.form-grid textarea { resize: vertical; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.btn { padding: 8px 16px; border-radius: 10px; border: 1px solid var(--line); cursor: pointer; font-size: 13px; }
+.btn.primary { background: linear-gradient(135deg, #6366f1, #06b6d4); color: #fff; border-color: transparent; font-weight: 600; }
+.btn.ghost { background: #fff; color: var(--ink-2); }
 .empty { color: var(--ink-3); text-align: center; padding: 40px 0; }
 @media (max-width: 1100px) { .cols { grid-template-columns: 250px 1fr; } .profile { display: none; } }
 </style>

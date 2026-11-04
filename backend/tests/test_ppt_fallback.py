@@ -110,6 +110,57 @@ def test_ensure_spec_lock_adds_typography(tmp_path):
     assert "## typography" in text and "- title:" in text and "- body:" in text
 
 
+def test_resolve_project_does_not_cross_conversations(tmp_path):
+    """串任务根因：build 路径缺失时只能在同一会话内回退，不能抓别的会话项目。"""
+    ns = _load_oneshot_funcs("_resolve_project")
+    root = tmp_path / "skill"
+    ns["SKILL_ROOT"] = root
+    # 另一个会话里的同名项目最新，旧实现会误抓它
+    other = root / "conversations" / "conv_bbbbbbbbbbbb" / "projects" / "demo"
+    (other / "svg_output").mkdir(parents=True)
+    (other / "svg_output" / "01_old.svg").write_text("<svg/>", encoding="utf-8")
+    # 当前会话没有该项目 → 不应回退到 other
+    current = root / "conversations" / "conv_aaaaaaaaaaaa" / "projects" / "demo"
+    assert ns["_resolve_project"](current) == current
+    # 当前会话有该项目 → 回退到当前会话
+    (current / "svg_output").mkdir(parents=True)
+    (current / "svg_output" / "01_new.svg").write_text("<svg/>", encoding="utf-8")
+    assert ns["_resolve_project"](current) == current
+
+
+def test_build_exports_even_when_qc_errors_remain(tmp_path):
+    """导出兜底：门禁仍有非阻断 error 时也要尝试出片，避免用户反复「继续修复」却拿不到文件。"""
+    import os
+
+    ns = _load_oneshot_funcs("cmd_build", "_qc_errors_only", "_tail")
+    proj = tmp_path / "p"
+    (proj / "svg_output").mkdir(parents=True)
+    pptx = proj / "deck.pptx"
+    ns.update({
+        "os": os,
+        "SCRIPTS": tmp_path / "scripts",
+        "_resolve_project": lambda p: p,
+        "_normalize_svg_order": lambda p: None,
+        "_repair_pass": lambda p: None,
+        "_print_pages": lambda p: None,
+        "_newest_pptx": lambda p: pptx,
+    })
+    calls = {"n": 0}
+
+    def _run(_args):
+        calls["n"] += 1
+        if calls["n"] <= 6:  # 首次 + 5 轮复检都失败
+            return 1, "[ERROR] text overflow"
+        pptx.write_bytes(b"PK\x03\x04")
+        return 0, "exported"
+
+    ns["_run"] = _run
+    import argparse
+
+    assert ns["cmd_build"](argparse.Namespace(project=str(proj))) == 0
+    assert calls["n"] == 7  # 6 次质检 + 1 次导出
+
+
 def test_sync_ppt_adapter_updates_bundles(tmp_path, monkeypatch):
     from app.core.config import get_settings
     from app.services import skill_bundle

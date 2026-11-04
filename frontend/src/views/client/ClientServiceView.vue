@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 
 import {
   parentChat,
@@ -16,6 +16,7 @@ const sending = ref(false)
 const error = ref('')
 const escalatedNote = ref('')
 const threadEl = ref<HTMLElement | null>(null)
+let pollTimer: number | undefined
 
 const QUICK_ASK = ['这学期有哪些课？', '怎么请假？', '课时还剩多少去哪查？', '校区最近有什么活动？']
 
@@ -46,6 +47,27 @@ async function restore() {
     await scrollBottom()
   } catch {
     localStorage.removeItem(THREAD_KEY) // 会话已清理/无权访问：静默开新会话
+    thread.value = null
+    items.value = []
+  }
+}
+
+/** 轮询同步：教师回复 / 会话状态变化无需刷新页面即可看到。 */
+async function syncMessages() {
+  const tid = thread.value?.id || localStorage.getItem(THREAD_KEY)
+  if (!tid || sending.value) return
+  try {
+    const r = await parentMessages(tid)
+    thread.value = r.thread
+    items.value = r.items
+    if (r.thread.status === 'escalated' && !escalatedNote.value) {
+      escalatedNote.value = '已转接人工老师，老师回复后会同步到本页。'
+    }
+    await scrollBottom()
+  } catch {
+    // 403 通常来自旧设备/旧账号残留的 thread_id：清掉，避免持续报错
+    localStorage.removeItem(THREAD_KEY)
+    thread.value = null
   }
 }
 
@@ -64,7 +86,19 @@ async function sendText(text: string) {
   input.value = ''
   await scrollBottom()
   try {
-    const r = await parentChat(t, { thread_id: thread.value?.id, anon_key: anonKey() })
+    let r
+    try {
+      r = await parentChat(t, { thread_id: thread.value?.id, anon_key: anonKey() })
+    } catch (e: any) {
+      // 旧 thread_id 不属于当前身份（常见于换账号/清缓存后残留）：清掉并重开一条
+      if (e?.response?.status === 403) {
+        localStorage.removeItem(THREAD_KEY)
+        thread.value = null
+        r = await parentChat(t, { anon_key: anonKey() })
+      } else {
+        throw e
+      }
+    }
     thread.value = r.thread
     saveThreadId(r.thread.id)
     if (r.escalated || r.kind === 'smalltalk' || r.answer) {
@@ -114,7 +148,14 @@ function fmtTime(iso: string | null): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-onMounted(restore)
+onMounted(async () => {
+  await restore()
+  pollTimer = window.setInterval(() => { void syncMessages() }, 5000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) window.clearInterval(pollTimer)
+})
 </script>
 
 <template>

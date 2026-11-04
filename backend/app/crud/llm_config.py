@@ -7,7 +7,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.secretbox import decrypt_secret, encrypt_secret
-from app.models.llm_config import LLM_MODULES, TeacherLLMConfig, TeacherModuleModel
+from app.models.llm_config import LLM_MODULES, SystemParentLLMConfig, TeacherLLMConfig, TeacherModuleModel
 
 
 @dataclass
@@ -194,6 +194,62 @@ def resolve(db: Session, owner_id: uuid.UUID, module: str) -> ResolvedLLM | None
             api_key=settings.LLM_API_KEY.strip(),
             model=settings.LLM_MODEL,
             # 系统级 embedding：.env 配了则 RAG 直接可用，否则沿用教师自配
+            embed_model=(settings.LLM_EMBED_MODEL or "").strip() or None,
+            config_id=None,
+            config_name="系统默认",
+        )
+    return None
+
+
+# ---------------- 家长客服共享对话模型（系统级，管理员） ----------------
+
+
+def get_system_parent_llm(db):
+    from app.models.llm_config import SystemParentLLMConfig
+    return db.scalar(select(SystemParentLLMConfig).limit(1))
+
+
+def set_system_parent_llm(db, config_id):
+    from app.models.llm_config import SystemParentLLMConfig
+    row = get_system_parent_llm(db)
+    if row is None:
+        row = SystemParentLLMConfig(config_id=config_id)
+        db.add(row)
+    else:
+        row.config_id = config_id
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_system_parent_llm(db):
+    from app.models.llm_config import SystemParentLLMConfig
+    row = get_system_parent_llm(db)
+    if row is not None:
+        db.delete(row)
+        db.commit()
+
+
+def resolve_parent_llm(db):
+    from app.core.config import get_settings
+    row = get_system_parent_llm(db)
+    if row is not None and row.config_id is not None:
+        cfg = get_config(db, row.config_id)
+        if cfg is not None:
+            return ResolvedLLM(
+                base_url=cfg.base_url,
+                api_key=decrypt_secret(cfg.api_key_enc),
+                model=cfg.model,
+                embed_model=cfg.embed_model,
+                config_id=cfg.id,
+                config_name=cfg.name,
+            )
+    settings = get_settings()
+    if (settings.LLM_API_KEY or "").strip():
+        return ResolvedLLM(
+            base_url=_normalize_base_url(settings.LLM_BASE_URL or ""),
+            api_key=settings.LLM_API_KEY.strip(),
+            model=settings.LLM_MODEL,
             embed_model=(settings.LLM_EMBED_MODEL or "").strip() or None,
             config_id=None,
             config_name="系统默认",
