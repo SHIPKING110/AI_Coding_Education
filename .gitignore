@@ -19,6 +19,8 @@ dist/
 *.log
 backend/uploads/
 backend/media/
+uploads/
+backend/scripts/_tmp_probe.py
 
 # IDE / 系统
 .idea/
