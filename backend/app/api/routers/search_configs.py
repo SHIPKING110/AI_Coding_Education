@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import require_teacher_permission
 from app.core.database import get_db
+from app.core.ratelimit import enforce
 from app.crud import search_config as crud
 from app.models.user import User
 
@@ -86,9 +87,10 @@ def remove_search_config(
 @router.post("/test")
 def test_search_config(
     db: Session = Depends(get_db),
-    _: User = Depends(SETTING_PERM),
+    user: User = Depends(SETTING_PERM),
 ) -> dict:
     """连通性检查：用当前生效配置做一次最小搜索。"""
+    enforce(f"search_test:{user.id}", limit=1, window=5.0, message="检查过于频繁")
     resolved = crud.resolve_search(db)
     if resolved is None:
         return {"ok": False, "error": "尚未配置可用的联网搜索（Tavily）"}

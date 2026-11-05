@@ -266,7 +266,8 @@ const ADMIN_NAV = [
   { to: '/reports', label: '报告·总结', navKey: 'nav_reports', icon: 'M8 2v4M16 2v4M3 10h18M6 6h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zM8 14h8M8 18h5' },
   { to: '/evaluations', label: '学员评估', navKey: 'nav_evaluations', icon: 'M7 3h10a2 2 0 0 1 2 2v16H5V5a2 2 0 0 1 2-2zM8 8h8M8 12h8M8 16h5' },
   { to: '/agents', label: 'Agent 工作台', navKey: 'nav_agents', icon: 'M13 2 3 14h7l-1 8 10-12h-7l1-8z' },
-  { to: '/rag/overview', label: '后台管理', adminOnly: true, icon: 'M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20M8 7h8M8 11h8M8 15h5' },
+  { to: '/rag/overview', label: '后台管理', adminOnly: true, permAny: ['rag_overview_view', 'rag_assets_view', 'rag_routes_view', 'rag_eval_view', 'rag_traces_view', 'rag_runs_view', 'rag_sessions_view', 'rag_parent_sessions_view', 'rag_settings_view'], icon: 'M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20M8 7h8M8 11h8M8 15h5' },
+  { to: '/usage', label: '用量与成本', staffOnly: true, permAny: ['usage_view'], icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM12 6v12M15 9.5c0-1.4-1.3-2.5-3-2.5s-3 1.1-3 2.5 1.3 2 3 2.5 3 1.1 3 2.5-1.3 2.5-3 2.5-3-1.1-3-2.5' },
   { to: '/service', label: '教学服务', navKey: 'nav_service', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 13h5' },
   { to: '/assignments', label: 'AI 习题', navKey: 'nav_assignments', icon: 'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11M15 3h6v6' },
   { to: '/finance', label: '财务管理', icon: 'M3 3v18h18M7 14l4-4 4 4 5-6', perm: 'finance_view', navKey: 'nav_finance' },
@@ -285,6 +286,12 @@ const navItems = computed(() =>
       if (navKey && teacherPerms.value[navKey] !== true) return false
     }
     if ((item as { adminOnly?: boolean }).adminOnly && auth.user?.role !== 'admin') return false
+    if (
+      (item as { staffOnly?: boolean }).staffOnly &&
+      !['admin', 'staff'].includes(auth.user?.role || '')
+    ) {
+      return false
+    }
     return true
   }).sort((a, b) => {
     // 个性化设置的模块排序：nav_order 存 to 数组，未收录的沉底保持原相对顺序

@@ -24,8 +24,8 @@ def _iso(value) -> str | None:
     return value.isoformat() if value else None
 
 
-def _run_out(run: AgentRunTrace) -> dict:
-    return {
+def _run_out(run: AgentRunTrace, usage: dict | None = None) -> dict:
+    d = {
         "id": str(run.id),
         "run_id": run.run_id,
         "conversation_id": str(run.conversation_id) if run.conversation_id else None,
@@ -70,7 +70,16 @@ def _run_out(run: AgentRunTrace) -> dict:
         "error_message": run.error_message,
         "attributes": run.attributes or {},
         "created_at": _iso(run.created_at),
+        # Token/成本：默认取 run 表；若传入 usage（按 run_id 聚合）则覆盖为更准确的值
+        "cost_used": None,
+        "cost_known": False,
     }
+    if usage is not None:
+        d["input_tokens"] = int(usage.get("input_tokens") or 0)
+        d["output_tokens"] = int(usage.get("output_tokens") or 0)
+        d["cost_used"] = usage.get("cost")
+        d["cost_known"] = bool(usage.get("has_cost"))
+    return d
 
 
 def _span_out(span: AgentRunSpan) -> dict:
@@ -136,11 +145,13 @@ def list_runs(
         conversation_id=conv,
         since=since,
     )
+    items = result["items"]
+    usage = crud.run_usage_map(db, [x.run_id for x in items])
     return {
         "total": result["total"],
         "page": page,
         "page_size": page_size,
-        "items": [_run_out(x) for x in result["items"]],
+        "items": [_run_out(x, usage.get(x.run_id)) for x in items],
     }
 
 
@@ -149,7 +160,11 @@ def get_run(run_id: str, db: Session = Depends(get_db)) -> dict:
     run = crud.get_run(db, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="运行记录不存在")
-    return {"run": _run_out(run), "spans": [_span_out(s) for s in crud.list_spans(db, run_id)]}
+    usage = crud.run_usage_map(db, [run_id])
+    return {
+        "run": _run_out(run, usage.get(run_id)),
+        "spans": [_span_out(s) for s in crud.list_spans(db, run_id)],
+    }
 
 
 @router.get("/stats")
@@ -175,8 +190,10 @@ def get_session(conversation_id: str, db: Session = Depends(get_db)) -> dict:
     detail = crud.get_session_detail(db, conversation_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="会话不存在")
+    runs = detail["runs"]
+    usage = crud.run_usage_map(db, [r.run_id for r in runs])
     return {
         "conversation": detail["conversation"],
         "messages": detail["messages"],
-        "runs": [_run_out(r) for r in detail["runs"]],
+        "runs": [_run_out(r, usage.get(r.run_id)) for r in runs],
     }

@@ -8,6 +8,7 @@
 
 import json
 import re
+import time
 from typing import Any
 
 from app.core.config import get_settings
@@ -74,7 +75,7 @@ def _build_chat(base_url: str, api_key: str, model: str, temperature: float, tim
     key = (base_url or "", api_key or "", model or "", temperature, timeout, max_retries)
     client = _client_cache.get(key)
     if client is None:
-        client = ChatOpenAI(
+        kwargs = dict(
             model=model,
             api_key=api_key,
             base_url=base_url or None,
@@ -82,6 +83,12 @@ def _build_chat(base_url: str, api_key: str, model: str, temperature: float, tim
             timeout=timeout,
             max_retries=max_retries,
         )
+        try:
+            # 流式也拿 usage（OpenAI 兼容网关支持 stream_options.include_usage）；
+            # 老版本 langchain-openai 无此参数时降级为默认（usage 缺失则走记账估算）。
+            client = ChatOpenAI(**kwargs, stream_usage=True)
+        except TypeError:
+            client = ChatOpenAI(**kwargs)
         _client_cache[key] = client
     return client
 
@@ -119,19 +126,117 @@ def _usage_from_chunk(chunk) -> tuple[int, int]:
     return int(meta.get("input_tokens") or 0), int(meta.get("output_tokens") or 0)
 
 
+def _usage_from_response(resp) -> tuple[int, int, int]:
+    """从响应取 (输入, 输出, 缓存命中) tokens；网关不支持时返回 0（交给估算兜底）。"""
+    meta = getattr(resp, "usage_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return 0, 0, 0
+    details = meta.get("input_token_details") or {}
+    cached = int(details.get("cache_read") or 0) if isinstance(details, dict) else 0
+    return int(meta.get("input_tokens") or 0), int(meta.get("output_tokens") or 0), cached
+
+
+def _active_endpoint() -> tuple[str, str]:
+    """记账用的 (base_url, model)：优先当前请求的教师/系统解析结果。"""
+    resolved = _active_resolved()
+    if resolved is not None:
+        return resolved.base_url or "", resolved.model or ""
+    settings = get_settings()
+    return _normalized_base_url(settings.LLM_BASE_URL) or "", settings.LLM_MODEL or ""
+
+
+def _meter_chat(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int = 0,
+    prompt_text: str = "",
+    output_text: str = "",
+    output_chars: int = 0,
+    latency_ms: int = 0,
+    status: str = "ok",
+    base_url: str | None = None,
+    model: str | None = None,
+) -> None:
+    """写一笔 chat 记账：provider usage 优先；缺失时按字符估算并标注 estimated。
+
+    base_url/model 显式传入时优先使用（如「连通性检查」这类不依赖全局上下文的调用），
+    否则回退到当前上下文/全局 env——保证被调用模型的网关与名字能被价格表精确匹配。
+    """
+    from app.services import pricing, usage_meter
+
+    if base_url is None or model is None:
+        _bu, _model = _active_endpoint()
+        if base_url is None:
+            base_url = _bu
+        if model is None:
+            model = _model
+    source = "provider"
+    if input_tokens <= 0 and prompt_text:
+        input_tokens = pricing.estimate_tokens(prompt_text)
+        source = "estimated"
+    if output_tokens <= 0:
+        if output_text:
+            output_tokens = pricing.estimate_tokens(output_text)
+            source = "estimated"
+        elif output_chars > 0:
+            output_tokens = max(1, int(output_chars))
+            source = "estimated"
+    try:
+        usage_meter.record_chat(
+            model=model,
+            base_url=base_url,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+            source=source,
+            latency_ms=latency_ms,
+            status=status,
+        )
+    except Exception:  # noqa: BLE001 —— 记账失败绝不影响主链路
+        pass
+
+
+def _messages_text(messages: list) -> str:
+    parts: list[str] = []
+    for m in messages or []:
+        content = getattr(m, "content", m)
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content)
+        else:
+            parts.append(str(content))
+    return "\n".join(parts)
+
+
 def ping(resolved=None) -> str:
-    model = _build_chat(
-        (resolved.base_url if resolved else ""),
-        (resolved.api_key if resolved else get_settings().LLM_API_KEY),
-        (resolved.model if resolved else get_settings().LLM_MODEL),
-        0.0,
-        15,
-        0,
-    )
+    base_url = resolved.base_url if resolved else ""
+    api_key = resolved.api_key if resolved else get_settings().LLM_API_KEY
+    model_name = resolved.model if resolved else get_settings().LLM_MODEL
+    model = _build_chat(base_url, api_key, model_name, 0.0, 15, 0)
     from langchain_core.messages import HumanMessage
 
-    resp = model.invoke([HumanMessage(content="ping")])
+    # 记账端点显式使用本次实际调用的配置，确保价格表能按「网关 + 模型名」命中（不依赖全局上下文）
+    meter_base = base_url or _normalized_base_url(get_settings().LLM_BASE_URL)
+    t0 = time.monotonic()
+    try:
+        resp = model.invoke([HumanMessage(content="ping")])
+    except Exception:
+        # 连通性检查失败（多为连不上/鉴权失败）：未产生计费 token，不写记账行，避免污染「未定价」统计
+        raise
     text = resp.content if isinstance(resp.content, str) else str(resp.content)
+    it, ot, cached = _usage_from_response(resp)
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text="ping",
+        output_text=text,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+        base_url=meter_base,
+        model=model_name,
+    )
     return (text or "").strip()[:200] or "pong"
 
 
@@ -186,19 +291,37 @@ def friendly_llm_error(exc: BaseException) -> str:
 def _invoke(prompt: str) -> str:
     from langchain_core.messages import HumanMessage, SystemMessage
 
+    sys_text = (
+        "你是少儿编程培训机构的教务助手，负责撰写给家长看的课堂评价与课后反馈。"
+        "文风亲切、具体、有条理，突出孩子本节课的收获、亮点与可提升之处，避免空话套话。"
+        "只根据给定的信息撰写，不编造不存在的细节。"
+    )
+    t0 = time.monotonic()
     try:
         model = _chat_model()
-        sys_text = (
-            "你是少儿编程培训机构的教务助手，负责撰写给家长看的课堂评价与课后反馈。"
-            "文风亲切、具体、有条理，突出孩子本节课的收获、亮点与可提升之处，避免空话套话。"
-            "只根据给定的信息撰写，不编造不存在的细节。"
-        )
         resp = model.invoke([SystemMessage(content=sys_text), HumanMessage(content=prompt)])
     except LLMConfigError:
         raise
     except Exception as e:  # noqa: BLE001 —— 超时/认证/限流/断网统一转中文提示
+        _meter_chat(
+            input_tokens=0,
+            output_tokens=0,
+            prompt_text=sys_text + prompt,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            status="error",
+        )
         raise LLMConfigError(friendly_llm_error(e)) from e
-    return (resp.content or "").strip()
+    text = (resp.content or "").strip()
+    it, ot, cached = _usage_from_response(resp)
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text=sys_text + prompt,
+        output_text=text,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+    )
+    return text
 
 
 def invoke_text(system: str, prompt: str, *, temperature: float = 0.0, timeout: int = 60) -> str:
@@ -225,6 +348,7 @@ def invoke_text(system: str, prompt: str, *, temperature: float = 0.0, timeout: 
     from app.services import agent_ops
 
     model_name, provider = _model_info()
+    t0 = time.monotonic()
     with agent_ops.span(span_type="model", name="model.invoke_text") as sp:
         try:
             resp = model.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
@@ -232,21 +356,37 @@ def invoke_text(system: str, prompt: str, *, temperature: float = 0.0, timeout: 
             raise
         except Exception as e:  # noqa: BLE001
             sp.end(status="error", error=str(e), model=model_name, provider=provider)
+            _meter_chat(
+                input_tokens=0,
+                output_tokens=0,
+                prompt_text=system + prompt,
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                status="error",
+            )
             raise LLMConfigError(friendly_llm_error(e)) from e
-        meta = getattr(resp, "usage_metadata", None) or {}
+        it, ot, cached = _usage_from_response(resp)
         sp.end(
             summary=f"prompt={len(prompt)} chars",
             model=model_name,
             provider=provider,
-            input_tokens=int(meta.get("input_tokens") or 0) if isinstance(meta, dict) else 0,
-            output_tokens=int(meta.get("output_tokens") or 0) if isinstance(meta, dict) else 0,
+            input_tokens=it,
+            output_tokens=ot,
         )
     content = getattr(resp, "content", "") or ""
     if isinstance(content, list):
         content = "".join(
             p.get("text", "") if isinstance(p, dict) else str(p) for p in content
         )
-    return str(content).strip()
+    text = str(content).strip()
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text=system + prompt,
+        output_text=text,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+    )
+    return text
 
 
 def stream_text(system: str, prompt: str, images: list[str] | None = None):
@@ -276,6 +416,7 @@ def stream_text(system: str, prompt: str, images: list[str] | None = None):
 
     model_name, provider = _model_info()
     sp = agent_ops.start_span(span_type="model", name="model.chat_stream")
+    t0 = time.monotonic()
     in_tokens = 0
     out_tokens = 0
     chars = 0
@@ -305,9 +446,24 @@ def stream_text(system: str, prompt: str, images: list[str] | None = None):
             input_tokens=in_tokens,
             output_tokens=out_tokens,
         )
+        _meter_chat(
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            prompt_text=system + prompt,
+            output_chars=chars,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+        )
     except Exception as e:  # noqa: BLE001
         sp.end(status="error", error=str(e), model=model_name, provider=provider,
                input_tokens=in_tokens, output_tokens=out_tokens)
+        _meter_chat(
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            prompt_text=system + prompt,
+            output_chars=chars,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            status="error",
+        )
         raise
 
 
@@ -680,12 +836,20 @@ def tool_step(messages: list, tools: list[dict]) -> tuple[str, list[dict]]:
 
     model = _plan_model()
     model_name, provider = _model_info()
+    t0 = time.monotonic()
     with agent_ops.span(span_type="model", name="model.tool_planner") as sp:
         bound = model.bind_tools(tools)
         try:
             resp = bound.invoke(messages)
         except Exception as e:  # noqa: BLE001
             sp.end(status="error", error=str(e), model=model_name, provider=provider)
+            _meter_chat(
+                input_tokens=0,
+                output_tokens=0,
+                prompt_text=_messages_text(messages),
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                status="error",
+            )
             raise
         content = resp.content if isinstance(resp.content, str) else ""
         calls: list[dict] = []
@@ -693,14 +857,22 @@ def tool_step(messages: list, tools: list[dict]) -> tuple[str, list[dict]]:
             calls.append(
                 {"id": tc.get("id") or "", "name": tc.get("name"), "arguments": tc.get("args") or {}}
             )
-        meta = getattr(resp, "usage_metadata", None) or {}
+        it, ot, cached = _usage_from_response(resp)
         sp.end(
             summary=f"tools={[c.get('name') for c in calls]}",
             model=model_name,
             provider=provider,
-            input_tokens=int(meta.get("input_tokens") or 0) if isinstance(meta, dict) else 0,
-            output_tokens=int(meta.get("output_tokens") or 0) if isinstance(meta, dict) else 0,
+            input_tokens=it,
+            output_tokens=ot,
         )
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text=_messages_text(messages),
+        output_text=content or f"[tool_calls]{[c.get('name') for c in calls]}",
+        latency_ms=int((time.monotonic() - t0) * 1000),
+    )
     return content, calls
 
 
@@ -1201,20 +1373,44 @@ def _invoke_fast(prompt: str) -> str:
     from langchain_openai import ChatOpenAI
 
     settings = get_settings()
-    base_url = (settings.LLM_BASE_URL or "").rstrip("/")
+    resolved = _active_resolved()
+    base_url = ((resolved.base_url if resolved else settings.LLM_BASE_URL) or "").rstrip("/")
     if base_url and not base_url.endswith("/v1"):
         base_url += "/v1"
+    model_name = (resolved.model if resolved else settings.LLM_MODEL) or ""
+    api_key = (resolved.api_key if resolved else settings.LLM_API_KEY) or ""
     model = ChatOpenAI(
-        model=settings.LLM_MODEL,
-        api_key=settings.LLM_API_KEY,
+        model=model_name,
+        api_key=api_key,
         base_url=base_url or None,
         temperature=0.7,
         timeout=25,
         max_retries=0,
     )
     sys_text = "你是少儿编程培训机构的家长会标题策划，擅长起有记忆点的中文标题。只按要求返回结果，不解释。"
-    resp = model.invoke([SystemMessage(content=sys_text), HumanMessage(content=prompt)])
-    return (resp.content or "").strip()
+    t0 = time.monotonic()
+    try:
+        resp = model.invoke([SystemMessage(content=sys_text), HumanMessage(content=prompt)])
+    except Exception:
+        _meter_chat(
+            input_tokens=0,
+            output_tokens=0,
+            prompt_text=sys_text + prompt,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            status="error",
+        )
+        raise
+    text = (resp.content or "").strip()
+    it, ot, cached = _usage_from_response(resp)
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text=sys_text + prompt,
+        output_text=text,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+    )
+    return text
 
 
 def refine_ppt_content(

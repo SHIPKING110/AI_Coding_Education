@@ -30,6 +30,8 @@ export interface AgentRun {
   input_tokens: number
   output_tokens: number
   cost_estimate: number
+  cost_used?: number | null
+  cost_known?: boolean
   ppt_target_pages: number
   ppt_current_pages: number
   ppt_aligned: boolean
@@ -145,6 +147,10 @@ export interface AgentSessionSummary {
   error_runs: number
   needs_rag: number
   rag_used: number
+  input_tokens: number
+  output_tokens: number
+  cost_estimate: number
+  cost_known: boolean
   intents: { intent: string; runs: number }[]
   last_run_at: string | null
 }

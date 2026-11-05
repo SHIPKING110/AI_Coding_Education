@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_roles
+from app.api.deps import get_current_user, require_roles, require_teacher_permission
 from app.core.database import SessionLocal, get_db
 from app.crud import knowledge as kb_crud
 from app.crud import rag_admin as crud
@@ -22,7 +22,6 @@ from app.services import rag as rag_service
 router = APIRouter(
     prefix="/admin/rag",
     tags=["rag-admin"],
-    dependencies=[Depends(require_roles(Role.ADMIN))],
 )
 
 _SESSION_FACTORY = SessionLocal
@@ -66,7 +65,7 @@ def _mark_progress(doc_id, stage: str, percent: int, detail: str = "") -> None:
         db.close()
 
 
-@router.get("/overview")
+@router.get("/overview", dependencies=[Depends(require_teacher_permission("rag_overview_view", staff_allowed=False))])
 def overview(db: Session = Depends(get_db)) -> dict:
     now = datetime.now(UTC)
     status_rows = db.execute(
@@ -128,7 +127,7 @@ def overview(db: Session = Depends(get_db)) -> dict:
     }
 
 
-@router.get("/documents")
+@router.get("/documents", dependencies=[Depends(require_teacher_permission("rag_assets_view", staff_allowed=False))])
 def list_documents(
     q: str | None = None,
     status_filter: str | None = Query(None, alias="status"),
@@ -167,7 +166,7 @@ def list_documents(
     }
 
 
-@router.get("/documents/{doc_id}")
+@router.get("/documents/{doc_id}", dependencies=[Depends(require_teacher_permission("rag_assets_view", staff_allowed=False))])
 def document_detail(doc_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     doc = kb_crud.get_document_any(db, doc_id=doc_id)
     if doc is None:
@@ -178,12 +177,12 @@ def document_detail(doc_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     return out
 
 
-@router.get("/documents/{doc_id}/chunks")
+@router.get("/documents/{doc_id}/chunks", dependencies=[Depends(require_teacher_permission("rag_assets_view", staff_allowed=False))])
 def document_chunks(doc_id: uuid.UUID, limit: int = 500) -> dict:
     return {"items": rag_service.get_document_chunks(doc_id, limit=limit)}
 
 
-@router.post("/documents/{doc_id}/reindex")
+@router.post("/documents/{doc_id}/reindex", dependencies=[Depends(require_teacher_permission("rag_assets_reindex", staff_allowed=False))])
 def reindex_document(
     doc_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -211,7 +210,7 @@ def reindex_document(
     return _doc_out(doc)
 
 
-@router.post("/documents/{doc_id}/toggle")
+@router.post("/documents/{doc_id}/toggle", dependencies=[Depends(require_teacher_permission("rag_assets_reindex", staff_allowed=False))])
 def toggle_document(
     doc_id: uuid.UUID,
     enabled: bool | None = None,
@@ -230,7 +229,7 @@ def toggle_document(
     return _doc_out(doc)
 
 
-@router.post("/documents/{doc_id}/parent-visible")
+@router.post("/documents/{doc_id}/parent-visible", dependencies=[Depends(require_teacher_permission("rag_assets_reindex", staff_allowed=False))])
 def toggle_parent_visible(
     doc_id: uuid.UUID,
     visible: bool | None = None,
@@ -254,7 +253,7 @@ def toggle_parent_visible(
     return _doc_out(doc)
 
 
-@router.delete("/documents/{doc_id}")
+@router.delete("/documents/{doc_id}", dependencies=[Depends(require_teacher_permission("rag_assets_delete", staff_allowed=False))])
 def delete_document(
     doc_id: uuid.UUID,
     db: Session = Depends(get_db),
@@ -280,7 +279,7 @@ def delete_document(
     return {"ok": True}
 
 
-@router.get("/knowledge-bases")
+@router.get("/knowledge-bases", dependencies=[Depends(require_teacher_permission("rag_assets_view", staff_allowed=False))])
 def knowledge_bases(db: Session = Depends(get_db)) -> dict:
     docs = list(db.scalars(select(KnowledgeDocument)).all())
     buckets = {
@@ -312,7 +311,7 @@ def knowledge_bases(db: Session = Depends(get_db)) -> dict:
     return {"items": out}
 
 
-@router.get("/collections")
+@router.get("/collections", dependencies=[Depends(require_teacher_permission("rag_assets_view", staff_allowed=False))])
 def collections() -> dict:
     try:
         return rag_service.collection_stats()
@@ -320,7 +319,7 @@ def collections() -> dict:
         raise HTTPException(status_code=500, detail=f"读取向量集合失败：{exc}")
 
 
-@router.post("/collections/sweep")
+@router.post("/collections/sweep", dependencies=[Depends(require_teacher_permission("rag_assets_sweep", staff_allowed=False))])
 def sweep_collections(
     dry_run: bool = False,
     db: Session = Depends(get_db),
@@ -334,7 +333,7 @@ def sweep_collections(
     return result
 
 
-@router.post("/maintenance/sync")
+@router.post("/maintenance/sync", dependencies=[Depends(require_teacher_permission("rag_assets_reindex", staff_allowed=False))])
 def trigger_sync(
     limit: int = 50,
     db: Session = Depends(get_db),
@@ -348,7 +347,7 @@ def trigger_sync(
     return result
 
 
-@router.get("/routes")
+@router.get("/routes", dependencies=[Depends(require_teacher_permission("rag_routes_view", staff_allowed=False))])
 def routes(db: Session = Depends(get_db)) -> dict:
     cfg = rag_settings.get_config(db)
     overrides = cfg.get("route_overrides") or {}
@@ -385,7 +384,7 @@ class RouteOverrideIn(BaseModel):
     rerank_oversample: int | None = None
 
 
-@router.put("/routes/{route_key}")
+@router.put("/routes/{route_key}", dependencies=[Depends(require_teacher_permission("rag_routes_save", staff_allowed=False))])
 def update_route_override(
     route_key: str, body: RouteOverrideIn,
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
@@ -419,7 +418,7 @@ class RouteTestIn(BaseModel):
     min_similarity: float | None = None
 
 
-@router.post("/routes/test")
+@router.post("/routes/test", dependencies=[Depends(require_teacher_permission("rag_routes_test", staff_allowed=False))])
 def route_test(body: RouteTestIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
     if not body.query.strip():
         raise HTTPException(status_code=422, detail="query 不能为空")
@@ -443,7 +442,7 @@ def route_test(body: RouteTestIn, db: Session = Depends(get_db), user: User = De
     }
 
 
-@router.get("/traces")
+@router.get("/traces", dependencies=[Depends(require_teacher_permission("rag_traces_view", staff_allowed=False))])
 def list_traces(
     domain: str | None = None,
     owner_id: uuid.UUID | None = None,
@@ -466,7 +465,7 @@ def list_traces(
     )
 
 
-@router.get("/traces/{trace_id}")
+@router.get("/traces/{trace_id}", dependencies=[Depends(require_teacher_permission("rag_traces_view", staff_allowed=False))])
 def trace_detail(trace_id: str, db: Session = Depends(get_db)) -> dict:
     row = crud.get_trace(db, trace_id)
     if row is None:
@@ -499,7 +498,7 @@ class TraceFeedbackIn(BaseModel):
     feedback: str
 
 
-@router.post("/traces/{trace_id}/feedback")
+@router.post("/traces/{trace_id}/feedback", dependencies=[Depends(require_teacher_permission("rag_traces_view", staff_allowed=False))])
 def trace_feedback(trace_id: str, body: TraceFeedbackIn, db: Session = Depends(get_db)) -> dict:
     ok = crud.set_trace_feedback(db, trace_id, body.feedback)
     if not ok:
@@ -507,7 +506,7 @@ def trace_feedback(trace_id: str, body: TraceFeedbackIn, db: Session = Depends(g
     return {"ok": True}
 
 
-@router.post("/maintenance/cleanup-traces")
+@router.post("/maintenance/cleanup-traces", dependencies=[Depends(require_teacher_permission("rag_traces_view", staff_allowed=False))])
 def cleanup_traces(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     result = rag_trace.cleanup_expired()
     try:
@@ -518,7 +517,7 @@ def cleanup_traces(user: User = Depends(get_current_user), db: Session = Depends
     return result
 
 
-@router.get("/parent-sessions")
+@router.get("/parent-sessions", dependencies=[Depends(require_teacher_permission("rag_parent_sessions_view", staff_allowed=False))])
 def list_parent_sessions(
     page: int = 1,
     page_size: int = 20,
@@ -530,7 +529,7 @@ def list_parent_sessions(
     return crud.list_parent_sessions(db, page=page, page_size=page_size, status=status, risk=risk, days=days)
 
 
-@router.get("/parent-sessions/{thread_id}")
+@router.get("/parent-sessions/{thread_id}", dependencies=[Depends(require_teacher_permission("rag_parent_sessions_view", staff_allowed=False))])
 def parent_session_detail(thread_id: str, db: Session = Depends(get_db)) -> dict:
     detail = crud.get_parent_session_detail(db, thread_id)
     if detail is None:
@@ -538,7 +537,7 @@ def parent_session_detail(thread_id: str, db: Session = Depends(get_db)) -> dict
     return detail
 
 
-@router.get("/config")
+@router.get("/config", dependencies=[Depends(require_teacher_permission("rag_settings_view", staff_allowed=False))])
 def get_config(db: Session = Depends(get_db)) -> dict:
     return {"config": rag_settings.get_config(db, force=True), "defaults": rag_settings.DEFAULTS}
 
@@ -548,18 +547,18 @@ class ConfigIn(BaseModel):
     note: str = ""
 
 
-@router.put("/config")
+@router.put("/config", dependencies=[Depends(require_teacher_permission("rag_settings_save", staff_allowed=False))])
 def update_config(body: dict = Body(...), db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
     result = rag_settings.update_config(db, body, operator_id=user.id)
     return result
 
 
-@router.get("/config/versions")
+@router.get("/config/versions", dependencies=[Depends(require_teacher_permission("rag_settings_view", staff_allowed=False))])
 def config_versions(db: Session = Depends(get_db)) -> dict:
     return {"items": rag_settings.list_versions(db)}
 
 
-@router.post("/config/rollback/{version}")
+@router.post("/config/rollback/{version}", dependencies=[Depends(require_teacher_permission("rag_settings_save", staff_allowed=False))])
 def rollback_config(version: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
     try:
         return rag_settings.rollback_config(db, version, operator_id=user.id)
@@ -567,7 +566,7 @@ def rollback_config(version: int, db: Session = Depends(get_db), user: User = De
         raise HTTPException(status_code=404, detail=str(exc))
 
 
-@router.get("/audit")
+@router.get("/audit", dependencies=[Depends(require_teacher_permission("rag_settings_view", staff_allowed=False))])
 def audit_log(limit: int = 100, db: Session = Depends(get_db)) -> dict:
     return {"items": crud.list_audit(db, limit=limit)}
 
@@ -581,12 +580,12 @@ class EvalSetIn(BaseModel):
     owner_id: uuid.UUID | None = None
 
 
-@router.get("/eval/sets")
+@router.get("/eval/sets", dependencies=[Depends(require_teacher_permission("rag_eval_view", staff_allowed=False))])
 def list_eval_sets(db: Session = Depends(get_db)) -> dict:
     return {"items": [crud.eval_set_to_dict(x) for x in crud.list_eval_sets(db)]}
 
 
-@router.post("/eval/sets")
+@router.post("/eval/sets", dependencies=[Depends(require_teacher_permission("rag_eval_set_create", staff_allowed=False))])
 def create_eval_set(body: EvalSetIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
     row = crud.create_eval_set(
         db, name=body.name, description=body.description, domain=body.domain,
@@ -596,7 +595,7 @@ def create_eval_set(body: EvalSetIn, db: Session = Depends(get_db), user: User =
     return crud.eval_set_to_dict(row)
 
 
-@router.delete("/eval/sets/{set_id}")
+@router.delete("/eval/sets/{set_id}", dependencies=[Depends(require_teacher_permission("rag_eval_set_create", staff_allowed=False))])
 def delete_eval_set(set_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
     ok = crud.delete_eval_set(db, set_id)
     if not ok:
@@ -616,14 +615,14 @@ class EvalCaseIn(BaseModel):
     source: str = "manual"
 
 
-@router.get("/eval/sets/{set_id}/cases")
+@router.get("/eval/sets/{set_id}/cases", dependencies=[Depends(require_teacher_permission("rag_eval_view", staff_allowed=False))])
 def list_eval_cases(set_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     if crud.get_eval_set(db, set_id) is None:
         raise HTTPException(status_code=404, detail="评测集不存在")
     return {"items": [crud.eval_case_to_dict(x) for x in crud.list_eval_cases(db, set_id)]}
 
 
-@router.post("/eval/sets/{set_id}/cases")
+@router.post("/eval/sets/{set_id}/cases", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
 def add_eval_case(set_id: uuid.UUID, body: EvalCaseIn, db: Session = Depends(get_db)) -> dict:
     if crud.get_eval_set(db, set_id) is None:
         raise HTTPException(status_code=404, detail="评测集不存在")
@@ -640,7 +639,7 @@ class EvalCaseBulkIn(BaseModel):
     cases: list[EvalCaseIn]
 
 
-@router.post("/eval/sets/{set_id}/cases/bulk")
+@router.post("/eval/sets/{set_id}/cases/bulk", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
 def add_eval_cases(set_id: uuid.UUID, body: EvalCaseBulkIn, db: Session = Depends(get_db)) -> dict:
     if crud.get_eval_set(db, set_id) is None:
         raise HTTPException(status_code=404, detail="评测集不存在")
@@ -656,7 +655,7 @@ def add_eval_cases(set_id: uuid.UUID, body: EvalCaseBulkIn, db: Session = Depend
     return {"created": len(out), "items": out}
 
 
-@router.delete("/eval/cases/{case_id}")
+@router.delete("/eval/cases/{case_id}", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
 def delete_eval_case(case_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     ok = crud.delete_eval_case(db, case_id)
     if not ok:
@@ -670,7 +669,7 @@ class GenerateCasesIn(BaseModel):
     use_llm: bool = False
 
 
-@router.post("/eval/sets/{set_id}/generate")
+@router.post("/eval/sets/{set_id}/generate", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
 def generate_eval_cases(set_id: uuid.UUID, body: GenerateCasesIn, db: Session = Depends(get_db)) -> dict:
     es = crud.get_eval_set(db, set_id)
     if es is None:
@@ -688,7 +687,7 @@ class EvalRunIn(BaseModel):
     answer_eval: bool = False
 
 
-@router.post("/eval/sets/{set_id}/runs")
+@router.post("/eval/sets/{set_id}/runs", dependencies=[Depends(require_teacher_permission("rag_eval_view", staff_allowed=False))])
 def create_eval_run(set_id: uuid.UUID, body: EvalRunIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
     es = crud.get_eval_set(db, set_id)
     if es is None:
@@ -713,12 +712,12 @@ def create_eval_run(set_id: uuid.UUID, body: EvalRunIn, db: Session = Depends(ge
     return crud.eval_run_to_dict(run)
 
 
-@router.get("/eval/runs")
+@router.get("/eval/runs", dependencies=[Depends(require_teacher_permission("rag_eval_view", staff_allowed=False))])
 def list_eval_runs(set_id: uuid.UUID | None = None, limit: int = 30, db: Session = Depends(get_db)) -> dict:
     return {"items": [crud.eval_run_to_dict(x) for x in crud.list_eval_runs(db, set_id=set_id, limit=limit)]}
 
 
-@router.get("/eval/runs/{run_id}")
+@router.get("/eval/runs/{run_id}", dependencies=[Depends(require_teacher_permission("rag_eval_view", staff_allowed=False))])
 def eval_run_detail(run_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     run = crud.get_eval_run(db, run_id)
     if run is None:

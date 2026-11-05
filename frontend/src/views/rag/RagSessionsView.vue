@@ -72,6 +72,25 @@ function changePage(delta: number) {
 function fmt(iso: string | null | undefined) {
   return iso ? iso.slice(0, 19).replace('T', ' ') : '-'
 }
+function tokens(v: number | null | undefined) {
+  return (v ?? 0).toLocaleString()
+}
+function money(v: number | null | undefined) {
+  if (v == null) return '—'
+  const n = Number(v)
+  return `¥${n.toFixed(n >= 1 ? 2 : 4)}`
+}
+
+const sessionUsage = computed(() => {
+  const runs = detail.value?.runs || []
+  let tin = 0, tout = 0, cost = 0, known = false
+  for (const r of runs) {
+    tin += r.input_tokens || 0
+    tout += r.output_tokens || 0
+    if (r.cost_known) { cost += r.cost_used || 0; known = true }
+  }
+  return { tin, tout, cost, known }
+})
 
 onMounted(load)
 </script>
@@ -102,7 +121,7 @@ onMounted(load)
     <section class="panel">
       <table class="table">
         <thead>
-          <tr><th>更新时间</th><th>会话</th><th>Agent</th><th>消息</th><th>轮次</th><th>成功/错误</th><th>RAG 使用</th><th>意图</th><th></th></tr>
+          <tr><th>更新时间</th><th>会话</th><th>Agent</th><th>消息</th><th>轮次</th><th>成功/错误</th><th>RAG 使用</th><th>Token/成本</th><th>意图</th><th></th></tr>
         </thead>
         <tbody>
           <tr v-for="s in items" :key="s.conversation_id">
@@ -113,10 +132,14 @@ onMounted(load)
             <td>{{ s.run_count }}</td>
             <td>{{ s.ok_runs }} / {{ s.error_runs }}</td>
             <td>{{ s.rag_used }} / {{ s.needs_rag }}</td>
+            <td class="mono">
+              {{ tokens((s.input_tokens || 0) + (s.output_tokens || 0)) }}
+              <div class="muted">{{ s.cost_known ? money(s.cost_estimate) : '未记账' }}</div>
+            </td>
             <td class="muted">{{ s.intents.map(i => i.intent).join(', ') || '-' }}</td>
             <td><button class="mini" @click="open(s)">详情</button></td>
           </tr>
-          <tr v-if="!items.length"><td colspan="9" class="muted">暂无会话</td></tr>
+          <tr v-if="!items.length"><td colspan="10" class="muted">暂无会话</td></tr>
         </tbody>
       </table>
       <div class="pager">
@@ -143,6 +166,8 @@ onMounted(load)
           <div><span>阶段</span><b>{{ detail.conversation.stage }}</b></div>
           <div><span>消息数</span><b>{{ detail.messages.length }}</b></div>
           <div><span>轮次</span><b>{{ detail.runs.length }}</b></div>
+          <div><span>Token 合计</span><b>{{ tokens(sessionUsage.tin) }} 入 / {{ tokens(sessionUsage.tout) }} 出</b></div>
+          <div><span>成本合计</span><b>{{ sessionUsage.known ? money(sessionUsage.cost) : '未记账' }}</b></div>
         </div>
 
         <div class="panel-head"><h3>消息时间线</h3></div>
@@ -164,6 +189,7 @@ onMounted(load)
             <span class="muted">{{ r.task_kind }}</span>
             <span class="tag" :class="r.status === 'ok' ? 'ok' : 'bad'">{{ r.status }}</span>
             <span class="muted">{{ r.latency_ms }} ms</span>
+            <span class="muted">{{ tokens((r.input_tokens || 0) + (r.output_tokens || 0)) }} tok · {{ r.cost_known ? money(r.cost_used) : '—' }}</span>
           </button>
         </div>
 
@@ -174,6 +200,8 @@ onMounted(load)
             <div><span>RAG 决策</span><b>{{ selectedRun.run.rag_decision }}</b></div>
             <div><span>状态</span><b>{{ selectedRun.run.status }}</b></div>
             <div><span>耗时</span><b>{{ selectedRun.run.latency_ms }} ms</b></div>
+            <div><span>Token</span><b>{{ tokens(selectedRun.run.input_tokens) }} 入 / {{ tokens(selectedRun.run.output_tokens) }} 出</b></div>
+            <div><span>成本</span><b>{{ selectedRun.run.cost_known ? money(selectedRun.run.cost_used) : '未记账' }}</b></div>
           </div>
           <div class="panel-head"><h3>Spans</h3></div>
           <div class="span-list">
@@ -181,6 +209,7 @@ onMounted(load)
               <span class="tag">{{ s.span_type }}</span>
               <strong>{{ s.name }}</strong>
               <span class="muted">{{ s.latency_ms }} ms · {{ s.status }}</span>
+              <span v-if="(s.input_tokens || 0) + (s.output_tokens || 0) > 0" class="muted">{{ tokens(s.input_tokens) }}/{{ tokens(s.output_tokens) }} tok</span>
               <p v-if="s.summary" class="muted">{{ s.summary }}</p>
             </div>
             <div v-if="!selectedRun.spans.length" class="muted">无 span</div>

@@ -73,6 +73,12 @@ from app.models.retrieval_config import (
 )
 from app.models.schedule import Attendance, AttendanceStatus, Schedule, ScheduleStatus
 from app.models.trial import Invitation, InvitationStatus
+from app.models.usage import (
+    LLMModelPrice,
+    LLMUsageEvent,
+    LLMUsageMonthly,
+    LLMUsageReconciliation,
+)
 from app.models.user import Role, User, UserStatus
 
 __all__ = [
@@ -149,6 +155,10 @@ __all__ = [
     "Subject",
     "Submission",
     "SubmissionStatus",
+    "LLMModelPrice",
+    "LLMUsageEvent",
+    "LLMUsageMonthly",
+    "LLMUsageReconciliation",
     "User",
     "UserStatus",
 ]

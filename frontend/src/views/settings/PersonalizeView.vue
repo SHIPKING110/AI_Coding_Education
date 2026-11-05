@@ -39,6 +39,8 @@ const NAV_MODULES = [
   { to: '/reports', label: '报告·总结' },
   { to: '/evaluations', label: '学员评估' },
   { to: '/agents', label: 'Agent 工作台' },
+  { to: '/rag/overview', label: '后台管理' },
+  { to: '/usage', label: '用量与成本' },
   { to: '/service', label: '教学服务' },
   { to: '/assignments', label: 'AI 习题' },
   { to: '/finance', label: '财务管理' },

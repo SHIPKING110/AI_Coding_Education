@@ -71,6 +71,28 @@ class PermissionUpdate(BaseModel):
     nav_assignments: bool | None = None
     nav_finance: bool | None = None
     nav_settings: bool | None = None
+    nav_service: bool | None = None
+    rag_overview_view: bool | None = None
+    rag_assets_view: bool | None = None
+    rag_assets_reindex: bool | None = None
+    rag_assets_delete: bool | None = None
+    rag_assets_sweep: bool | None = None
+    rag_routes_view: bool | None = None
+    rag_routes_save: bool | None = None
+    rag_routes_test: bool | None = None
+    rag_eval_view: bool | None = None
+    rag_eval_set_create: bool | None = None
+    rag_eval_case_add: bool | None = None
+    rag_traces_view: bool | None = None
+    rag_runs_view: bool | None = None
+    rag_sessions_view: bool | None = None
+    rag_parent_sessions_view: bool | None = None
+    rag_settings_view: bool | None = None
+    rag_settings_save: bool | None = None
+    usage_view: bool | None = None
+    usage_price_create: bool | None = None
+    usage_budget_save: bool | None = None
+    usage_recon_upsert: bool | None = None
 
 
 def _row_out(teacher: User, row: TeacherPermission | None) -> dict:

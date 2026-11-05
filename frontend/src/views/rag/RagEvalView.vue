@@ -3,8 +3,10 @@ import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import {
   addEvalCase,
+  addEvalCasesBulk,
   createEvalRun,
   createEvalSet,
   deleteEvalCase,
@@ -29,11 +31,137 @@ const results = ref<RagEvalResult[]>([])
 const loading = ref(false)
 const error = ref('')
 const msg = ref('')
+const pending = ref<{ title: string; message: string; run: () => void | Promise<void> } | null>(null)
+
+function ask(title: string, message: string, run: () => void | Promise<void>) {
+  pending.value = { title, message, run }
+}
+async function confirmPending() {
+  const p = pending.value
+  pending.value = null
+  if (p) await p.run()
+}
 
 const newSet = ref({ name: '', description: '', domain: 'agent_teacher', owner_id: '' })
 const newCase = ref({ query: '', relevant: '', gt_answer: '', notes: '', query_type: 'fact' })
 const runForm = ref({ top_k: 5, rerank: true, answer_eval: false })
 const genForm = ref({ doc_ids: '', count: 10, use_llm: false })
+// 批量导入
+const importText = ref('')
+const importSource = ref('import')
+const importMsg = ref('')
+const importError = ref('')
+const importLoading = ref(false)
+
+function parseImportText(text: string): Record<string, unknown>[] {
+  const t = text.trim()
+  if (!t) return []
+  // JSON 数组
+  if (t.startsWith('[')) {
+    const arr = JSON.parse(t)
+    if (!Array.isArray(arr)) throw new Error('JSON 顶层必须是数组')
+    return arr.map(normalizeImportRow)
+  }
+  // JSONL
+  if (t.includes('\n') && !t.includes('\nquery,')) {
+    // 尝试 JSONL：每行一个对象
+    const lines = t.split(/\n/).map((l) => l.trim()).filter(Boolean)
+    if (lines[0].startsWith('{')) {
+      return lines.map((l) => normalizeImportRow(JSON.parse(l)))
+    }
+  }
+  // CSV
+  return parseCsv(t)
+}
+
+function normalizeImportRow(row: any): Record<string, unknown> {
+  if (!row || typeof row !== 'object') throw new Error('行必须是对象')
+  const query = String(row.query ?? row['用户问题'] ?? '').trim()
+  if (!query) throw new Error('query（用户问题）不能为空')
+  const toArray = (v: any): string[] => {
+    if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean)
+    if (typeof v === 'string') return v.split(/[;；]/).map((x) => x.trim()).filter(Boolean)
+    return []
+  }
+  return {
+    query,
+    relevant: toArray(row.relevant ?? row['应命中文档'] ?? row['相关文档']),
+    gt_answer: String(row.gt_answer ?? row['标准答案'] ?? '').trim(),
+    gt_keywords: toArray(row.gt_keywords ?? row['关键词']),
+    query_type: String(row.query_type ?? 'fact').trim() || 'fact',
+    difficulty: String(row.difficulty ?? 'normal').trim() || 'normal',
+    notes: String(row.notes ?? row['备注'] ?? '').trim(),
+    source: String(row.source ?? importSource.value ?? 'import').trim() || 'import',
+  }
+}
+
+function parseCsv(text: string): Record<string, unknown>[] {
+  // 简易 CSV 解析（支持引号）
+  const lines = text.split(/\n/).filter((l) => l.trim())
+  if (lines.length < 2) throw new Error('CSV 至少需要表头 + 1 行数据')
+  const header = splitCsvLine(lines[0])
+  const rows: Record<string, unknown>[] = []
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitCsvLine(lines[i])
+    const obj: Record<string, string> = {}
+    header.forEach((h, idx) => (obj[h.trim()] = (cols[idx] ?? '').trim()))
+    rows.push(normalizeImportRow(obj))
+  }
+  return rows
+}
+
+function splitCsvLine(line: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let inQ = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === '"') {
+      if (inQ && line[i + 1] === '"') { cur += '"'; i++; continue }
+      inQ = !inQ
+      continue
+    }
+    if (ch === ',' && !inQ) { out.push(cur); cur = ''; continue }
+    cur += ch
+  }
+  out.push(cur)
+  return out
+}
+
+async function importCases() {
+  if (!activeSet.value) { importError.value = '请先选择评测集'; return }
+  importMsg.value = ''
+  importError.value = ''
+  let rows: Record<string, unknown>[] = []
+  try {
+    rows = parseImportText(importText.value)
+  } catch (e) {
+    importError.value = `解析失败：${e instanceof Error ? e.message : String(e)}`
+    return
+  }
+  if (!rows.length) { importError.value = '没有可导入的用例'; return }
+  if (rows.length > 500) { importError.value = '单次导入最多 500 条，请分批'; return }
+  importLoading.value = true
+  try {
+    const r = await addEvalCasesBulk(activeSet.value.id, { cases: rows })
+    importMsg.value = `已导入 ${r.created} 条用例`
+    importText.value = ''
+    cases.value = await listEvalCases(activeSet.value.id)
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : '导入失败'
+  } finally {
+    importLoading.value = false
+  }
+}
+
+function onImportFile(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = () => { importText.value = String(reader.result || '') }
+  reader.readAsText(file)
+  ;(e.target as HTMLInputElement).value = ''
+}
 
 const metricsOn = computed(() => activeRun.value?.metrics?.on || null)
 const metricsOff = computed(() => activeRun.value?.metrics?.off || null)
@@ -82,14 +210,15 @@ async function createSet() {
 }
 
 async function removeSet(s: RagEvalSet) {
-  if (!confirm(`删除评测集「${s.name}」及其用例？`)) return
-  try {
-    await deleteEvalSet(s.id)
-    if (activeSet.value?.id === s.id) activeSet.value = null
-    await loadSets()
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '删除失败'
-  }
+  ask('删除评测集', `删除评测集「${s.name}」及其全部用例？此操作不可恢复。`, async () => {
+    try {
+      await deleteEvalSet(s.id)
+      if (activeSet.value?.id === s.id) activeSet.value = null
+      await loadSets()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '删除失败'
+    }
+  })
 }
 
 async function addCase() {
@@ -111,13 +240,14 @@ async function addCase() {
 }
 
 async function removeCase(c: RagEvalCase) {
-  if (!confirm('删除该用例？')) return
-  try {
-    await deleteEvalCase(c.id)
-    if (activeSet.value) cases.value = await listEvalCases(activeSet.value.id)
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '删除失败'
-  }
+  ask('删除用例', `删除用例「${c.query.slice(0, 24)}${c.query.length > 24 ? '…' : ''}」？`, async () => {
+    try {
+      await deleteEvalCase(c.id)
+      if (activeSet.value) cases.value = await listEvalCases(activeSet.value.id)
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '删除失败'
+    }
+  })
 }
 
 async function startRun() {
@@ -217,6 +347,10 @@ onMounted(loadSets)
           <button class="btn" :disabled="!activeSet || !cases.length" @click="startRun">开始评测</button>
         </div>
         <div class="muted">评测会同时跑 rerank=off 与 rerank=on，输出对比与逐条 Bad Case。</div>
+        <div class="muted" style="margin-top:6px">
+          评测产生的 LLM 调用（生成回答 / 裁判打分）已归因到「用量与成本」模块 <b>rag_eval</b>，
+          <RouterLink class="doc-link" to="/usage">去用量与成本查看成本 ↗</RouterLink>
+        </div>
       </div>
     </section>
 
@@ -235,6 +369,32 @@ onMounted(loadSets)
         <label class="check"><input v-model="genForm.use_llm" type="checkbox" /> LLM 生成</label>
         <button class="btn ghost" :disabled="!genForm.doc_ids.trim()" @click="generateCases">生成候选用例</button>
       </div>
+      <p class="field-hint">
+        字段说明：<b>用户问题</b>=评测输入；<b>应命中文档</b>=相关文档标题（用于 hit@k / MRR，需与知识库标题一致）；
+        <b>标准答案</b>=可选，用于答案质量评测；<b>备注</b>=来源/预期 Bad Case。<b>分片生成</b>=从已有文档分片自动生成候选用例（辅助，不是导入字段）。
+      </p>
+
+      <div class="import-box">
+        <div class="panel-head" style="margin:0 0 8px">
+          <h3>批量导入用例</h3>
+          <a class="doc-link" href="/docs/rag-eval-import-format" target="_blank" rel="noopener">导入格式与合规说明 ↗</a>
+        </div>
+        <div class="case-form gen-form">
+          <label class="upload-btn">
+            <input type="file" accept=".jsonl,.json,.csv,.txt" hidden @change="onImportFile" />
+            选择文件（JSONL / JSON / CSV）
+          </label>
+          <input v-model="importSource" placeholder="批次号/来源（写入 source）" style="max-width:220px" />
+          <button class="btn" :disabled="importLoading || !importText.trim()" @click="importCases">
+            {{ importLoading ? '导入中…' : '导入数据' }}
+          </button>
+        </div>
+        <textarea v-model="importText" rows="5" class="import-area" placeholder='粘贴 JSONL（每行一个）/ JSON 数组 / CSV。示例：{"query":"如何办理退费？","relevant":["退费政策文档"],"gt_answer":"...","notes":"...","query_type":"policy"}' />
+        <p v-if="importError" class="error" style="margin:8px 0 0">{{ importError }}</p>
+        <p v-if="importMsg" class="ok" style="margin:8px 0 0">{{ importMsg }}</p>
+        <p class="muted" style="margin-top:8px">导入前请完成数据脱敏（详见格式说明）；单次上限 500 条，追加不覆盖。</p>
+      </div>
+
       <table class="table">
         <thead><tr><th>query</th><th>relevant</th><th>类型</th><th>来源</th><th></th></tr></thead>
         <tbody>
@@ -299,6 +459,15 @@ onMounted(loadSets)
       </table>
     </section>
   </div>
+  <ConfirmDialog
+    :visible="!!pending"
+    :title="pending?.title || ''"
+    :message="pending?.message || ''"
+    confirm-text="删除"
+    danger
+    @confirm="confirmPending"
+    @cancel="pending = null"
+  />
 </template>
 
 <style scoped>
@@ -334,5 +503,13 @@ onMounted(loadSets)
 .error { color: #b91c1c; background: #fef2f2; padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
 .ok { color: #047857; background: var(--success-soft); padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
 .ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.field-hint { margin: 8px 0 4px; font-size: 11.5px; color: var(--ink-3); line-height: 1.7; background: #f8fafc; border-radius: 8px; padding: 8px 10px; }
+.field-hint b { color: var(--ink-2); }
+.import-box { border: 1px dashed var(--line); border-radius: 12px; padding: 12px; margin: 10px 0 14px; background: var(--surface); }
+.import-box .panel-head h3 { font-size: 13.5px; }
+.import-area { width: 100%; margin-top: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; font-size: 12px; font-family: ui-monospace, Menlo, monospace; background: var(--surface); color: var(--ink); resize: vertical; }
+.upload-btn { padding: 7px 12px; border-radius: 9px; border: 1px solid var(--brand); background: var(--brand-soft); color: var(--brand-strong); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.doc-link { color: var(--brand-strong); font-size: 12px; text-decoration: none; font-weight: 600; }
+.doc-link:hover { text-decoration: underline; }
 @media (max-width: 1100px) { .two-col { grid-template-columns: 1fr; } .metrics { grid-template-columns: 1fr 1fr 1fr; } }
 </style>

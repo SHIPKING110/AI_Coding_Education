@@ -38,6 +38,7 @@ async def _knowledge_sync_sweeper() -> None:
     未变更的文档按内容哈希跳过（省 Token）；源文件丢失则清理向量防僵尸污染。
     间隔由 KNOWLEDGE_SYNC_INTERVAL 控制（秒，<=0 关闭）。
     """
+    import asyncio
     from asyncio import sleep as _sleep
 
     from app.services import rag as rag_svc
@@ -54,6 +55,33 @@ async def _knowledge_sync_sweeper() -> None:
             pass
         try:
             await _sleep(interval)
+        except Exception:
+            continue
+
+
+async def _usage_meter_sweeper() -> None:
+    """后台：每 6 小时检查月度预算；每天一次清理过期明细（先月度汇总再删，永久保留汇总）。"""
+    import asyncio
+    from datetime import datetime
+
+    from app.services import usage_meter
+
+    await sleep(90)  # 避开启动高峰
+    last_cleanup_day = ""
+    while True:
+        try:
+            await asyncio.to_thread(usage_meter.check_month_budget)
+        except Exception:
+            pass
+        today = datetime.now().date().isoformat()
+        if today != last_cleanup_day:
+            try:
+                await asyncio.to_thread(usage_meter.cleanup_expired)
+                last_cleanup_day = today
+            except Exception:
+                pass
+        try:
+            await sleep(6 * 3600)
         except Exception:
             continue
 
@@ -77,11 +105,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         pass
     task = asyncio.create_task(_order_expiry_sweeper())
     sync_task = asyncio.create_task(_knowledge_sync_sweeper())
+    usage_task = asyncio.create_task(_usage_meter_sweeper())
     try:
         yield
     finally:
         task.cancel()
         sync_task.cancel()
+        usage_task.cancel()
 
 app = FastAPI(
     title=settings.APP_NAME,

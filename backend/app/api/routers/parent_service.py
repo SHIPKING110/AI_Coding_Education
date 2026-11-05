@@ -883,10 +883,12 @@ def delete_parent_embedding_config(db: Session = Depends(get_db), user: User = D
 def test_parent_embedding_config(db: Session = Depends(get_db), user: User = Depends(_staff())) -> dict:
     import time
 
+    from app.core.ratelimit import enforce
     from app.crud import retrieval_config as ret_crud
 
     if user.role != Role.ADMIN.value:
         raise HTTPException(status_code=403, detail="仅管理员可配置家长客服共享模型")
+    enforce(f"parent_emb_test:{user.id}", limit=1, window=5.0, message="检查过于频繁")
     resolved = ret_crud.resolve_parent_embedding(db) or ret_crud.resolve_embedding(db)
     if resolved is None:
         return {"ok": False, "error": "尚未配置可用的 Embedding 模型"}

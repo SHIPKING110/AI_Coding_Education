@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { listRagRoutes, testRagRoute, updateRagRoute, type RagTrace } from '@/api/ragAdmin'
 
 const routes = ref<any[]>([])
@@ -18,6 +19,16 @@ const testForm = ref({
   min_similarity: '',
 })
 const testResult = ref<any>(null)
+const pending = ref<{ title: string; message: string; run: () => void | Promise<void> } | null>(null)
+
+function ask(title: string, message: string, run: () => void | Promise<void>) {
+  pending.value = { title, message, run }
+}
+async function confirmPending() {
+  const p = pending.value
+  pending.value = null
+  if (p) await p.run()
+}
 
 async function load() {
   loading.value = true
@@ -32,18 +43,20 @@ async function load() {
 }
 
 async function saveRoute(r: any) {
-  try {
-    await updateRagRoute(r.key, {
-      top_k: Number(r.effective.top_k),
-      min_similarity: Number(r.effective.min_similarity),
-      per_doc_cap: Number(r.effective.per_doc_cap),
-      rerank_oversample: Number(r.effective.rerank_oversample || 5),
-    })
-    error.value = ''
-    await load()
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '保存失败'
-  }
+  ask('保存路由配置', `确认保存「${r.name}」的检索参数？保存后新请求将立即使用。`, async () => {
+    try {
+      await updateRagRoute(r.key, {
+        top_k: Number(r.effective.top_k),
+        min_similarity: Number(r.effective.min_similarity),
+        per_doc_cap: Number(r.effective.per_doc_cap),
+        rerank_oversample: Number(r.effective.rerank_oversample || 5),
+      })
+      error.value = ''
+      await load()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '保存失败'
+    }
+  })
 }
 
 async function runTest() {
@@ -147,6 +160,14 @@ onMounted(load)
       </table>
     </section>
   </div>
+  <ConfirmDialog
+    :visible="!!pending"
+    :title="pending?.title || ''"
+    :message="pending?.message || ''"
+    confirm-text="保存"
+    @confirm="confirmPending"
+    @cancel="pending = null"
+  />
 </template>
 
 <style scoped>

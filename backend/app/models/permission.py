@@ -70,7 +70,28 @@ PERMISSION_KEYS: dict[str, str] = {
     "finance_salary": "财务管理-薪资核算（仅看自己）",
     "finance_salary_all": "财务管理-薪资核算（看全员）",
     "service_reply": "教学服务-查看与回复家长会话",
-    "nav_students": "导航可见-学员管理",
+    "rag_overview_view": "后台管理-总览-查看",
+    "rag_assets_view": "后台管理-知识资产-查看",
+    "rag_assets_reindex": "后台管理-知识资产-重建",
+    "rag_assets_delete": "后台管理-知识资产-删除",
+    "rag_assets_sweep": "后台管理-知识资产-清理僵尸向量",
+    "rag_routes_view": "后台管理-路由测试-查看",
+    "rag_routes_save": "后台管理-路由测试-保存",
+    "rag_routes_test": "后台管理-路由测试-运行测试",
+    "rag_eval_view": "后台管理-评测-查看",
+    "rag_eval_set_create": "后台管理-评测-新建评测集",
+    "rag_eval_case_add": "后台管理-评测-添加用例",
+    "rag_traces_view": "后台管理-检索追踪-查看",
+    "rag_runs_view": "后台管理-任务监控-查看",
+    "rag_sessions_view": "后台管理-会话观测-查看",
+    "rag_parent_sessions_view": "后台管理-家长会话-查看",
+    "rag_settings_view": "后台管理-设置-查看",
+    "rag_settings_save": "后台管理-设置-保存配置",
+    "usage_view": "用量与成本-查看",
+    "usage_price_create": "用量与成本-新增价格",
+    "usage_budget_save": "用量与成本-保存预算",
+    "usage_recon_upsert": "用量与成本-录入账单",
+
     "nav_invitations": "导航可见-招生邀约",
     "nav_classes": "导航可见-班级管理",
     "nav_teachers": "导航可见-教师管理",
@@ -124,6 +145,29 @@ KEY_DEFAULTS: dict[str, bool] = {
     "finance_salary": False,
     "finance_salary_all": False,
     "service_reply": True,
+    # 后台管理（RAG）细粒度权限：教师默认关闭（模块仅管理员/教务可见）
+    "rag_overview_view": False,
+    "rag_assets_view": False,
+    "rag_assets_reindex": False,
+    "rag_assets_delete": False,
+    "rag_assets_sweep": False,
+    "rag_routes_view": False,
+    "rag_routes_save": False,
+    "rag_routes_test": False,
+    "rag_eval_view": False,
+    "rag_eval_set_create": False,
+    "rag_eval_case_add": False,
+    "rag_traces_view": False,
+    "rag_runs_view": False,
+    "rag_sessions_view": False,
+    "rag_parent_sessions_view": False,
+    "rag_settings_view": False,
+    "rag_settings_save": False,
+    # 用量与成本细粒度权限
+    "usage_view": False,
+    "usage_price_create": False,
+    "usage_budget_save": False,
+    "usage_recon_upsert": False,
     "nav_students": True,
     "nav_invitations": True,
     "nav_classes": True,
@@ -197,6 +241,29 @@ class TeacherPermission(Base):
     nav_settings: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     nav_service: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     service_reply: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # 后台管理（RAG）细粒度权限
+    rag_overview_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_assets_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_assets_reindex: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_assets_delete: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_assets_sweep: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_routes_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_routes_save: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_routes_test: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_eval_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_eval_set_create: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_eval_case_add: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_traces_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_runs_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_sessions_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_parent_sessions_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_settings_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    rag_settings_save: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # 用量与成本细粒度权限
+    usage_view: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    usage_price_create: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    usage_budget_save: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    usage_recon_upsert: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

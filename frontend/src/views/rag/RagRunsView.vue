@@ -59,6 +59,14 @@ function pct(v: number | null | undefined) {
 function ms(v: number | null | undefined) {
   return v == null ? '-' : `${Math.round(v)} ms`
 }
+function tokens(v: number | null | undefined) {
+  return (v ?? 0).toLocaleString()
+}
+function money(v: number | null | undefined) {
+  if (v == null) return '—'
+  const n = Number(v)
+  return `¥${n.toFixed(n >= 1 ? 2 : 4)}`
+}
 function fmt(v: string | null | undefined) {
   return v ? v.slice(0, 19).replace('T', ' ') : '-'
 }
@@ -176,9 +184,10 @@ onMounted(load)
         <div class="card-sub">{{ pptDisplay.note }}</div>
       </div>
       <div class="card">
-        <div class="card-label">时延 / Token</div>
+        <div class="card-label">时延 / Token / 成本</div>
         <div class="card-value">{{ ms(stats.p95_latency_ms) }}</div>
-        <div class="card-sub">平均 {{ ms(stats.avg_latency_ms) }} · 输入 {{ stats.input_tokens }} · 输出 {{ stats.output_tokens }}</div>
+        <div class="card-sub">平均 {{ ms(stats.avg_latency_ms) }} · 输入 {{ tokens(stats.input_tokens) }} · 输出 {{ tokens(stats.output_tokens) }}</div>
+        <div class="card-sub">已计价成本 {{ money(stats.cost_estimate) }}</div>
       </div>
     </section>
 
@@ -271,7 +280,7 @@ onMounted(load)
       <table class="table">
         <thead>
           <tr>
-            <th>时间</th><th>意图</th><th>任务</th><th>RAG</th><th>RAG状态</th><th>模型/工具</th><th>PPT</th><th>时延</th><th>状态</th><th></th>
+            <th>时间</th><th>意图</th><th>任务</th><th>RAG</th><th>RAG状态</th><th>模型/工具</th><th>PPT</th><th>时延</th><th>Token/成本</th><th>状态</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -289,10 +298,14 @@ onMounted(load)
               <span v-else class="muted">-</span>
             </td>
             <td>{{ r.latency_ms }} ms</td>
+            <td class="mono">
+              {{ tokens((r.input_tokens || 0) + (r.output_tokens || 0)) }}
+              <div class="muted">{{ r.cost_known ? money(r.cost_used) : '未记账' }}</div>
+            </td>
             <td><span class="tag" :class="{ active: r.status === 'ok', danger: r.status === 'error' }">{{ r.status }}</span></td>
             <td><button class="link-btn" @click="openRun(r)">详情</button></td>
           </tr>
-          <tr v-if="!items.length"><td colspan="10" class="muted">暂无运行记录</td></tr>
+          <tr v-if="!items.length"><td colspan="11" class="muted">暂无运行记录</td></tr>
         </tbody>
       </table>
       <div class="pager">
@@ -314,6 +327,8 @@ onMounted(load)
           <div><span>RAG 决策</span><b>{{ decisionLabel(detail.run.rag_decision) }}</b></div>
           <div><span>会话</span><b class="mono">{{ detail.run.conversation_id || '-' }}</b></div>
           <div><span>任务</span><b>{{ detail.run.task_kind }}</b></div>
+          <div><span>Token</span><b>输入 {{ tokens(detail.run.input_tokens) }} · 输出 {{ tokens(detail.run.output_tokens) }}</b></div>
+          <div><span>成本</span><b>{{ detail.run.cost_known ? money(detail.run.cost_used) : '未记账（无用量事件）' }}</b></div>
           <div v-if="detail.run.task_kind === 'ppt'"><span>PPT 契约</span><b>{{ detail.run.ppt_current_pages }} / {{ detail.run.ppt_target_pages }} 页 · {{ detail.run.ppt_aligned ? '已对齐' : '未对齐' }}</b></div>
           <div v-if="detail.run.error_message"><span>错误</span><b class="error-text">{{ detail.run.error_message }}</b></div>
         </div>
@@ -324,6 +339,7 @@ onMounted(load)
               <b>{{ s.name }}</b>
               <span class="muted">{{ s.latency_ms }} ms</span>
               <span v-if="s.model" class="muted">{{ s.model }}</span>
+              <span v-if="(s.input_tokens || 0) + (s.output_tokens || 0) > 0" class="muted">{{ tokens(s.input_tokens) }}/{{ tokens(s.output_tokens) }} tok</span>
               <span class="tag" :class="{ active: s.status === 'ok', danger: s.status === 'error' }">{{ s.status }}</span>
             </div>
             <div v-if="s.summary" class="span-summary">{{ s.summary }}</div>

@@ -5,19 +5,26 @@ import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
 import { getAgentOpsStats, type AgentOpsStats } from '@/api/agentOps'
 import { getRagOverview, type RagOverview } from '@/api/ragAdmin'
+import { getUsageStats, type UsageStats } from '@/api/usage'
 
 const loading = ref(false)
 const error = ref('')
 const data = ref<RagOverview | null>(null)
 const ops = ref<AgentOpsStats | null>(null)
+const usage = ref<UsageStats | null>(null)
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [overview, stats] = await Promise.all([getRagOverview(), getAgentOpsStats(7)])
+    const [overview, stats, usageStats] = await Promise.all([
+      getRagOverview(),
+      getAgentOpsStats(7),
+      getUsageStats(7),
+    ])
     data.value = overview
     ops.value = stats
+    usage.value = usageStats
   } catch (e) {
     error.value = e instanceof Error ? e.message : '加载失败'
   } finally {
@@ -130,8 +137,10 @@ onMounted(load)
             <small>PPT / Skill / 工具类任务 · P50 {{ ms(ops.long_task_latency?.p50_ms) }}</small>
           </div>
           <div>
-            <span>Token / 成本</span><b>{{ (ops.input_tokens + ops.output_tokens).toLocaleString() }}</b>
-            <small>输入 {{ ops.input_tokens.toLocaleString() }} · 输出 {{ ops.output_tokens.toLocaleString() }} · ¥{{ ops.cost_estimate.toFixed(2) }}</small>
+            <span>Token / 成本（用量账本 7 天）</span>
+            <b>{{ usage ? (usage.input_tokens + usage.output_tokens).toLocaleString() : '-' }}</b>
+            <small v-if="usage">平台 ¥{{ usage.cost_platform.toFixed(2) }} · 教师 ¥{{ usage.cost_teacher.toFixed(2) }} · 估算占比 {{ pct(usage.estimated_ratio) }}</small>
+            <small v-else>用量账本暂无数据</small>
           </div>
         </div>
         <p class="metric-note">

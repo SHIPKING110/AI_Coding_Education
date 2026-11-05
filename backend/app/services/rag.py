@@ -376,18 +376,29 @@ def _is_batch_size_error(exc: Exception) -> bool:
     return batchish and sizeish
 
 
-def _embed_batch_remote(batch: list[str], client, _depth: int = 0) -> list[list[float]]:
+def _embed_batch_remote(batch: list[str], client, resolved=None, _depth: int = 0) -> list[list[float]]:
     """一批文本的 embedding。
 
     - 批大小/参数非法 → **二分拆批重试**（自适应各厂商限制，不写死条数）；
     - 限流/超时 → 指数退避重试；
     - 单条仍失败 → 上抛（交由上层 LLMConfigError 友好报错）。
+    - 成功/失败都记一笔 usage（估算型：OpenAIEmbeddings 不透出网关 usage）。
     """
+    from app.services import usage_meter
+
     delay = EMBED_BACKOFF_BASE
     last: Exception | None = None
     for attempt in range(EMBED_MAX_RETRY):
+        t0 = time.monotonic()
         try:
             vecs = client.embed_documents(batch)
+            usage_meter.record_embedding(
+                resolved,
+                texts=list(batch),
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                status="ok",
+                attempt=attempt + 1,
+            )
             return [[float(x) for x in v] for v in vecs]
         except Exception as e:  # noqa: BLE001
             last = e
@@ -395,10 +406,17 @@ def _embed_batch_remote(batch: list[str], client, _depth: int = 0) -> list[list[
             if _is_batch_size_error(e) and len(batch) > 1 and _depth < 8:
                 mid = len(batch) // 2
                 return (
-                    _embed_batch_remote(batch[:mid], client, _depth + 1)
-                    + _embed_batch_remote(batch[mid:], client, _depth + 1)
+                    _embed_batch_remote(batch[:mid], client, resolved, _depth + 1)
+                    + _embed_batch_remote(batch[mid:], client, resolved, _depth + 1)
                 )
             if attempt == EMBED_MAX_RETRY - 1 or not _is_retryable(e):
+                usage_meter.record_embedding(
+                    resolved,
+                    texts=list(batch),
+                    latency_ms=int((time.monotonic() - t0) * 1000),
+                    status="error",
+                    attempt=attempt + 1,
+                )
                 raise
             # 指数退避 + 抖动，避免并发重试打爆限流
             time.sleep(delay * (2 ** attempt) * (0.5 + random.random()))
@@ -428,9 +446,9 @@ def _embed_remote_concurrent(texts: list[str], resolved) -> list[list[float]]:
     client = _api_embeddings(resolved)
     out: list[list[float]] = []
     if len(batches) == 1:
-        return _embed_batch_remote(batches[0], client)
+        return _embed_batch_remote(batches[0], client, resolved)
     with ThreadPoolExecutor(max_workers=EMBED_CONCURRENCY) as ex:
-        for part in ex.map(lambda b: _embed_batch_remote(b, client), batches):
+        for part in ex.map(lambda b: _embed_batch_remote(b, client, resolved), batches):
             out.extend(part)
     return out
 
@@ -963,16 +981,25 @@ def _parse_rerank_results(data: dict) -> list:
     return []
 
 
-def rerank_documents(query: str, documents: list[str], resolved) -> tuple[list[int], list[float]]:
+def rerank_documents(
+    query: str,
+    documents: list[str],
+    resolved,
+    *,
+    owner_id=None,
+    platform: bool = False,
+) -> tuple[list[int], list[float]]:
     """调 rerank 模型，返回 (按相关度降序的原文下标, 对应相关度分数)。
 
     分数为 rerank 模型的 relevance_score（不同厂商量纲不同，仅用于排序/展示）。
-    失败抛异常由上层降级。
+    失败抛异常由上层降级。每次实际请求都记账（估算 tokens；教师自配个人成本 / 共享平台成本）。
     """
     if not documents:
         return [], []
+    from app.services import usage_meter
+
     if resolved.provider == "local":
-        # 本地 rerank 预留：走 sentence-transformers CrossEncoder
+        # 本地 rerank 预留：走 sentence-transformers CrossEncoder（本机无费用，不记账）
         from sentence_transformers import CrossEncoder
 
         model = CrossEncoder(resolved.model_path)
@@ -999,24 +1026,46 @@ def rerank_documents(query: str, documents: list[str], resolved) -> tuple[list[i
     tried: list[str] = []
     last: Exception | None = None
     data: dict | None = None
-    with httpx.Client(timeout=timeout_s) as client:
-        for url in _rerank_url_candidates(base):
-            tried.append(url)
-            try:
-                r = client.post(url, json=payload, headers=headers)
-                if r.status_code == 404:
-                    last = Exception("404")
-                    continue  # 路径/网关不对，试下一个
-                r.raise_for_status()
-                data = r.json()
-                break
-            except httpx.HTTPStatusError as e:
-                if e.response is not None and e.response.status_code == 404:
-                    last = e
-                    continue
-                raise
-        else:
-            raise last or Exception("rerank 端点未找到，已尝试：" + "；".join(tried))
+    t0 = time.monotonic()
+    try:
+        with httpx.Client(timeout=timeout_s) as client:
+            for url in _rerank_url_candidates(base):
+                tried.append(url)
+                try:
+                    r = client.post(url, json=payload, headers=headers)
+                    if r.status_code == 404:
+                        last = Exception("404")
+                        continue  # 路径/网关不对，试下一个
+                    r.raise_for_status()
+                    data = r.json()
+                    break
+                except httpx.HTTPStatusError as e:
+                    if e.response is not None and e.response.status_code == 404:
+                        last = e
+                        continue
+                    raise
+            else:
+                raise last or Exception("rerank 端点未找到，已尝试：" + "；".join(tried))
+    except Exception:
+        usage_meter.record_rerank(
+            resolved,
+            query=query,
+            documents=list(documents),
+            owner_id=owner_id,
+            platform=platform,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            status="error",
+        )
+        raise
+    usage_meter.record_rerank(
+        resolved,
+        query=query,
+        documents=list(documents),
+        owner_id=owner_id,
+        platform=platform,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+        status="ok",
+    )
     results = _parse_rerank_results(data or {})
     order = [int(x.get("index", i)) for i, x in enumerate(results)]
     scores = [float(x.get("relevance_score", x.get("score", 0.0)) or 0.0) for x in results]
@@ -1043,7 +1092,13 @@ def _apply_rerank(query: str, cands: list[dict], db, owner_id, *, parent_mode: b
         resolved = crud.resolve_parent_rerank(db) if parent_mode else crud.resolve_rerank(db, owner_id)
         if resolved is None:
             return cands, meta
-        order, scores = rerank_documents(query, [c["text"] for c in cands], resolved)
+        order, scores = rerank_documents(
+            query,
+            [c["text"] for c in cands],
+            resolved,
+            owner_id=None if parent_mode else owner_id,
+            platform=parent_mode,
+        )
         _rerank_on_success()
         ordered = [cands[i] for i in order if 0 <= i < len(cands)]
         # 把重排分附着到分片（与向量相似度区分：rerank_score 为交叉编码器得分）

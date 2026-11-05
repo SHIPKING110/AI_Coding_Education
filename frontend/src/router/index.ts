@@ -107,6 +107,12 @@ const router = createRouter({
           meta: { adminOnly: true },
         },
         {
+          path: 'usage',
+          name: 'usage-dashboard',
+          component: () => import('@/views/usage/UsageDashboardView.vue'),
+          meta: { staffOnly: true },
+        },
+        {
           path: 'settings',
           name: 'settings',
           component: () => import('@/views/settings/SettingsView.vue'),
@@ -318,6 +324,10 @@ router.beforeEach(async (to) => {
   }
   // 权限管理仅管理员可访问
   if (to.meta.adminOnly && user.role !== 'admin') {
+    return { name: 'students' }
+  }
+  // 仅管理员/教务可访问（如用量与成本：教师无平台账单视角）
+  if (to.meta.staffOnly && !['admin', 'staff'].includes(user.role)) {
     return { name: 'students' }
   }
   // 权限键路由：教师需对应权限（管理员/教务默认放行，后端同样兜底）

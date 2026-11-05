@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import {
   deleteRagDocument,
   getRagDocument,
@@ -39,6 +40,16 @@ const selected = ref<RagDoc | null>(null)
 const chunks = ref<RagChunk[]>([])
 const detailLoading = ref(false)
 const actionMsg = ref('')
+const pending = ref<{ title: string; message: string; danger: boolean; run: () => void | Promise<void> } | null>(null)
+
+function ask(title: string, message: string, run: () => void | Promise<void>, danger = true) {
+  pending.value = { title, message, danger, run }
+}
+async function confirmPending() {
+  const p = pending.value
+  pending.value = null
+  if (p) await p.run()
+}
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
@@ -95,14 +106,15 @@ async function openDoc(doc: RagDoc) {
 }
 
 async function reindex(doc: RagDoc) {
-  if (!confirm(`重新索引「${doc.title}」？`)) return
-  try {
-    await reindexRagDocument(doc.id)
-    actionMsg.value = '已提交重新索引'
-    await loadDocs()
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '操作失败'
-  }
+  ask('重建索引', `重新索引「${doc.title}」？将重新分片并重建向量。`, async () => {
+    try {
+      await reindexRagDocument(doc.id)
+      actionMsg.value = '已提交重新索引'
+      await loadDocs()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '操作失败'
+    }
+  }, false)
 }
 
 async function toggleEnabled(doc: RagDoc) {
@@ -126,26 +138,28 @@ async function toggleParent(doc: RagDoc) {
 }
 
 async function removeDoc(doc: RagDoc) {
-  if (!confirm(`删除「${doc.title}」及其全部向量？此操作不可恢复。`)) return
-  try {
-    await deleteRagDocument(doc.id)
-    actionMsg.value = '已删除'
-    if (selected.value?.id === doc.id) selected.value = null
-    await loadDocs()
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '删除失败'
-  }
+  ask('删除知识文档', `确定删除「${doc.title}」及其全部向量？此操作不可恢复。`, async () => {
+    try {
+      await deleteRagDocument(doc.id)
+      actionMsg.value = '已删除'
+      if (selected.value?.id === doc.id) selected.value = null
+      await loadDocs()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '删除失败'
+    }
+  })
 }
 
 async function sweep() {
-  if (!confirm('清理僵尸向量（源文档已删除但向量库仍残留）？')) return
-  try {
-    const r = await sweepRagCollections(false)
-    actionMsg.value = `清理完成：扫描 ${r.scanned} 分片，删除 ${r.deleted} 片`
-    await loadCollections()
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '清理失败'
-  }
+  ask('清理僵尸向量', '清理僵尸向量（源文档已删除但向量库仍残留）？此操作不可恢复。', async () => {
+    try {
+      const r = await sweepRagCollections(false)
+      actionMsg.value = `清理完成：扫描 ${r.scanned} 分片，删除 ${r.deleted} 片`
+      await loadCollections()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '清理失败'
+    }
+  })
 }
 
 async function sync() {
@@ -320,6 +334,15 @@ onMounted(() => {
       </table>
     </section>
   </div>
+  <ConfirmDialog
+    :visible="!!pending"
+    :title="pending?.title || ''"
+    :message="pending?.message || ''"
+    :danger="pending?.danger"
+    :confirm-text="pending?.danger ? '确认执行' : '继续'"
+    @confirm="confirmPending"
+    @cancel="pending = null"
+  />
 </template>
 
 <style scoped>

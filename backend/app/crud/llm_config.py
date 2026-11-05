@@ -18,6 +18,10 @@ class ResolvedLLM:
     embed_model: str | None
     config_id: uuid.UUID | None
     config_name: str | None
+    # —— 计量归属（Token 记账）：教师自配 → 个人成本；平台共享/env 回退 → 机构成本 ——
+    owner_id: uuid.UUID | None = None
+    module: str = ""
+    is_platform: bool = False
 
 
 def list_configs(db: Session, owner_id: uuid.UUID) -> list[TeacherLLMConfig]:
@@ -186,6 +190,9 @@ def resolve(db: Session, owner_id: uuid.UUID, module: str) -> ResolvedLLM | None
             embed_model=cfg.embed_model,
             config_id=cfg.id,
             config_name=cfg.name,
+            owner_id=cfg.owner_id,
+            module=module,
+            is_platform=False,
         )
     settings = get_settings()
     if (settings.LLM_API_KEY or "").strip():
@@ -197,6 +204,9 @@ def resolve(db: Session, owner_id: uuid.UUID, module: str) -> ResolvedLLM | None
             embed_model=(settings.LLM_EMBED_MODEL or "").strip() or None,
             config_id=None,
             config_name="系统默认",
+            owner_id=None,
+            module=module,
+            is_platform=True,
         )
     return None
 
@@ -231,6 +241,7 @@ def delete_system_parent_llm(db):
 
 
 def resolve_parent_llm(db):
+    """家长客服共享模型：统一按「平台共享」记账（机构成本，不记到某个管理员名下）。"""
     from app.core.config import get_settings
     row = get_system_parent_llm(db)
     if row is not None and row.config_id is not None:
@@ -243,6 +254,9 @@ def resolve_parent_llm(db):
                 embed_model=cfg.embed_model,
                 config_id=cfg.id,
                 config_name=cfg.name,
+                owner_id=None,
+                module="parent_service",
+                is_platform=True,
             )
     settings = get_settings()
     if (settings.LLM_API_KEY or "").strip():
@@ -253,5 +267,8 @@ def resolve_parent_llm(db):
             embed_model=(settings.LLM_EMBED_MODEL or "").strip() or None,
             config_id=None,
             config_name="系统默认",
+            owner_id=None,
+            module="parent_service",
+            is_platform=True,
         )
     return None

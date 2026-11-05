@@ -57,6 +57,9 @@ class SystemSettingUpdate(BaseModel):
     # 会话自动关闭阈值（小时）：open 闲置 / escalated 闲置
     parent_open_idle_hours: int | None = None
     parent_escalated_idle_hours: int | None = None
+    # AI 费用月度预算（0=不告警）与提醒阈值比例
+    llm_monthly_budget: float | None = None
+    llm_budget_alert_ratio: float | None = None
 
 
 def _ensure_columns(db: Session) -> None:
@@ -87,6 +90,12 @@ def _ensure_columns(db: Session) -> None:
         "parent_quick_replies": "ALTER TABLE system_settings ADD COLUMN parent_quick_replies TEXT DEFAULT '[]'",
         "parent_open_idle_hours": "ALTER TABLE system_settings ADD COLUMN parent_open_idle_hours INTEGER DEFAULT 24",
         "parent_escalated_idle_hours": "ALTER TABLE system_settings ADD COLUMN parent_escalated_idle_hours INTEGER DEFAULT 48",
+        "llm_monthly_budget": (
+            "ALTER TABLE system_settings ADD COLUMN llm_monthly_budget DOUBLE PRECISION DEFAULT 0"
+        ),
+        "llm_budget_alert_ratio": (
+            "ALTER TABLE system_settings ADD COLUMN llm_budget_alert_ratio DOUBLE PRECISION DEFAULT 0.8"
+        ),
     }
     for col, sql in ddl.items():
         if col not in cols:
@@ -138,6 +147,8 @@ def _out(row: SystemSetting) -> dict:
         "parent_quick_replies": _parse_str_list(getattr(row, "parent_quick_replies", None)),
         "parent_open_idle_hours": int(getattr(row, "parent_open_idle_hours", 24) or 24),
         "parent_escalated_idle_hours": int(getattr(row, "parent_escalated_idle_hours", 48) or 48),
+        "llm_monthly_budget": float(getattr(row, "llm_monthly_budget", 0.0) or 0.0),
+        "llm_budget_alert_ratio": float(getattr(row, "llm_budget_alert_ratio", 0.8) or 0.8),
     }
 
 
@@ -183,6 +194,16 @@ def update_settings(
             if iv < 1 or iv > 720:
                 raise HTTPException(status_code=400, detail=f"{k} 需在 1~720 小时之间")
             setattr(row, k, iv)
+        elif k == "llm_monthly_budget":
+            fv = float(v)
+            if fv < 0:
+                raise HTTPException(status_code=400, detail="月度预算不能为负数")
+            setattr(row, k, fv)
+        elif k == "llm_budget_alert_ratio":
+            fv = float(v)
+            if not (0 <= fv <= 1):
+                raise HTTPException(status_code=400, detail="提醒阈值比例需在 0~1 之间")
+            setattr(row, k, fv)
         elif k in ("parent_risk_words", "parent_quick_replies"):
             arr = v if isinstance(v, list) else [s.strip() for s in str(v).split("\n") if s.strip()]
             setattr(row, k, json.dumps(arr, ensure_ascii=False))

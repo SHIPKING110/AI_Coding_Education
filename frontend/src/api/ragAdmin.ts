@@ -356,6 +356,11 @@ export async function addEvalCase(setId: string, payload: Record<string, unknown
   return data
 }
 
+export async function addEvalCasesBulk(setId: string, payload: { cases: Record<string, unknown>[] }): Promise<{ created: number; items: RagEvalCase[] }> {
+  const { data } = await http.post(`/admin/rag/eval/sets/${setId}/cases/bulk`, payload)
+  return data
+}
+
 export async function deleteEvalCase(caseId: string): Promise<void> {
   await http.delete(`/admin/rag/eval/cases/${caseId}`)
 }

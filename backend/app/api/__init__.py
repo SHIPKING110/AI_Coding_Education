@@ -29,6 +29,7 @@ from app.api.routers import (
     students,
     system_settings,
     trials,
+    usage,
     users,
 )
 
@@ -63,3 +64,4 @@ api_router.include_router(rag_admin.router)
 api_router.include_router(search_configs.router)
 api_router.include_router(client.router)
 api_router.include_router(trials.router)
+api_router.include_router(usage.router)

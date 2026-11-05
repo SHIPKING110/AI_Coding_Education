@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_teacher_permission
 from app.core.database import get_db
+from app.core.ratelimit import enforce
 from app.crud import retrieval_config as crud
 from app.models.user import User
 
@@ -116,9 +117,10 @@ def remove_embedding_config(
 @router.post("/embedding/test")
 def test_embedding_config(
     db: Session = Depends(get_db),
-    _: User = Depends(EMBEDDING_PERM),
+    user: User = Depends(EMBEDDING_PERM),
 ) -> dict:
     """连通性检查：用当前生效配置做一次 embedding。"""
+    enforce(f"emb_test:{user.id}", limit=1, window=5.0, message="检查过于频繁")
     resolved = crud.resolve_embedding(db)
     if resolved is None:
         return {"ok": False, "error": "尚未配置可用的 Embedding 模型"}
@@ -177,6 +179,7 @@ def test_rerank_config(
     db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ) -> dict:
     """连通性检查：一次最小 rerank 打分（remote 才可检查；local 预留）。"""
+    enforce(f"rrk_test:{user.id}", limit=1, window=5.0, message="检查过于频繁")
     resolved = crud.resolve_rerank(db, user.id)
     if resolved is None:
         return {"ok": False, "error": "尚未配置可用的 Rerank 模型"}
@@ -186,7 +189,7 @@ def test_rerank_config(
     try:
         from app.services import rag
 
-        rag.rerank_documents("测试查询", ["这是第一段文档", "这是第二段文档"], resolved)
+        rag.rerank_documents("测试查询", ["这是第一段文档", "这是第二段文档"], resolved, owner_id=user.id)
         return {"ok": True, "latency_ms": int((time.time() - started) * 1000)}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}

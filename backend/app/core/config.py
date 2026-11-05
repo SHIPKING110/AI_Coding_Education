@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     AGENT_RUN_TRACE_SAMPLE_RATE: float = 1.0
     AGENT_RUN_RETENTION_DAYS: int = 30
 
+    # Token 计量与成本记账（用量与成本仪表盘）：默认开启，失败不影响主链路
+    LLM_USAGE_TRACKING_ENABLED: bool = True
+    # 明细保留天数；更早的明细每月汇总进 llm_usage_monthly（永久保留）后清理
+    LLM_USAGE_RETENTION_DAYS: int = 180
+
     # 意图分类：规则优先；低置信度时才交给轻量 LLM（默认关闭，避免额外 token）
     AGENT_INTENT_LLM_FALLBACK: bool = False
     AGENT_INTENT_CONFIDENCE_THRESHOLD: float = 0.55

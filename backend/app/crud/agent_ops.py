@@ -88,6 +88,60 @@ def list_spans(db: Session, run_id: str) -> list[AgentRunSpan]:
     )
 
 
+def run_usage_map(db: Session, run_ids: list[str]) -> dict[str, dict]:
+    """按 run_id 汇总「Token 与成本」，供任务监控/会话观测展示。
+
+    数据现实：AgentRunTrace 的 tokens/cost 历史上未回填（常为 0），而：
+    - span 表有**真实 tokens**（按 run_id 可聚合，覆盖全）；
+    - llm_usage_events 有**真实且已计价的 cost**（按 run_id 可聚合，覆盖部分）。
+    因此优先用「已计价事件」同时给 tokens+cost（自洽）；无事件的 run 退回 span tokens、
+    成本标记为未知（不会臆造 0）。返回 {run_id: {input_tokens, output_tokens, cost, has_cost}}。
+    """
+    if not run_ids:
+        return {}
+    from app.models.usage import LLMUsageEvent
+
+    ids = list(dict.fromkeys(run_ids))  # 去重保序
+
+    event_rows = db.execute(
+        select(
+            LLMUsageEvent.run_id,
+            func.coalesce(func.sum(LLMUsageEvent.input_tokens), 0),
+            func.coalesce(func.sum(LLMUsageEvent.output_tokens), 0),
+            func.coalesce(func.sum(LLMUsageEvent.cost), 0.0),
+            func.count(),
+        )
+        .where(LLMUsageEvent.run_id.in_(ids))
+        .group_by(LLMUsageEvent.run_id)
+    ).all()
+    events = {
+        rid: {"input_tokens": int(it or 0), "output_tokens": int(ot or 0), "cost": float(cost or 0.0), "has_cost": True}
+        for rid, it, ot, cost, n in event_rows if n
+    }
+
+    span_rows = db.execute(
+        select(
+            AgentRunSpan.run_id,
+            func.coalesce(func.sum(AgentRunSpan.input_tokens), 0),
+            func.coalesce(func.sum(AgentRunSpan.output_tokens), 0),
+        )
+        .where(AgentRunSpan.run_id.in_(ids))
+        .group_by(AgentRunSpan.run_id)
+    ).all()
+    spans = {rid: (int(it or 0), int(ot or 0)) for rid, it, ot in span_rows}
+
+    out: dict[str, dict] = {}
+    for rid in ids:
+        if rid in events:
+            out[rid] = events[rid]
+        elif rid in spans:
+            it, ot = spans[rid]
+            out[rid] = {"input_tokens": it, "output_tokens": ot, "cost": None, "has_cost": False}
+        else:
+            out[rid] = {"input_tokens": 0, "output_tokens": 0, "cost": None, "has_cost": False}
+    return out
+
+
 def list_runs_by_trace(db: Session, trace_id: str) -> list[AgentRunTrace]:
     return list(
         db.scalars(
@@ -131,7 +185,8 @@ def list_sessions(
         .limit(page_size)
     ).all()
 
-    items = []
+    per_conv_runs = []
+    all_run_ids: list[str] = []
     for conv in rows:
         runs = list(
             db.scalars(
@@ -140,6 +195,12 @@ def list_sessions(
                 .order_by(AgentRunTrace.created_at.desc())
             ).all()
         )
+        per_conv_runs.append((conv, runs))
+        all_run_ids.extend(r.run_id for r in runs)
+    usage = run_usage_map(db, all_run_ids)
+
+    items = []
+    for conv, runs in per_conv_runs:
         msg_count = int(db.scalar(
             select(func.count()).select_from(AgentMessage).where(AgentMessage.conversation_id == conv.id)
         ) or 0)
@@ -150,6 +211,10 @@ def list_sessions(
         intents = {}
         for r in runs:
             intents[r.intent or "unknown"] = intents.get(r.intent or "unknown", 0) + 1
+        tok_in = sum(int((usage.get(r.run_id) or {}).get("input_tokens") or 0) for r in runs)
+        tok_out = sum(int((usage.get(r.run_id) or {}).get("output_tokens") or 0) for r in runs)
+        cost = sum(float((usage.get(r.run_id) or {}).get("cost") or 0.0) for r in runs)
+        cost_known = any((usage.get(r.run_id) or {}).get("has_cost") for r in runs)
         items.append({
             "conversation_id": str(conv.id),
             "title": conv.title,
@@ -165,6 +230,10 @@ def list_sessions(
             "error_runs": error_runs,
             "needs_rag": needs_rag,
             "rag_used": rag_used,
+            "input_tokens": tok_in,
+            "output_tokens": tok_out,
+            "cost_estimate": round(cost, 6),
+            "cost_known": cost_known,
             "intents": [{"intent": k, "runs": v} for k, v in intents.items()],
             "last_run_at": runs[0].created_at.isoformat() if runs else None,
         })
@@ -376,9 +445,19 @@ def stats(db: Session, *, since: datetime) -> dict:
         int(ft or 0) for k, _, ft in latency_rows
         if (k or "unknown") in interactive_kinds and ft
     ]
-    tokens_in = int(db.scalar(select(func.coalesce(func.sum(AgentRunTrace.input_tokens), 0)).where(*conds)) or 0)
-    tokens_out = int(db.scalar(select(func.coalesce(func.sum(AgentRunTrace.output_tokens), 0)).where(*conds)) or 0)
-    cost = float(db.scalar(select(func.coalesce(func.sum(AgentRunTrace.cost_estimate), 0)).where(*conds)) or 0)
+    # Token/成本：run 表历史字段未回填，改从 span 聚合真实 tokens、从已计价用量事件聚合成本
+    from app.models.usage import LLMUsageEvent
+
+    run_ids_subq = select(AgentRunTrace.run_id).where(*conds)
+    tokens_in = int(db.scalar(
+        select(func.coalesce(func.sum(AgentRunSpan.input_tokens), 0)).where(AgentRunSpan.run_id.in_(run_ids_subq))
+    ) or 0)
+    tokens_out = int(db.scalar(
+        select(func.coalesce(func.sum(AgentRunSpan.output_tokens), 0)).where(AgentRunSpan.run_id.in_(run_ids_subq))
+    ) or 0)
+    cost = float(db.scalar(
+        select(func.coalesce(func.sum(LLMUsageEvent.cost), 0.0)).where(LLMUsageEvent.run_id.in_(run_ids_subq))
+    ) or 0.0)
     intents = db.execute(
         select(AgentRunTrace.intent, func.count())
         .where(*conds)

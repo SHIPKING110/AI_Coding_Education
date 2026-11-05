@@ -65,8 +65,17 @@ def _run(run_id: str) -> None:
             run.finished_at = datetime.now(timezone.utc)
             db.commit()
             return
-        off_metrics, _ = _run_pass(db, run, cases, rerank=False)
-        on_metrics, rows = _run_pass(db, run, cases, rerank=True)
+        # 评测的 LLM 调用（生成回答 / 裁判打分）归因到 rag_eval 模块，
+        # 以便在「用量与成本」中单独统计评测成本；无可用个人模型时优雅降级。
+        from app.services import llm_context
+
+        try:
+            resolved = llm_context.optional_resolved(db, run.owner_id, "rag_eval")
+        except Exception:
+            resolved = None
+        with llm_context.use_llm(resolved):
+            off_metrics, _ = _run_pass(db, run, cases, rerank=False)
+            on_metrics, rows = _run_pass(db, run, cases, rerank=True)
         run.metrics = {"off": off_metrics, "on": on_metrics, "answer": _aggregate_answer(rows)}
         run.compare = compare_runs(off_metrics, on_metrics, key="hit@3")
         run.status = "done"

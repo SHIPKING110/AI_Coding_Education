@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -52,6 +52,9 @@ class SystemSetting(Base):
     # 会话自动关闭阈值（小时）：open 会话闲置 / escalated 会话闲置 → 自动结束
     parent_open_idle_hours: Mapped[int] = mapped_column(Integer, default=24)
     parent_escalated_idle_hours: Mapped[int] = mapped_column(Integer, default=48)
+    # AI 费用月度预算（0=不告警）与提醒阈值比例（达到预算的该比例时通知管理员）
+    llm_monthly_budget: Mapped[float] = mapped_column(Float, default=0.0)
+    llm_budget_alert_ratio: Mapped[float] = mapped_column(Float, default=0.8)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
