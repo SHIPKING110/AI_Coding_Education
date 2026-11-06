@@ -271,6 +271,7 @@ const ADMIN_NAV = [
   { to: '/service', label: '教学服务', navKey: 'nav_service', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 13h5' },
   { to: '/assignments', label: 'AI 习题', navKey: 'nav_assignments', icon: 'M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11M15 3h6v6' },
   { to: '/finance', label: '财务管理', icon: 'M3 3v18h18M7 14l4-4 4 4 5-6', perm: 'finance_view', navKey: 'nav_finance' },
+  { to: '/docs', label: '开发文档', staffOnly: true, icon: 'M4 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM8 7h8M8 11h8M8 15h5' },
 ]
 
 /** 教师端按权限键显隐：设置(settings_manage)/财务(finance_view)默认不可见；
@@ -332,7 +333,6 @@ onMounted(() => {
       </div>
 
       <nav class="nav">
-        <RouterLink
         <RouterLink
           v-for="item in navItems"
           :key="item.to"

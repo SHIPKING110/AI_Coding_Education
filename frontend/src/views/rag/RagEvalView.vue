@@ -377,7 +377,7 @@ onMounted(loadSets)
       <div class="import-box">
         <div class="panel-head" style="margin:0 0 8px">
           <h3>批量导入用例</h3>
-          <a class="doc-link" href="/docs/rag-eval-import-format" target="_blank" rel="noopener">导入格式与合规说明 ↗</a>
+          <a class="doc-link" href="/docs/rag-eval-spec" target="_blank" rel="noopener">导入格式与合规说明 ↗</a>
         </div>
         <div class="case-form gen-form">
           <label class="upload-btn">

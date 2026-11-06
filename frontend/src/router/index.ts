@@ -213,6 +213,16 @@ const router = createRouter({
           name: 'profile',
           component: () => import('@/views/profile/ProfileView.vue'),
         },
+        {
+          path: 'docs',
+          redirect: '/docs/index',
+        },
+        {
+          path: 'docs/:slug',
+          name: 'docs',
+          component: () => import('@/views/docs/DocsView.vue'),
+          meta: { staffOnly: true },
+        },
       ],
     },
     {
