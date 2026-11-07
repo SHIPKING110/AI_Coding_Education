@@ -17,6 +17,7 @@ import {
   listPrices,
   listReconciliations,
   listUsageEvents,
+  repriceUnpricedUsage,
   updatePrice,
   updateUsageSettings,
   upsertReconciliation,
@@ -44,6 +45,7 @@ const filterPriced = ref('')
 const eventsLoading = ref(false)
 
 const prices = ref<ModelPrice[]>([])
+const repricing = ref(false)
 const priceDialog = ref(false)
 const priceSaving = ref(false)
 const priceForm = ref({
@@ -333,6 +335,28 @@ async function removePrice(row: ModelPrice) {
   })
 }
 
+function repriceUnpriced() {
+  ask(
+    '重算未定价记录',
+    `按当前价格表重算最近 ${days.value} 天的未定价明细？仅更新保留期内的明细，已归档月度汇总不受影响。`,
+    async () => {
+      repricing.value = true
+      error.value = ''
+      try {
+        const r = await repriceUnpricedUsage(days.value)
+        if (r.skipped) {
+          error.value = `已重算 ${r.repriced} 笔，仍有 ${r.skipped} 笔未匹配到价格`
+        }
+        await Promise.all([loadStats(), loadEvents()])
+      } catch (e) {
+        error.value = e instanceof Error ? e.message : '重算失败'
+      } finally {
+        repricing.value = false
+      }
+    },
+  )
+}
+
 async function saveBudget() {
   budgetSaving.value = true
   budgetTip.value = ''
@@ -448,7 +472,11 @@ onBeforeUnmount(() => {
       </section>
 
       <section v-if="stats.unpriced.length" class="panel warn-panel">
-        <div class="panel-head"><h3>未定价模型（费用按 0 计）</h3><span class="muted">补充价格后仅影响新发生的调用</span></div>
+        <div class="panel-head">
+          <h3>未定价模型（费用按 0 计）</h3>
+          <span class="muted">新调用按当前价格表计价；已产生的保留期明细可重算</span>
+          <button class="link-btn" :disabled="repricing" @click="repriceUnpriced">{{ repricing ? '重算中…' : '重算未定价' }}</button>
+        </div>
         <div class="chips">
           <span v-for="u in stats.unpriced" :key="`${u.provider_host}-${u.model}`" class="chip">
             {{ u.model || '未知模型' }} · {{ u.provider_host || '未知网关' }} · {{ u.events }} 笔

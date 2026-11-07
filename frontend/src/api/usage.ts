@@ -138,6 +138,15 @@ export async function deletePrice(id: string): Promise<void> {
   await http.delete(`/admin/usage/prices/${id}`)
 }
 
+export async function repriceUnpricedUsage(
+  sinceDays = 30,
+): Promise<{ scanned: number; repriced: number; skipped: number }> {
+  const { data } = await http.post('/admin/usage/reprice-unpriced', null, {
+    params: { since_days: sinceDays },
+  })
+  return data
+}
+
 export interface UsageBudget {
   monthly_budget: number
   alert_ratio: number

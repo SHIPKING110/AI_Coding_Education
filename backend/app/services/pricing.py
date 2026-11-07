@@ -64,8 +64,15 @@ def resolve_price(
     host: str,
     model: str,
     at: datetime,
+    *,
+    allow_host_mismatch: bool = False,
 ) -> LLMModelPrice | None:
-    """按 host + 模型名 + 生效时间选价格行（host 命中优先，模型精确 > 前缀 > 通配）。"""
+    """按 host + 模型名 + 生效时间选价格行。
+
+    - 默认：host 命中优先，模型精确 > 前缀 > 通配；不同网关不混用价格。
+    - `allow_host_mismatch=True`（Embedding/Rerank）：本网关无价格时，允许用
+      「模型名精确相同」的其它网关价格兜底，避免同一模型换域名就被记成未定价。
+    """
     rows = list(
         db.scalars(select(LLMModelPrice).where(LLMModelPrice.effective_from <= at)).all()
     )
@@ -74,12 +81,9 @@ def resolve_price(
     host_l = (host or "").lower()
     model_l = (model or "").lower()
 
-    best: tuple | None = None
-    best_row: LLMModelPrice | None = None
+    candidates: list[tuple[int, int, int, datetime, LLMModelPrice]] = []
     for row in rows:
         row_host = (row.provider_host or "").lower()
-        if row_host and row_host != host_l:
-            continue
         pattern = (row.model_pattern or "").lower()
         if pattern:
             if model_l == pattern:
@@ -90,12 +94,16 @@ def resolve_price(
                 continue
         else:
             model_rank = 0
-        host_rank = 1 if row_host else 0
-        score = (host_rank, model_rank, len(pattern), row.effective_from)
-        if best is None or score > best:
-            best = score
-            best_row = row
-    return best_row
+        host_rank = 1 if row_host == host_l and row_host else 0
+        candidates.append((host_rank, model_rank, len(pattern), row.effective_from, row))
+
+    pool = [c for c in candidates if c[0] == 1 or not (c[4].provider_host or "").strip()]
+    if not pool and allow_host_mismatch:
+        # 兜底只接受「模型名完全一致」，避免前缀/通配跨网关误匹配
+        pool = [c for c in candidates if c[1] == 2]
+    if not pool:
+        return None
+    return max(pool, key=lambda c: c[:4])[4]
 
 
 def _pick_tier(price: LLMModelPrice, input_tokens: int) -> dict | None:

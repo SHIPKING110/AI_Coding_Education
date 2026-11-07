@@ -324,7 +324,7 @@ router.beforeEach(async (to) => {
   }
   if (
     user.role === 'student' &&
-    (to.name === 'client-packages' || to.name === 'client-orders')
+    (to.name === 'client-packages' || to.name === 'client-orders' || to.name === 'client-service')
   ) {
     return { name: 'client-home' }
   }

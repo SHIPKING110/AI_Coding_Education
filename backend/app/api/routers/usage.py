@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles, require_teacher_permission
@@ -281,7 +282,63 @@ def list_prices(db: Session = Depends(get_db)) -> dict:
     return {"items": [_price_out(p) for p in crud.list_prices(db)]}
 
 
-@router.post("/prices", status_code=201, dependencies=[Depends(require_teacher_permission("usage_price_create", staff_allowed=False))])
+@router.post(
+    "/reprice-unpriced",
+    dependencies=[Depends(require_teacher_permission("usage_price_create", staff_allowed=False))],
+)
+def reprice_unpriced(
+    since_days: int = Query(default=30, ge=1, le=366),
+    db: Session = Depends(get_db),
+) -> dict:
+    """按当前价格表重算保留期内的未定价明细（不回溯已归档的月度汇总）。
+
+    典型场景：同一模型换了网关域名，历史明细已记成 unpriced；补齐价格/改进匹配后
+    用此操作把保留期内的明细按原调用时间重新计价。
+    """
+    from app.services import pricing
+
+    cutoff = datetime.now(UTC) - timedelta(days=since_days)
+    rows = db.scalars(
+        select(LLMUsageEvent).where(
+            LLMUsageEvent.priced_status == "unpriced",
+            LLMUsageEvent.created_at >= cutoff,
+        )
+    ).all()
+    repriced = 0
+    skipped = 0
+    for ev in rows:
+        price = pricing.resolve_price(
+            db,
+            ev.provider_host or "",
+            ev.model or "",
+            ev.created_at,
+            allow_host_mismatch=ev.kind in {"embedding", "rerank"},
+        )
+        if price is None:
+            skipped += 1
+            continue
+        cost, snapshot = pricing.compute_cost(
+            price,
+            input_tokens=ev.input_tokens,
+            output_tokens=ev.output_tokens,
+            cached_tokens=ev.cached_tokens,
+            at=ev.created_at,
+        )
+        ev.cost = cost
+        ev.currency = price.currency or ev.currency
+        ev.priced_status = "priced"
+        ev.price_id = price.id
+        ev.price_snapshot = snapshot
+        repriced += 1
+    db.commit()
+    return {"scanned": len(rows), "repriced": repriced, "skipped": skipped}
+
+
+@router.post(
+    "/prices",
+    status_code=201,
+    dependencies=[Depends(require_teacher_permission("usage_price_create", staff_allowed=False))],
+)
 def create_price(
     payload: PriceIn,
     db: Session = Depends(get_db),
@@ -294,7 +351,10 @@ def create_price(
     return _price_out(row)
 
 
-@router.put("/prices/{price_id}", dependencies=[Depends(require_teacher_permission("usage_price_create", staff_allowed=False))])
+@router.put(
+    "/prices/{price_id}",
+    dependencies=[Depends(require_teacher_permission("usage_price_create", staff_allowed=False))],
+)
 def update_price(
     price_id: str,
     payload: PriceUpdate,
@@ -312,7 +372,10 @@ def update_price(
     return _price_out(row)
 
 
-@router.delete("/prices/{price_id}", dependencies=[Depends(require_teacher_permission("usage_price_create", staff_allowed=False))])
+@router.delete(
+    "/prices/{price_id}",
+    dependencies=[Depends(require_teacher_permission("usage_price_create", staff_allowed=False))],
+)
 def delete_price(
     price_id: str,
     db: Session = Depends(get_db),
@@ -392,7 +455,11 @@ def list_reconciliations(
     }
 
 
-@router.post("/reconciliations", status_code=201, dependencies=[Depends(require_teacher_permission("usage_recon_upsert", staff_allowed=False))])
+@router.post(
+    "/reconciliations",
+    status_code=201,
+    dependencies=[Depends(require_teacher_permission("usage_recon_upsert", staff_allowed=False))],
+)
 def upsert_reconciliation(
     payload: ReconIn,
     db: Session = Depends(get_db),
@@ -414,7 +481,10 @@ def upsert_reconciliation(
     return _recon_out(row, ledger)
 
 
-@router.delete("/reconciliations/{recon_id}", dependencies=[Depends(require_teacher_permission("usage_recon_upsert", staff_allowed=False))])
+@router.delete(
+    "/reconciliations/{recon_id}",
+    dependencies=[Depends(require_teacher_permission("usage_recon_upsert", staff_allowed=False))],
+)
 def delete_reconciliation(
     recon_id: str,
     db: Session = Depends(get_db),

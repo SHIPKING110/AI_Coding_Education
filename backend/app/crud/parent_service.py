@@ -6,13 +6,14 @@ import json
 import uuid
 from datetime import datetime, time, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.models.enrollment import Student, StudentStatus
 from app.models.knowledge import KnowledgeDocument
+from app.models.parent_quick_reply import ParentQuickReply
 from app.models.parent_service import (
     ROLE_ASSISTANT,
-    ROLE_STAFF,
     ROLE_USER,
     THREAD_CLOSED,
     THREAD_ESCALATED,
@@ -20,7 +21,6 @@ from app.models.parent_service import (
     ParentServiceMessage,
     ParentServiceThread,
 )
-from app.models.parent_quick_reply import ParentQuickReply
 from app.models.system_setting import SystemSetting
 from app.models.user import Role, User
 
@@ -78,11 +78,31 @@ def get_setting(db: Session) -> SystemSetting | None:
 
 
 def quota_limits(db: Session) -> tuple[int, int]:
-    """(匿名日限额, 家长日限额)，读单例配置，缺失用默认 3/50。"""
+    """(匿名/无课时日限额, 在读有课时家长日限额)。0 表示该类不设上限。"""
     s = get_setting(db)
     anon = int(getattr(s, "parent_anon_daily_limit", 3) or 3)
     parent = int(getattr(s, "parent_daily_limit", 50) or 50)
     return anon, parent
+
+
+def client_entitlement(db: Session, user: User) -> dict:
+    """客户端咨询权益：关联学员任一课时 > 0 即视为「有课时权益」。
+
+    - 家长账号按 parent_user_id 反查，学员账号按 student_user_id 反查；
+    - 只看课时余额，不看在读/停课状态——课时包为 0 才降级为体验额度；
+    - 返回总课时与是否具备完整咨询权益，供路由层决定日配额。
+    """
+    rows = db.scalars(
+        select(Student).where(
+            or_(Student.parent_user_id == user.id, Student.student_user_id == user.id),
+        )
+    ).unique().all()
+    balances = [float(s.lesson_balance or 0) for s in rows]
+    return {
+        "student_count": len(rows),
+        "total_balance": sum(balances),
+        "entitled": any(b > 0 for b in balances),
+    }
 
 
 def risk_words(db: Session) -> list[str]:
@@ -203,6 +223,35 @@ def count_today_user_messages(
     )
 
 
+def count_today_ai_answers(
+    db: Session, *, parent_id: uuid.UUID | None = None, anon_key: str | None = None
+) -> int:
+    """当日已消耗的 AI 生成轮次（只计标记 billable 的助手回复）。
+
+    与「用户消息数」解耦：寒暄/能力介绍/菜单/业务工具查询/风险转人工均不计额度，
+    避免用户只是查课时或打招呼就被扣掉咨询次数。
+    """
+    start = _today_start()
+    thread_ids = select(ParentServiceThread.id)
+    if parent_id is not None:
+        thread_ids = thread_ids.where(ParentServiceThread.parent_id == parent_id)
+    elif anon_key:
+        thread_ids = thread_ids.where(ParentServiceThread.anon_key == anon_key)
+    else:
+        return 0
+    return (
+        db.scalar(
+            select(func.count(ParentServiceMessage.id)).where(
+                ParentServiceMessage.thread_id.in_(thread_ids),
+                ParentServiceMessage.role == ROLE_ASSISTANT,
+                ParentServiceMessage.created_at >= start,
+                func.json_extract_path_text(ParentServiceMessage.retrieval_diag, "billable") == "true",
+            )
+        )
+        or 0
+    )
+
+
 def get_or_create_thread(
     db: Session, *, parent_id: uuid.UUID | None = None,
     anon_key: str | None = None, thread_id: uuid.UUID | None = None,
@@ -232,12 +281,15 @@ def get_or_create_thread(
 
 
 def resolve_owner_teacher(db: Session, parent_id: uuid.UUID) -> uuid.UUID | None:
-    """归属教师：家长首个在读学员的首个班级主带教师；无归属返回 None（走系统默认）。"""
-    from app.models.enrollment import Student, StudentStatus
+    """归属教师：家长/学员首个在读学员的首个班级主带教师；无归属返回 None（走系统默认）。"""
+    from app.models.enrollment import Student
 
     stu = db.scalars(
         select(Student)
-        .where(Student.parent_user_id == parent_id, Student.status != StudentStatus.ARCHIVED.value)
+        .where(
+            or_(Student.parent_user_id == parent_id, Student.student_user_id == parent_id),
+            Student.status != StudentStatus.ARCHIVED.value,
+        )
         .order_by(Student.created_at.asc())
         .limit(1)
     ).first()
@@ -257,7 +309,7 @@ def parent_identity(db: Session, parent_id: uuid.UUID | None) -> dict:
     out: dict = {"students": [], "campuses": [], "phone": "", "name": ""}
     if parent_id is None:
         return out
-    from app.models.enrollment import Student, StudentStatus
+    from app.models.enrollment import Student
 
     owner = db.get(User, parent_id)
     if owner is not None:
@@ -265,7 +317,10 @@ def parent_identity(db: Session, parent_id: uuid.UUID | None) -> dict:
         out["phone"] = owner.phone or ""
     rows = db.scalars(
         select(Student)
-        .where(Student.parent_user_id == parent_id, Student.status != StudentStatus.ARCHIVED.value)
+        .where(
+            or_(Student.parent_user_id == parent_id, Student.student_user_id == parent_id),
+            Student.status != StudentStatus.ARCHIVED.value,
+        )
         .order_by(Student.created_at.asc())
     ).all()
     for s in rows:

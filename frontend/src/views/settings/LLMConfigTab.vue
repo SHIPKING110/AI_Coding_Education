@@ -31,6 +31,7 @@ import {
   getParentRerankConfig,
   saveParentRerankConfig,
   deleteParentRerankConfig,
+  testParentRerankConfig,
   getParentEmbeddingConfig,
   saveParentEmbeddingConfig,
   deleteParentEmbeddingConfig,
@@ -309,6 +310,21 @@ async function testParentEmb() {
     parentEmbTestMsg.value = `连接失败：${e instanceof Error ? e.message : '未知错误'}`
   } finally {
     testingParentEmb.value = false
+  }
+}
+
+async function testParentRrk() {
+  testingParentRrk.value = true
+  parentRrkTestMsg.value = ''
+  try {
+    const r = await testParentRerankConfig()
+    parentRrkTestMsg.value = r.ok
+      ? `${r.note || '连通正常'} · ${r.latency_ms ?? '-'} ms`
+      : `连接失败：${r.error || '未知错误'}`
+  } catch (e) {
+    parentRrkTestMsg.value = `连接失败：${e instanceof Error ? e.message : '未知错误'}`
+  } finally {
+    testingParentRrk.value = false
   }
 }
 
@@ -628,7 +644,7 @@ onMounted(async () => {
 
     <section class="card">
       <h2>各模块选用模型</h2>
-      <p class="muted">不选 = 用上面的默认配置。Agent 工作台还可在对话时临时切换。「教学服务 · 家长客服」的对话模型、Embedding 与 Rerank 由下方「家长客服 · 共享模型」板块由管理员统一配置（全校共用，不随教师变化）；家长只能看到后台勾选为「家长可见」的文档。</p>
+      <p class="muted">不选 = 用上面的默认配置。Agent 工作台还可在对话时临时切换。家长客服已从本模块映射中移出，统一在下方「家长客服 · 共享模型」由管理员配置（全校共用，不随教师变化）；家长只能看到后台勾选为「家长可见」的文档。</p>
       <div class="map-grid">
         <label v-for="m in LLM_MODULES" :key="m.key" class="map-row">
           <span>{{ m.label }}</span>
@@ -755,8 +771,10 @@ onMounted(async () => {
           <div class="cfg-head"><strong>Rerank（可选）</strong></div>
           <div class="cfg-meta" v-if="parentRrk">{{ parentRrk.model }} · {{ parentRrk.base_url }} · {{ parentRrk.enabled ? '启用' : '停用' }}</div>
           <div class="cfg-meta" v-else>未配置：家长客服检索退化为单层向量召回</div>
+          <div v-if="parentRrkTestMsg" class="test-line">{{ parentRrkTestMsg }}</div>
         </div>
         <div class="cfg-actions">
+          <button v-if="parentRrk" class="link-btn" :disabled="testingParentRrk" @click="testParentRrk">{{ testingParentRrk ? '检查中…' : '检查' }}</button>
           <button v-if="parentRrk" class="link-btn" @click="showParentRrkForm = true">编辑</button>
           <button v-else class="btn primary sm" @click="showParentRrkForm = true">配置 Rerank</button>
           <button v-if="parentRrk" class="link-btn danger" @click="removeParentRrk">删除</button>

@@ -1,7 +1,7 @@
 """家长客服 API（P0，无 Redis）：
 
 - POST /parent-service/auth/wechat   小程序 code → openid → 家长 JWT
-- POST /parent-service/chat          问答（配额→高风险→家长域 RAG→生成→落账本）
+- POST /parent-service/chat          问答（频控→高风险→意图→工具→AI 配额→家长域 RAG→生成→落账本）
 - POST /parent-service/threads/{id}/escalate  家长主动转人工
 - GET  /parent-service/threads/{id}/messages  本人会话消息
 - GET  /teacher/service/threads      教师接待列表（escalated 置顶）
@@ -29,6 +29,7 @@ from app.api.deps import require_teacher_permission
 from app.core import security
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.ratelimit import enforce
 from app.crud import parent_service as ps
 from app.models.parent_service import (
     ROLE_ASSISTANT,
@@ -51,6 +52,10 @@ _optional_bearer = HTTPBearer(auto_error=False)
 # - 对话：家长登录用本人映射；匿名用会话归属教师（thread.owner_teacher_id）映射，均无则走默认→系统；
 # - Rerank：系统级 embedding 决定向量空间（全校统一）；教师级 rerank 按归属教师取，未配则退化单层召回。
 PARENT_MODULE = "parent_service"
+
+# 突发频控：同一身份在窗口内最多 N 条，防脚本连发/异常刷接口（与日配额独立）
+_CHAT_BURST_LIMIT = max(1, int(os.environ.get("PARENT_CHAT_BURST_PER_MIN", "10") or 10))
+_CHAT_BURST_WINDOW = 60.0
 
 # 家长客服垂直化 system：业务边界（课程/课时/请假/活动/成长）+ 非业务婉拒 + 输出格式约束。
 # 费用/退费/安全类由词表前置拦截（不调 LLM），此处是第二道语义护栏。
@@ -101,7 +106,7 @@ def _optional_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_optional_bearer),
     db: Session = Depends(get_db),
 ) -> User | None:
-    """可选鉴权：有 token 取家长用户，无 token 返回 None（匿名）。"""
+    """可选鉴权：有 token 取客户端用户（家长/学员），无 token 返回 None（匿名）。"""
     if credentials is None:
         return None
     try:
@@ -191,7 +196,8 @@ def _render_tool_answer(name: str, result: dict) -> str | None:
                 topic = it.get("topic") or ""
                 topic_part = f" 课题：{topic}" if topic else ""
                 lines.append(
-                    f"• {st}｜《{it.get('class','')}》{it.get('teacher','')}老师 · {it.get('attendance','')}{topic_part}"
+                    f"• {st}｜《{it.get('class','')}》{it.get('teacher','')}老师 · "
+                    f"{it.get('attendance','')}{topic_part}"
                 )
             if len(s.get("lessons") or []) > 6:
                 lines.append(f"…（仅显示最近6节，共 {s['total']} 节）")
@@ -215,22 +221,19 @@ def parent_chat(
     content = (body.content or "").strip()
     if not content:
         raise HTTPException(status_code=422, detail="请输入问题内容")
-    parent_id = user.id if user is not None and user.role == Role.PARENT.value else None
+    # 登录的家长或学员账号都视为「已校验客户端」，不再按匿名口径限制。
+    client_user = user if user is not None and user.role in (Role.PARENT.value, Role.STUDENT.value) else None
+    parent_id = client_user.id if client_user is not None else None
     anon_key = (body.anon_key or "").strip() if parent_id is None else ""
     if parent_id is None and not anon_key:
         raise HTTPException(status_code=422, detail="匿名咨询请携带设备标识（anon_key）")
 
-    # 1) 配额（DB 计数口径：当日 user 消息数；P1 再迁 Redis）
-    anon_limit, parent_limit = ps.quota_limits(db)
-    used = ps.count_today_user_messages(db, parent_id=parent_id, anon_key=anon_key or None)
-    limit = parent_limit if parent_id is not None else anon_limit
-    if used >= limit:
-        tip = (
-            "今日咨询次数已用完，请明日再来，或点击转人工咨询老师。"
-            if parent_id is not None
-            else "匿名体验次数已用完，请绑定微信后继续咨询。"
-        )
-        raise HTTPException(status_code=429, detail=tip)
+    # 0) 突发频控：所有身份统一限速，防脚本连发/异常操作（不消耗日配额）
+    identity = f"parent_chat:{parent_id}" if parent_id is not None else f"parent_chat:anon:{anon_key}"
+    enforce(identity, limit=_CHAT_BURST_LIMIT, window=_CHAT_BURST_WINDOW, message="咨询过于频繁")
+
+    # 1) 日配额延后到「真正调用 AI 生成前」再判定：
+    #    寒暄/菜单/业务工具查询/风险转人工等零模型路径不消耗额度。
 
     # 2) 会话 + 存用户消息（归属教师在建会话时解析，用于模块映射+Rerank）
     # 2a) 惰性清理：闲置超阈值的 open/escalated 会话自动关闭（教师端列表也会触发）
@@ -327,7 +330,32 @@ def parent_chat(
         return {"thread": _thread_out(th), "answer": rendered, "refs": [], "escalated": False,
                 "kind": f"tool:{tool_name}", "intent": "tool"}
 
-    # 4c) 检索查询：菜单跟进用「上一问+本轮」；其余短跟随问句拼接上一问
+    # 4c) 日配额：只对「AI 生成」计轮次；工具查询/寒暄/规则回复不消耗。
+    #    - 匿名 / 未绑定学员 / 课时为 0：体验额度（匿名日限额）
+    #    - 在读且有课时：家长日限额（0=不限），异常行为由突发频控拦截
+    anon_limit, parent_limit = ps.quota_limits(db)
+    if client_user is None:
+        quota, quota_tip = anon_limit, "匿名体验次数已用完，请绑定微信后继续咨询。"
+    else:
+        ent = ps.client_entitlement(db, client_user)
+        if ent["entitled"]:
+            quota, quota_tip = parent_limit, "今日 AI 咨询次数已达上限，请明日再来，或点击转人工咨询老师。"
+        else:
+            quota = anon_limit
+            quota_tip = "今日体验咨询次数已用完，续费课时后可不限次咨询，或点击转人工咨询老师。"
+    if quota > 0 and ps.count_today_ai_answers(
+        db, parent_id=parent_id, anon_key=anon_key or None
+    ) >= quota:
+        ps.add_message(
+            db, thread_id=th.id, role=ROLE_ASSISTANT, content=quota_tip,
+            retrieval_diag={"intent": intent_name, "quota": True},
+        )
+        return {
+            "thread": _thread_out(th), "answer": quota_tip, "refs": [],
+            "escalated": False, "kind": "quota", "quota_exhausted": True,
+        }
+
+    # 4d) 检索查询：菜单跟进用「上一问+本轮」；其余短跟随问句拼接上一问
     retrieval_query = intent.get("retrieval_query") or content
     if last_user_q and len(content) <= 12 and any(
         k in content for k in ("几次", "哪些", "那个", "还有", "怎么弄", "多久", "什么时候", "呢", "那")
@@ -424,14 +452,14 @@ def parent_chat(
     try:
         from app.services import llm, llm_context
 
-        # 模型归属：归属教师的 parent_service 映射 → 教师默认 → 系统默认；
+        # 模型归属：管理员配置的家长客服共享模型 → 归属教师模块映射 → 教师默认 → 系统默认；
         # 无归属（未绑定学员/匿名）用占位 owner（admin）的映射/默认/系统，
         # 绝不能用家长自己的 owner_id——家长账号没有模型配置，会直接报 Missing credentials。
         model_owner = th.owner_teacher_id or owner_id
-        # 优先使用管理员配置的家长客服共享对话模型；未配置时回退到归属教师映射/系统默认。
+        # 共享面板是第一优先级；未配置时回退模块映射（兼容旧配置）与系统默认。
         try:
             from app.crud import llm_config as _pllm_crud
-            resolved = _pllm_crud.resolve_parent_llm(db)
+            resolved = _pllm_crud.resolve_parent_llm_shared(db)
         except Exception:
             resolved = None
         if resolved is None:
@@ -477,7 +505,11 @@ def parent_chat(
     store_diag = dict(diag or {})
     store_diag["intent"] = intent_name
     store_diag["refs"] = refs
-    _msg = ps.add_message(db, thread_id=th.id, role=ROLE_ASSISTANT, content=answer, tokens=tokens, retrieval_diag=store_diag)
+    store_diag["billable"] = True
+    _msg = ps.add_message(
+        db, thread_id=th.id, role=ROLE_ASSISTANT, content=answer,
+        tokens=tokens, retrieval_diag=store_diag,
+    )
     rag_trace.attach_message(store_diag.get("trace_id"), _msg.id)
     return {
         "thread": _thread_out(th), "answer": answer, "refs": refs,
@@ -526,12 +558,39 @@ def _staff() -> object:
 
 
 DEFAULT_QUICK_REPLIES: list[tuple[str, str, str]] = [
-    ("请假流程", "您好，请假请提前在家长端提交请假申请，或直接回复本消息说明学员姓名、班级和请假日期，老师会为您登记并安排补课。", "教务"),
-    ("补课安排", "您好，请假课程可在两周内安排补课。老师会根据班级进度和校区排课为您协调时间，确认后会在家长端同步。", "教务"),
-    ("课时余额", "您好，课时余额可在家长端「学习档案」查看；如显示异常，请告知学员姓名，老师为您核对。", "课时"),
-    ("上课提醒", "您好，明天上课前请提醒孩子提前 10 分钟到校区，带好水杯；如临时有事请提前请假。", "教务"),
-    ("活动通知", "您好，校区近期活动已发布在家长端通知栏，名额有限，建议尽早报名；如需协助报名可直接回复本消息。", "活动"),
-    ("学习反馈", "您好，老师会在每次课后更新学习反馈，您可在家长端查看课堂表现、作业与阶段建议。", "教学"),
+    (
+        "请假流程",
+        "您好，请假请提前在家长端提交请假申请，或直接回复本消息说明学员姓名、班级和请假日期，"
+        "老师会为您登记并安排补课。",
+        "教务",
+    ),
+    (
+        "补课安排",
+        "您好，请假课程可在两周内安排补课。老师会根据班级进度和校区排课为您协调时间，"
+        "确认后会在家长端同步。",
+        "教务",
+    ),
+    (
+        "课时余额",
+        "您好，课时余额可在家长端「学习档案」查看；如显示异常，请告知学员姓名，老师为您核对。",
+        "课时",
+    ),
+    (
+        "上课提醒",
+        "您好，明天上课前请提醒孩子提前 10 分钟到校区，带好水杯；如临时有事请提前请假。",
+        "教务",
+    ),
+    (
+        "活动通知",
+        "您好，校区近期活动已发布在家长端通知栏，名额有限，建议尽早报名；"
+        "如需协助报名可直接回复本消息。",
+        "活动",
+    ),
+    (
+        "学习反馈",
+        "您好，老师会在每次课后更新学习反馈，您可在家长端查看课堂表现、作业与阶段建议。",
+        "教学",
+    ),
 ]
 
 
@@ -813,6 +872,32 @@ def delete_parent_rerank_config(db: Session = Depends(get_db), user: User = Depe
         raise HTTPException(status_code=403, detail="仅管理员可配置家长客服共享模型")
     ret_crud.delete_system_parent_rerank(db)
     return {"ok": True}
+
+
+@teacher_router.post("/parent-rerank-config/test")
+def test_parent_rerank_config(db: Session = Depends(get_db), user: User = Depends(_staff())) -> dict:
+    import time
+
+    from app.core.ratelimit import enforce
+    from app.crud import retrieval_config as ret_crud
+
+    if user.role != Role.ADMIN.value:
+        raise HTTPException(status_code=403, detail="仅管理员可配置家长客服共享模型")
+    enforce(f"parent_rrk_test:{user.id}", limit=1, window=5.0, message="检查过于频繁")
+    resolved = ret_crud.resolve_parent_rerank(db)
+    if resolved is None:
+        return {"ok": False, "error": "尚未配置家长客服共享 Rerank"}
+    if resolved.provider == "local":
+        return {"ok": True, "latency_ms": 0, "note": "本地 Rerank 预留接口，未做远程连通检查"}
+    started = time.time()
+    try:
+        rag.rerank_documents(
+            "测试查询", ["这是第一段文档", "这是第二段文档"], resolved,
+            owner_id=None, platform=True,
+        )
+        return {"ok": True, "latency_ms": int((time.time() - started) * 1000)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
 
 
 # —— 家长客服专属 Embedding（管理员）：独立父索引 parent_knowledge__{fingerprint} ——

@@ -438,12 +438,12 @@ onMounted(async () => {
       <!-- 家长客服 -->
       <section class="card">
         <h2>家长客服</h2>
-        <p class="muted">家长端 AI 客服的每日轮次配额（0=不限制该类）与高风险词表（命中强制转人工）；快捷回复供教师端一键插入；闲置超时自动结束会话。</p>
+        <p class="muted">AI 客服配额只统计「AI 生成的回答」：查课时/课表等工具查询、寒暄与转人工不扣次数。匿名与「无课时/未绑定学员」使用体验额度；在读且有课时使用家长额度（0=不限）。所有身份另有突发频控，高风险词命中强制转人工；快捷回复供教师端一键插入；闲置超时自动结束会话。</p>
         <div class="add-row">
-          <label class="field-inline">匿名日限额
+          <label class="field-inline">匿名/无课时 AI 日限额
             <input v-model="parentAnonLimit" type="number" min="0" max="1000" step="1" class="inline-input num" />
           </label>
-          <label class="field-inline">家长日限额
+          <label class="field-inline">在读家长 AI 日限额
             <input v-model="parentDailyLimit" type="number" min="0" max="1000" step="1" class="inline-input num" />
           </label>
           <label class="field-inline">普通会话闲置(h)

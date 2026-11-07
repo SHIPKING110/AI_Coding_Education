@@ -78,6 +78,7 @@ def _write_event(payload: dict) -> None:
             payload.get("provider_host") or "",
             payload.get("model") or "",
             at,
+            allow_host_mismatch=payload.get("kind") in {"embedding", "rerank"},
         )
         if price is None:
             payload["priced_status"] = "unpriced"

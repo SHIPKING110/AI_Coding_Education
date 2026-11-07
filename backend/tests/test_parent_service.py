@@ -27,6 +27,7 @@ def session_factory():
     admin_engine.dispose()
     engine = create_engine(base_url + f"/{TEST_DB_NAME}")
     # 确保所有模型都已注册到 metadata（否则 create_all 缺表）
+    import app.models.enrollment  # noqa: F401
     import app.models.knowledge  # noqa: F401
     import app.models.parent_service  # noqa: F401
     import app.models.retrieval_config  # noqa: F401
@@ -252,6 +253,69 @@ def test_quota_counts_only_user_messages(session_factory):
         assert ps.count_today_user_messages(db, anon_key="test-anon-1") == 1
         ps.add_message(db, thread_id=th.id, role="user", content="q2")
         assert ps.count_today_user_messages(db, anon_key="test-anon-1") == 2
+    finally:
+        db.close()
+
+
+def test_ai_quota_counts_only_billable_answers(session_factory):
+    """AI 配额只计标记 billable 的助手回复：菜单/寒暄/工具查询不扣次数。"""
+    from app.crud import parent_service as ps
+
+    db = session_factory()
+    try:
+        th = ps.get_or_create_thread(db, anon_key="quota-ai-1")
+        ps.add_message(db, thread_id=th.id, role="user", content="q1")
+        ps.add_message(
+            db, thread_id=th.id, role="assistant", content="a1", retrieval_diag={"billable": True},
+        )
+        ps.add_message(db, thread_id=th.id, role="assistant", content="菜单", retrieval_diag={"intent": "capability"})
+        assert ps.count_today_ai_answers(db, anon_key="quota-ai-1") == 1
+        ps.add_message(
+            db, thread_id=th.id, role="assistant", content="a2", retrieval_diag={"billable": True},
+        )
+        assert ps.count_today_ai_answers(db, anon_key="quota-ai-1") == 2
+    finally:
+        db.close()
+
+
+def test_client_entitlement_by_balance(session_factory):
+    """配额权益：关联学员课时 > 0 才有完整咨询权益；家长与学员账号口径一致。"""
+    from decimal import Decimal
+
+    from app.crud import parent_service as ps
+    from app.models.enrollment import Student
+    from app.models.user import User
+
+    db = session_factory()
+    try:
+        parent = User(role="parent", username="p_ent", name="家长", password_hash="!")
+        stu_user = User(role="student", username="s_ent", name="学员", password_hash="!")
+        db.add_all([parent, stu_user])
+        db.commit()
+        db.refresh(parent)
+        db.refresh(stu_user)
+
+        student = Student(
+            name="学员A", parent_user_id=parent.id, student_user_id=stu_user.id,
+            lesson_balance=Decimal("10"),
+        )
+        db.add(student)
+        db.commit()
+        db.refresh(student)
+
+        assert ps.client_entitlement(db, parent)["entitled"] is True
+        assert ps.client_entitlement(db, stu_user)["entitled"] is True
+
+        # 课时为 0 → 仅有体验额度；任一关联学员课时 > 0 即恢复完整权益
+        student.lesson_balance = Decimal("0")
+        db.commit()
+        assert ps.client_entitlement(db, parent)["entitled"] is False
+        assert ps.client_entitlement(db, stu_user)["entitled"] is False
+
+        student.lesson_balance = Decimal("0.5")
+        db.commit()
+        assert ps.client_entitlement(db, parent)["entitled"] is True
+        assert ps.client_entitlement(db, stu_user)["entitled"] is True
     finally:
         db.close()
 

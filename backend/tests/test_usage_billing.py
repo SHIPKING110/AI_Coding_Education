@@ -174,6 +174,77 @@ def test_pricing_match_tier_window_and_unknown(TestSession):
         assert snap3["time_discount"] == 0.5
 
 
+def test_pricing_embedding_cross_host_fallback(TestSession):
+    """Embedding/Rerank 跨网关兜底：同名模型换域名仍可按价格表计价；前缀不跨网关。"""
+    from app.models.usage import LLMModelPrice
+    from app.services import pricing
+
+    with TestSession() as s:
+        s.add(
+            LLMModelPrice(
+                provider_host="llm-x.maas.aliyuncs.com",
+                model_pattern="text-embedding-v4",
+                input_per_1m=0.5,
+                output_per_1m=0.0,
+                effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+        s.commit()
+
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    with TestSession() as s:
+        # 普通调用（对话）不跨网关，避免同名模型误用他家价格
+        assert pricing.resolve_price(s, "maas.qianwenaiapi.com", "text-embedding-v4", now) is None
+        # Embedding/Rerank 允许按模型名精确兜底
+        row = pricing.resolve_price(
+            s, "maas.qianwenaiapi.com", "text-embedding-v4", now, allow_host_mismatch=True
+        )
+        assert row is not None and row.input_per_1m == 0.5
+        # 前缀匹配不参与跨网关兜底
+        assert (
+            pricing.resolve_price(
+                s, "maas.qianwenaiapi.com", "text-embedding-v4-extra", now,
+                allow_host_mismatch=True,
+            )
+            is None
+        )
+
+
+def test_reprice_unpriced_embedding_cross_host(TestSession):
+    """重算未定价：Embedding 换网关后按同名模型价格补算保留期明细。"""
+    from app.api.routers.usage import reprice_unpriced
+    from app.models.usage import LLMModelPrice, LLMUsageEvent
+
+    with TestSession() as s:
+        s.add(
+            LLMModelPrice(
+                provider_host="llm-x.maas.aliyuncs.com",
+                model_pattern="text-embedding-v4",
+                input_per_1m=0.5,
+                output_per_1m=0.0,
+                effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+        ev = LLMUsageEvent(
+            kind="embedding", module="embedding",
+            provider_host="maas.qianwenaiapi.com", model="text-embedding-v4",
+            input_tokens=1_000_000, output_tokens=0, source="estimated",
+            priced_status="unpriced", cost=0.0, currency="CNY",
+            created_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+        )
+        s.add(ev)
+        s.commit()
+        eid = ev.id
+
+    with TestSession() as s:
+        out = reprice_unpriced(since_days=366, db=s)
+        assert out["repriced"] == 1
+        ev = s.get(LLMUsageEvent, eid)
+        assert ev.priced_status == "priced"
+        assert ev.cost == pytest.approx(0.5)
+        assert ev.price_snapshot
+
+
 def test_pricing_weekday_peak_surcharge(TestSession):
     """DeepSeek 峰谷定价：闲时价为基准价，工作日高峰窗口（UTC）×2，周末全天不浮动。"""
     from app.models.usage import LLMModelPrice

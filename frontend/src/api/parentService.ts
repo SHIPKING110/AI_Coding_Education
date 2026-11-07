@@ -171,6 +171,16 @@ export async function deleteParentRerankConfig(): Promise<void> {
   await http.delete('/teacher/service/parent-rerank-config')
 }
 
+export async function testParentRerankConfig(): Promise<{
+  ok: boolean
+  latency_ms?: number
+  error?: string
+  note?: string
+}> {
+  const { data } = await http.post('/teacher/service/parent-rerank-config/test')
+  return data
+}
+
 export interface ParentEmbeddingConfigOut {
   configured: boolean
   provider: RetrievalProvider
