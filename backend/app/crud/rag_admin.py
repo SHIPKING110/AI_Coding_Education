@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 
-from sqlalchemy import case, delete, desc, func, or_, select
+from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.rag_admin import (
@@ -274,6 +273,10 @@ def eval_run_to_dict(r: RagEvalRun) -> dict:
         "id": str(r.id), "set_id": str(r.set_id), "status": r.status,
         "owner_id": str(r.owner_id) if r.owner_id else None,
         "top_k": r.top_k, "rerank": r.rerank, "answer_eval": bool(r.answer_eval),
+        "generation_config_id": str(r.generation_config_id) if r.generation_config_id else None,
+        "judge_config_id": str(r.judge_config_id) if r.judge_config_id else None,
+        "generation_model": r.generation_model or "",
+        "judge_model": r.judge_model or "",
         "config_version": r.config_version,
         "metrics": r.metrics, "compare": r.compare, "error": r.error,
         "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -316,10 +319,26 @@ def delete_eval_set(db: Session, set_id) -> bool:
     return True
 
 
-def list_eval_cases(db: Session, set_id) -> list[RagEvalCase]:
-    return list(db.scalars(
-        select(RagEvalCase).where(RagEvalCase.set_id == set_id).order_by(RagEvalCase.created_at)
-    ).all())
+def list_eval_cases(db: Session, set_id, *, offset: int | None = None, limit: int | None = None) -> list[RagEvalCase]:
+    stmt = (
+        select(RagEvalCase)
+        .where(RagEvalCase.set_id == set_id)
+        .order_by(RagEvalCase.created_at, RagEvalCase.id)
+    )
+    if offset is not None:
+        stmt = stmt.offset(max(0, offset))
+    if limit is not None:
+        stmt = stmt.limit(max(1, limit))
+    return list(db.scalars(stmt).all())
+
+
+def count_eval_cases(db: Session, set_id) -> int:
+    return int(
+        db.scalar(
+            select(func.count()).select_from(RagEvalCase).where(RagEvalCase.set_id == set_id)
+        )
+        or 0
+    )
 
 
 def add_eval_case(
@@ -351,11 +370,15 @@ def delete_eval_case(db: Session, case_id) -> bool:
 
 def create_eval_run(
     db: Session, *, set_id, owner_id, top_k: int, rerank: bool,
-    answer_eval: bool = False, config_version: int | None, created_by
+    answer_eval: bool = False, config_version: int | None, created_by,
+    generation_config_id=None, judge_config_id=None,
+    generation_model: str = "", judge_model: str = "",
 ) -> RagEvalRun:
     row = RagEvalRun(
         set_id=set_id, owner_id=owner_id, top_k=top_k, rerank=rerank,
         answer_eval=answer_eval, config_version=config_version, status="pending", created_by=created_by,
+        generation_config_id=generation_config_id, judge_config_id=judge_config_id,
+        generation_model=generation_model or "", judge_model=judge_model or "",
     )
     db.add(row)
     db.commit()

@@ -6,13 +6,14 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_roles, require_teacher_permission
+from app.api.deps import get_current_user, require_teacher_permission
 from app.core.database import SessionLocal, get_db
 from app.crud import knowledge as kb_crud
+from app.crud import llm_config as llm_crud
 from app.crud import rag_admin as crud
 from app.models.knowledge import KnowledgeDocument
 from app.models.user import Role, User
@@ -174,6 +175,11 @@ def document_detail(doc_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     owner = db.get(User, doc.owner_id)
     out = _doc_out(doc, owner.name if owner else "")
     out["extra"] = doc.extra or {}
+    out["storage"] = rag_service.document_storage_profile(doc)
+    if doc.visible_to_parents:
+        out["parent_storage"] = rag_service.document_storage_profile(doc, parent=True)
+    else:
+        out["parent_storage"] = None
     return out
 
 
@@ -615,11 +621,53 @@ class EvalCaseIn(BaseModel):
     source: str = "manual"
 
 
+@router.get("/eval/models", dependencies=[Depends(require_teacher_permission("rag_eval_view", staff_allowed=False))])
+def list_eval_models(
+    owner_id: uuid.UUID | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """可选的评测模型配置：默认当前用户；管理员/教务可查看指定 owner。"""
+    target = owner_id or user.id
+    if user.role not in (Role.ADMIN.value, Role.STAFF.value) and target != user.id:
+        raise HTTPException(status_code=403, detail="只能查看自己的模型配置")
+    rows = llm_crud.list_configs(db, target)
+    return {
+        "owner_id": str(target),
+        "items": [
+            {
+                "id": str(c.id),
+                "name": c.name,
+                "model": c.model,
+                "base_url": c.base_url,
+                "is_default": bool(c.is_default),
+            }
+            for c in rows
+        ],
+    }
+
+
 @router.get("/eval/sets/{set_id}/cases", dependencies=[Depends(require_teacher_permission("rag_eval_view", staff_allowed=False))])
-def list_eval_cases(set_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
+def list_eval_cases(
+    set_id: uuid.UUID,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
     if crud.get_eval_set(db, set_id) is None:
         raise HTTPException(status_code=404, detail="评测集不存在")
-    return {"items": [crud.eval_case_to_dict(x) for x in crud.list_eval_cases(db, set_id)]}
+    total = crud.count_eval_cases(db, set_id)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    rows = crud.list_eval_cases(
+        db, set_id, offset=(page - 1) * page_size, limit=page_size
+    )
+    return {
+        "items": [crud.eval_case_to_dict(x) for x in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.post("/eval/sets/{set_id}/cases", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
@@ -636,23 +684,68 @@ def add_eval_case(set_id: uuid.UUID, body: EvalCaseIn, db: Session = Depends(get
 
 
 class EvalCaseBulkIn(BaseModel):
-    cases: list[EvalCaseIn]
+    cases: list[dict]
+    skip_duplicates: bool = True
 
 
 @router.post("/eval/sets/{set_id}/cases/bulk", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
-def add_eval_cases(set_id: uuid.UUID, body: EvalCaseBulkIn, db: Session = Depends(get_db)) -> dict:
+def add_eval_cases(
+    set_id: uuid.UUID,
+    body: EvalCaseBulkIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """批量导入用例：逐行校验，坏行跳过并返回行号；默认按 query 去重。"""
     if crud.get_eval_set(db, set_id) is None:
         raise HTTPException(status_code=404, detail="评测集不存在")
-    out = []
-    for c in body.cases:
+    if len(body.cases) > 500:
+        raise HTTPException(status_code=400, detail="单次导入最多 500 条，请分批")
+    existing = {
+        (c.query or "").strip().lower()
+        for c in crud.list_eval_cases(db, set_id)
+    }
+    out: list[dict] = []
+    errors: list[dict] = []
+    skipped = 0
+    for idx, raw in enumerate(body.cases):
+        try:
+            c = EvalCaseIn.model_validate(raw)
+        except ValidationError as exc:
+            detail = "; ".join(
+                f"{'.'.join(str(x) for x in err.get('loc', ())) or 'row'}: {err.get('msg', '')}"
+                for err in exc.errors()
+            )
+            errors.append({"index": idx + 1, "error": detail or "字段校验失败"})
+            continue
+        key = c.query.strip().lower()
+        if body.skip_duplicates and key in existing:
+            skipped += 1
+            continue
         row = crud.add_eval_case(
             db, set_id=set_id, query=c.query, relevant=c.relevant,
             gt_answer=c.gt_answer, gt_keywords=c.gt_keywords,
             query_type=c.query_type, difficulty=c.difficulty,
             notes=c.notes, source=c.source,
         )
+        existing.add(key)
         out.append(crud.eval_case_to_dict(row))
-    return {"created": len(out), "items": out}
+    crud.add_audit(
+        db, action="eval.cases.import", target=str(set_id),
+        detail={
+            "created": len(out),
+            "failed": len(errors),
+            "skipped_duplicates": skipped,
+            "skip_duplicates": body.skip_duplicates,
+        },
+        operator_id=user.id,
+    )
+    return {
+        "created": len(out),
+        "failed": len(errors),
+        "skipped_duplicates": skipped,
+        "items": out,
+        "errors": errors,
+    }
 
 
 @router.delete("/eval/cases/{case_id}", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
@@ -685,6 +778,19 @@ class EvalRunIn(BaseModel):
     top_k: int = 5
     rerank: bool = True
     answer_eval: bool = False
+    generation_config_id: uuid.UUID | None = None
+    judge_config_id: uuid.UUID | None = None
+
+
+def _eval_model_config(db: Session, config_id: uuid.UUID | None, owner_id: uuid.UUID):
+    if config_id is None:
+        return None
+    cfg = llm_crud.get_config(db, config_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    if cfg.owner_id != owner_id:
+        raise HTTPException(status_code=400, detail="模型配置不属于评测运行 owner，请切换到对应账号或先配置模型")
+    return cfg
 
 
 @router.post("/eval/sets/{set_id}/runs", dependencies=[Depends(require_teacher_permission("rag_eval_view", staff_allowed=False))])
@@ -695,7 +801,17 @@ def create_eval_run(set_id: uuid.UUID, body: EvalRunIn, db: Session = Depends(ge
     cases = crud.list_eval_cases(db, set_id)
     if not cases:
         raise HTTPException(status_code=400, detail="评测集为空，请先添加用例")
-    cfg = rag_settings.get_config(db)
+    owner_id = body.owner_id or es.owner_id or user.id
+    gen_cfg = judge_cfg = None
+    if body.answer_eval:
+        gen_cfg = _eval_model_config(db, body.generation_config_id, owner_id)
+        judge_cfg = _eval_model_config(db, body.judge_config_id, owner_id)
+        if gen_cfg is None or judge_cfg is None:
+            raise HTTPException(status_code=400, detail="答案质量评测需分别选择生成模型与评测模型")
+        if gen_cfg.id == judge_cfg.id:
+            raise HTTPException(status_code=400, detail="生成模型与评测模型不能是同一个配置")
+        if (gen_cfg.model or "").strip().lower() == (judge_cfg.model or "").strip().lower():
+            raise HTTPException(status_code=400, detail="生成模型与评测模型不能使用同一个模型")
     version = None
     try:
         versions = rag_settings.list_versions(db, limit=1)
@@ -703,12 +819,24 @@ def create_eval_run(set_id: uuid.UUID, body: EvalRunIn, db: Session = Depends(ge
     except Exception:
         version = None
     run = crud.create_eval_run(
-        db, set_id=set_id, owner_id=body.owner_id or es.owner_id or user.id,
+        db, set_id=set_id, owner_id=owner_id,
         top_k=max(1, min(50, body.top_k)), rerank=body.rerank,
         answer_eval=body.answer_eval, config_version=version, created_by=user.id,
+        generation_config_id=body.generation_config_id if body.answer_eval else None,
+        judge_config_id=body.judge_config_id if body.answer_eval else None,
+        generation_model=gen_cfg.model if gen_cfg else "",
+        judge_model=judge_cfg.model if judge_cfg else "",
     )
     rag_evaluation.start_run(run.id)
-    crud.add_audit(db, action="eval.run.start", target=str(run.id), detail={"set_id": str(set_id)}, operator_id=user.id)
+    crud.add_audit(
+        db, action="eval.run.start", target=str(run.id),
+        detail={
+            "set_id": str(set_id),
+            "generation_config_id": str(body.generation_config_id) if body.answer_eval and body.generation_config_id else None,
+            "judge_config_id": str(body.judge_config_id) if body.answer_eval and body.judge_config_id else None,
+        },
+        operator_id=user.id,
+    )
     return crud.eval_run_to_dict(run)
 
 

@@ -62,11 +62,35 @@ export interface RagOverview {
     top_k: number
     rerank: boolean
     answer_eval: boolean
+    generation_model?: string
+    judge_model?: string
     metrics: Record<string, any> | null
     compare: Record<string, any> | null
     created_at: string | null
     finished_at: string | null
   } | null
+}
+
+export interface RagStorageProfile {
+  collection: string
+  parent_dedicated?: boolean | null
+  embedding: {
+    provider: string
+    model: string
+    base_url: string
+    fingerprint: string
+  }
+  vector_dim: number | null
+  vector_sample: number[]
+  chunk_count: number
+  char_count: number
+  tokens_est: number
+  chunk_chars: { min: number; max: number; avg: number }
+  chunk_config: { chunk_size: number; chunk_overlap: number; parent_chunk_size: number }
+  source: { file_name: string; file_size: number; file_hash: string }
+  indexed_at: string | null
+  profile_snapshot: Record<string, unknown> | null
+  live: boolean
 }
 
 export interface RagDoc {
@@ -86,6 +110,8 @@ export interface RagDoc {
   indexed_hash?: string | null
   created_at: string | null
   updated_at: string | null
+  storage?: RagStorageProfile
+  parent_storage?: RagStorageProfile | null
 }
 
 export interface RagChunk {
@@ -93,8 +119,10 @@ export interface RagChunk {
   chunk_no: number | null
   title: string
   chars: number
+  tokens_est?: number
   preview: string
   has_parent: boolean
+  parent_chars?: number
 }
 
 export interface RagTraceHit {
@@ -310,12 +338,31 @@ export interface RagEvalRun {
   top_k: number
   rerank: boolean
   answer_eval: boolean
+  generation_config_id: string | null
+  judge_config_id: string | null
+  generation_model: string
+  judge_model: string
   config_version: number | null
   metrics: any
   compare: any
   error: string | null
   created_at: string | null
   finished_at: string | null
+}
+
+export interface RagEvalModel {
+  id: string
+  name: string
+  model: string
+  base_url: string
+  is_default: boolean
+}
+
+export interface RagEvalCasePage {
+  items: RagEvalCase[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface RagEvalResult {
@@ -346,9 +393,21 @@ export async function deleteEvalSet(id: string): Promise<void> {
   await http.delete(`/admin/rag/eval/sets/${id}`)
 }
 
-export async function listEvalCases(setId: string): Promise<RagEvalCase[]> {
-  const { data } = await http.get<{ items: RagEvalCase[] }>(`/admin/rag/eval/sets/${setId}/cases`)
+export async function listEvalModels(ownerId?: string | null): Promise<RagEvalModel[]> {
+  const { data } = await http.get<{ items: RagEvalModel[] }>('/admin/rag/eval/models', {
+    params: ownerId ? { owner_id: ownerId } : undefined,
+  })
   return data.items
+}
+
+export async function listEvalCases(
+  setId: string,
+  params: { page?: number; page_size?: number } = {},
+): Promise<RagEvalCasePage> {
+  const { data } = await http.get<RagEvalCasePage>(`/admin/rag/eval/sets/${setId}/cases`, {
+    params,
+  })
+  return data
 }
 
 export async function addEvalCase(setId: string, payload: Record<string, unknown>): Promise<RagEvalCase> {
@@ -356,7 +415,16 @@ export async function addEvalCase(setId: string, payload: Record<string, unknown
   return data
 }
 
-export async function addEvalCasesBulk(setId: string, payload: { cases: Record<string, unknown>[] }): Promise<{ created: number; items: RagEvalCase[] }> {
+export async function addEvalCasesBulk(
+  setId: string,
+  payload: { cases: Record<string, unknown>[]; skip_duplicates?: boolean },
+): Promise<{
+  created: number
+  failed: number
+  skipped_duplicates: number
+  items: RagEvalCase[]
+  errors: { index: number; error: string }[]
+}> {
   const { data } = await http.post(`/admin/rag/eval/sets/${setId}/cases/bulk`, payload)
   return data
 }

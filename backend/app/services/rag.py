@@ -44,12 +44,37 @@ _RERANK_CIRCUIT_THRESHOLD = 3
 _RERANK_CIRCUIT_UNTIL = 0.0
 RERANK_TIMEOUT_S = 1.5
 
+# 批量上传可能同时触发多篇索引；限制并发，避免 Embedding 请求瞬间打爆网关限流
+INDEX_CONCURRENCY = 2
+_INDEX_SEMAPHORE = threading.Semaphore(INDEX_CONCURRENCY)
+
+# 后台线程/测试可替换的 Session 工厂（测试需指向隔离库，避免读取开发库的模型配置）
+_SESSION_FACTORY = None
+
+
+def _session_factory():
+    global _SESSION_FACTORY
+    if _SESSION_FACTORY is None:
+        from app.core.database import SessionLocal
+
+        _SESSION_FACTORY = SessionLocal
+    return _SESSION_FACTORY
+
 
 @lru_cache(maxsize=1)
 def get_embed_model():
     from sentence_transformers import SentenceTransformer
 
     return SentenceTransformer(str(MODEL_DIR))
+
+
+def local_embedding_ready() -> bool:
+    """本地 Qwen 模型是否真的可用：只判断目录存在会把空目录当成可用，导致首次检索卡在加载。"""
+    if not MODEL_DIR.is_dir():
+        return False
+    if not (MODEL_DIR / "config.json").exists():
+        return False
+    return any(MODEL_DIR.glob("*.safetensors")) or any(MODEL_DIR.glob("*.bin"))
 
 
 def _char_windows(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -173,10 +198,9 @@ def _resolve_embedding(force: bool = False):
         return _embed_resolved_cache[1]
     resolved = None
     try:
-        from app.core.database import SessionLocal
         from app.crud import retrieval_config as crud
 
-        db = SessionLocal()
+        db = _session_factory()()
         try:
             resolved = crud.resolve_embedding(db)
         finally:
@@ -206,10 +230,9 @@ def _resolve_parent_embedding(force: bool = False):
         return _parent_embed_resolved_cache[1]
     resolved = None
     try:
-        from app.core.database import SessionLocal
         from app.crud import retrieval_config as crud
 
-        db = SessionLocal()
+        db = _session_factory()()
         try:
             resolved = crud.resolve_parent_embedding(db)
         finally:
@@ -300,6 +323,8 @@ def collection_stats() -> dict:
 
 def get_document_chunks(doc_id: uuid.UUID | str, *, limit: int = 500) -> list[dict]:
     """读取某文档的分片（当前集合），供后台详情/检索反查。"""
+    from app.services import pricing
+
     try:
         col = get_collection()
         got = col.get(where={"doc_id": str(doc_id)}, include=["documents", "metadatas"])
@@ -313,16 +338,135 @@ def get_document_chunks(doc_id: uuid.UUID | str, *, limit: int = 500) -> list[di
         if i >= limit:
             break
         meta = meta or {}
+        text = text or ""
+        parent_text = meta.get("parent_text") or ""
         out.append({
             "id": vid,
             "chunk_no": meta.get("chunk_no"),
             "title": meta.get("title", ""),
-            "chars": len(text or ""),
-            "preview": (text or "")[:600],
-            "has_parent": bool(meta.get("parent_text")),
+            "chars": len(text),
+            "tokens_est": pricing.estimate_tokens(text),
+            "preview": text[:600],
+            "has_parent": bool(parent_text),
+            "parent_chars": len(parent_text),
         })
     out.sort(key=lambda x: (x.get("chunk_no") is None, x.get("chunk_no") or 0))
     return out
+
+
+def document_storage_profile(doc, *, parent: bool = False) -> dict:
+    """单篇文档的索引/向量化存储档案（后台可观测）。
+
+    优先返回索引时落库的快照（extra.index_profile），并实时读取当前集合的分块与
+    向量维度用于校验；历史文档没有快照时退化为按当前配置实时统计（live=True）。
+    """
+    from app.services import pricing, rag_settings
+
+    try:
+        cfg = rag_settings.get_config()
+    except Exception:
+        cfg = {}
+    docs: list[str] = []
+    vector_dim: int | None = None
+    vector_sample: list[float] = []
+    try:
+        col = get_collection(parent=parent)
+        got = col.get(where={"doc_id": str(doc.id)}, include=["documents"], limit=500)
+        docs = [d or "" for d in (got.get("documents") or [])]
+        # 只取首块向量用于维度/样例展示，避免大文档把全部向量读进内存
+        one = col.get(where={"doc_id": str(doc.id)}, include=["embeddings"], limit=1)
+        embs = one.get("embeddings")
+        if embs is not None and len(embs):
+            try:
+                vector_dim = len(embs[0])
+                vector_sample = [round(float(x), 6) for x in list(embs[0])[:8]]
+            except Exception:
+                vector_dim = None
+                vector_sample = []
+    except Exception:
+        docs = []
+    lengths = [len(d) for d in docs]
+    total_chars = sum(lengths)
+    resolved = _effective_parent_embedding() if parent else _resolve_embedding()
+    if resolved is None:
+        embedding = {
+            "provider": "local",
+            "model": "local-qwen",
+            "base_url": "",
+            "fingerprint": "local-qwen",
+        }
+    else:
+        embedding = {
+            "provider": resolved.provider,
+            "model": resolved.model,
+            "base_url": resolved.base_url or "",
+            "fingerprint": resolved.fingerprint(),
+        }
+    extra = dict(doc.extra or {})
+    snapshot = extra.get("parent_index_profile" if parent else "index_profile")
+    dedicated = bool(_parent_dedicated_fingerprint()) if parent else None
+    try:
+        file_size = Path(doc.file_path).stat().st_size if doc.file_path else 0
+    except OSError:
+        file_size = 0
+    return {
+        "collection": _collection_name(parent=parent),
+        "parent_dedicated": dedicated,
+        "embedding": embedding,
+        "vector_dim": vector_dim,
+        "vector_sample": vector_sample,
+        "chunk_count": int(doc.chunk_count or len(docs)),
+        "char_count": total_chars,
+        "tokens_est": pricing.estimate_tokens_many(docs) if docs else 0,
+        "chunk_chars": {
+            "min": min(lengths) if lengths else 0,
+            "max": max(lengths) if lengths else 0,
+            "avg": round(total_chars / len(lengths), 1) if lengths else 0,
+        },
+        "chunk_config": {
+            "chunk_size": cfg.get("chunk_size", CHUNK_SIZE),
+            "chunk_overlap": cfg.get("chunk_overlap", CHUNK_OVERLAP),
+            "parent_chunk_size": cfg.get("parent_chunk_size", 0),
+        },
+        "source": {
+            "file_name": doc.file_name or "",
+            "file_size": file_size,
+            "file_hash": extra.get("source_hash") or extra.get("indexed_hash") or "",
+        },
+        "indexed_at": (snapshot or {}).get("indexed_at")
+        or (doc.updated_at.isoformat() if doc.updated_at else None),
+        "profile_snapshot": snapshot,
+        "live": snapshot is None,
+    }
+
+
+def _store_index_profile(doc_id, *, parent: bool = False) -> None:
+    """索引完成后把本次实际使用的分块/embedding/集合参数冻结进 doc.extra。"""
+    try:
+        from datetime import UTC, datetime
+
+        from app.crud import knowledge as _kb
+
+        db = _session_factory()()
+        try:
+            doc = _kb.get_document_any(db, doc_id=doc_id)
+            if doc is None:
+                return
+            profile = document_storage_profile(doc, parent=parent)
+            profile["indexed_at"] = datetime.now(UTC).isoformat()
+            profile["live"] = False
+            profile.pop("profile_snapshot", None)
+            extra = dict(doc.extra or {})
+            key = "parent_index_profile" if parent else "index_profile"
+            extra[key] = profile
+            if not parent and profile["source"]["file_hash"]:
+                extra["source_hash"] = profile["source"]["file_hash"]
+            doc.extra = extra
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
 
 
 _embed_client_cache: dict = {}
@@ -509,10 +653,9 @@ def _store_index_hash(doc_id, file_hash: str | None) -> None:
     if not file_hash:
         return
     try:
-        from app.core.database import SessionLocal
         from app.crud import knowledge as _kb
 
-        db = SessionLocal()
+        db = _session_factory()()
         try:
             doc = _kb.get_document_any(db, doc_id=doc_id)
             if doc is not None:
@@ -533,10 +676,9 @@ def sync_changed_documents(*, limit: int = 50) -> dict:
     - 源文件丢失：标记失败并清理其残留向量（僵尸）；
     - 正在索引中的跳过，避免并发重复处理。
     """
-    from app.core.database import SessionLocal
     from app.crud import knowledge as _kb
 
-    db = SessionLocal()
+    db = _session_factory()()
     stats = {"scanned": 0, "reindexed": 0, "missing_source": 0, "skipped_indexing": 0}
     try:
         docs = _kb.list_all_documents(db)
@@ -572,10 +714,9 @@ def sync_changed_documents(*, limit: int = 50) -> dict:
 
 def _sync_mark_done(doc_id, chunk_count: int, error: str | None, file_hash: str) -> None:
     """增量同步专用的落状态回调（写状态 + 记录已索引哈希）。"""
-    from app.core.database import SessionLocal
     from app.crud import knowledge as _kb
 
-    db = SessionLocal()
+    db = _session_factory()()
     try:
         _kb.mark_indexed(db, doc_id=doc_id, chunk_count=chunk_count, error=error)
         if error is None:
@@ -742,7 +883,7 @@ def _embed_missing(texts: list[str], resolved) -> list[list[float]]:
             from app.services.llm import friendly_llm_error
 
             raise LLMConfigError(friendly_llm_error(e)) from e
-    if not MODEL_DIR.exists():
+    if not local_embedding_ready():
         raise LLMConfigError("未配置 Embedding 模型：请到 设置 → 模型配置 配置系统级 Embedding 后再试")
     model = get_embed_model()
     embs = model.encode(texts, convert_to_numpy=False)
@@ -1594,12 +1735,11 @@ def _parent_dedicated_fingerprint() -> str:
 
 def parent_index_status(db=None) -> dict:
     """家长索引状态：可见文档数、已按当前指纹索引数、待同步数。"""
-    from app.core.database import SessionLocal
     from app.crud import knowledge as _kb
 
     own = db is None
     if own:
-        db = SessionLocal()
+        db = _session_factory()()
     try:
         try:
             docs = _kb.list_parent_visible_documents(db=db)
@@ -1640,7 +1780,6 @@ def parent_index_status(db=None) -> dict:
 
 def sync_parent_index(limit: int = 200) -> dict:
     """把家长可见文档按当前家长 Embedding 重建到独立集合（增量：未变跳过）。"""
-    from app.core.database import SessionLocal
     from app.crud import knowledge as _kb
 
     fp = _parent_dedicated_fingerprint()
@@ -1654,7 +1793,7 @@ def sync_parent_index(limit: int = 200) -> dict:
             return {"dedicated": True, "running": True, "documents": 0, "indexed": 0, "skipped": 0, "failed": 0}
         _parent_sync_state["running"] = True
     stats = {"dedicated": True, "documents": 0, "indexed": 0, "skipped": 0, "failed": 0}
-    db = SessionLocal()
+    db = _session_factory()()
     try:
         try:
             docs = _kb.list_parent_visible_documents(db=db, limit=limit)
@@ -1681,6 +1820,7 @@ def sync_parent_index(limit: int = 200) -> dict:
                 extra.pop("parent_index_error", None)
                 doc.extra = extra
                 db.commit()
+                _store_index_profile(doc.id, parent=True)
                 stats["indexed"] += 1
             except Exception as exc:  # noqa: BLE001 —— 单篇失败不阻断其余文档
                 extra["parent_index_error"] = str(exc)[:500]
@@ -1716,20 +1856,25 @@ def index_in_background(*, doc_id: uuid.UUID, owner_id: uuid.UUID, title: str,
     def _run_inner():
         try:
             if mark_progress is not None:
-                mark_progress(doc_id, "parse", 10, "正在解析文档…")
-            text = extract_text(file_path, file_name)
-            if mark_progress is not None:
-                mark_progress(doc_id, "parse", 25, f"解析完成，共 {len(text)} 字")
-            n = index_document(
-                doc_id=doc_id, owner_id=owner_id, title=title, text=text,
-                on_progress=(lambda s, p, d: mark_progress(doc_id, s, p, d)) if mark_progress else None,
-            )
-            if n == 0:
-                mark_done(doc_id, 0, "文档解析为空，未生成切块")
-            else:
-                mark_done(doc_id, n, None)
-                # 记录已索引的源文件哈希：增量同步据此判断是否需要重跑（未变则跳过，省 Token）
-                _store_index_hash(doc_id, _file_hash(file_path))
+                mark_progress(doc_id, "queued", 5, "排队等待索引…")
+            with _INDEX_SEMAPHORE:
+                if mark_progress is not None:
+                    mark_progress(doc_id, "parse", 10, "正在解析文档…")
+                text = extract_text(file_path, file_name)
+                if mark_progress is not None:
+                    mark_progress(doc_id, "parse", 25, f"解析完成，共 {len(text)} 字")
+                n = index_document(
+                    doc_id=doc_id, owner_id=owner_id, title=title, text=text,
+                    on_progress=(lambda s, p, d: mark_progress(doc_id, s, p, d)) if mark_progress else None,
+                )
+                if n == 0:
+                    mark_done(doc_id, 0, "文档解析为空，未生成切块")
+                else:
+                    mark_done(doc_id, n, None)
+                    # 记录已索引的源文件哈希：增量同步据此判断是否需要重跑（未变则跳过，省 Token）
+                    _store_index_hash(doc_id, _file_hash(file_path))
+                    # 冻结本次索引档案（分块参数/embedding/集合/向量维度），供后台观测
+                    _store_index_profile(doc_id)
         except Exception as e:  # noqa: BLE001 —— 错误写入文档状态
             mark_done(doc_id, 0, str(e) or e.__class__.__name__)
 
@@ -1749,8 +1894,10 @@ __all__ = [
     "retrieve",
     "index_in_background",
     "get_collection",
+    "local_embedding_ready",
     "active_collection_name",
     "collection_stats",
+    "document_storage_profile",
     "get_document_chunks",
     "invalidate_embedding_cache",
     "invalidate_parent_embedding_cache",

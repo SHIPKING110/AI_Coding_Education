@@ -32,16 +32,28 @@ def test_engine():
 
 
 @pytest.fixture()
-def client(test_engine, tmp_path_factory):
+def client(test_engine, tmp_path_factory, monkeypatch):
     from app.api import deps
     from app.api.routers import rag_admin as rag_admin_router
     from app.services import rag, rag_evaluation, rag_trace
 
     rag.CHROMA_DIR = tmp_path_factory.mktemp("rag-admin-chroma")
     TestSession = sessionmaker(bind=test_engine)
+    rag._SESSION_FACTORY = TestSession
+    rag.invalidate_embedding_cache()
+    rag.invalidate_parent_embedding_cache()
+    # 测试不加载本地 Qwen（冷启动 >30s 会让评测轮询超时）；向量查询仍走真实 Chroma 空集合
+    monkeypatch.setattr(
+        rag, "embed_texts",
+        lambda texts, *args, **kwargs: [[0.0, 0.0, 0.0, 0.0] for _ in texts],
+    )
     rag_trace._SESSION_FACTORY = TestSession
     rag_evaluation._SESSION_FACTORY = TestSession
     rag_admin_router._SESSION_FACTORY = TestSession
+    # 评测后台线程会调用 LLM；即使调用失败也不能把 usage 账本写进开发库
+    from app.services import usage_meter
+
+    usage_meter._session_factory = TestSession
     rag_trace.flush(0.1)
 
     def override_get_db():
@@ -55,6 +67,9 @@ def client(test_engine, tmp_path_factory):
     c = TestClient(app)
     c.test_session_factory = TestSession  # type: ignore[attr-defined]
     yield c
+    rag._SESSION_FACTORY = None
+    rag.invalidate_embedding_cache()
+    rag.invalidate_parent_embedding_cache()
     app.dependency_overrides.clear()
 
 
@@ -230,8 +245,8 @@ def test_eval_run_completes(client):
     }, headers=admin_h)
     assert r.status_code == 200, r.text
     run_id = r.json()["id"]
-    # 轮询完成
-    deadline = time.time() + 10
+    # 轮询完成（冷启动首次导入 Chroma/本地依赖可能较慢，给 30s 余量）
+    deadline = time.time() + 30
     run = None
     while time.time() < deadline:
         run = client.get(f"/api/admin/rag/eval/runs/{run_id}", headers=admin_h).json()["run"]
@@ -240,3 +255,108 @@ def test_eval_run_completes(client):
         time.sleep(0.2)
     assert run is not None and run["status"] == "done", run
     assert "off" in (run["metrics"] or {}) and "on" in (run["metrics"] or {})
+
+
+def test_eval_cases_paginated(client):
+    admin_h, admin_me = _register(client, "admin", "rag-eval-page")
+    s = client.post("/api/admin/rag/eval/sets", json={
+        "name": "分页集", "domain": "agent_teacher", "owner_id": admin_me["id"],
+    }, headers=admin_h).json()
+    cases = [{"query": f"分页问题 {i}", "relevant": ["文档"]} for i in range(25)]
+    bulk = client.post(
+        f"/api/admin/rag/eval/sets/{s['id']}/cases/bulk",
+        json={"cases": cases}, headers=admin_h,
+    )
+    assert bulk.status_code == 200, bulk.text
+    assert bulk.json()["created"] == 25
+
+    page1 = client.get(
+        f"/api/admin/rag/eval/sets/{s['id']}/cases",
+        params={"page": 1, "page_size": 10}, headers=admin_h,
+    ).json()
+    assert page1["total"] == 25
+    assert page1["page"] == 1 and page1["page_size"] == 10
+    assert len(page1["items"]) == 10
+
+    page3 = client.get(
+        f"/api/admin/rag/eval/sets/{s['id']}/cases",
+        params={"page": 3, "page_size": 10}, headers=admin_h,
+    ).json()
+    assert page3["total"] == 25
+    assert len(page3["items"]) == 5
+
+
+def test_eval_cases_bulk_partial_and_dedupe(client):
+    admin_h, admin_me = _register(client, "admin", "rag-eval-bulk")
+    s = client.post("/api/admin/rag/eval/sets", json={
+        "name": "批量校验集", "domain": "agent_teacher", "owner_id": admin_me["id"],
+    }, headers=admin_h).json()
+    r = client.post(
+        f"/api/admin/rag/eval/sets/{s['id']}/cases/bulk",
+        json={
+            "cases": [
+                {"query": "重复问题", "relevant": []},
+                {"query": " 重复问题 ", "relevant": []},
+                {"relevant": []},
+                {"query": "另一个问题", "relevant": ["文档"]},
+            ],
+            "skip_duplicates": True,
+        },
+        headers=admin_h,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["created"] == 2
+    assert body["skipped_duplicates"] == 1
+    assert body["failed"] == 1
+    assert body["errors"][0]["index"] == 3
+
+
+def test_eval_run_rejects_same_generation_and_judge_model(client, monkeypatch):
+    from app.services import rag_evaluation
+
+    monkeypatch.setattr(rag_evaluation, "start_run", lambda run_id: None)
+    admin_h, admin_me = _register(client, "admin", "rag-eval-model")
+    cfg1 = client.post("/api/llm-configs", json={
+        "name": "生成模型", "base_url": "https://example.com/v1",
+        "api_key": "sk-test", "model": "model-a",
+    }, headers=admin_h).json()
+    cfg2 = client.post("/api/llm-configs", json={
+        "name": "裁判模型", "base_url": "https://example.com/v1",
+        "api_key": "sk-test", "model": "model-b",
+    }, headers=admin_h).json()
+    assert cfg1["id"] != cfg2["id"]
+
+    models = client.get("/api/admin/rag/eval/models", headers=admin_h).json()
+    assert {m["id"] for m in models["items"]} >= {cfg1["id"], cfg2["id"]}
+
+    s = client.post("/api/admin/rag/eval/sets", json={
+        "name": "模型校验集", "domain": "agent_teacher", "owner_id": admin_me["id"],
+    }, headers=admin_h).json()
+    client.post(f"/api/admin/rag/eval/sets/{s['id']}/cases", json={
+        "query": "模型校验问题", "relevant": ["文档"],
+    }, headers=admin_h)
+
+    same = client.post(f"/api/admin/rag/eval/sets/{s['id']}/runs", json={
+        "owner_id": admin_me["id"], "answer_eval": True,
+        "generation_config_id": cfg1["id"], "judge_config_id": cfg1["id"],
+    }, headers=admin_h)
+    assert same.status_code == 400, same.text
+
+    same_model = client.post("/api/admin/rag/eval/sets/{}/runs".format(s["id"]), json={
+        "owner_id": admin_me["id"], "answer_eval": True,
+        "generation_config_id": cfg1["id"], "judge_config_id": cfg2["id"],
+    }, headers=admin_h)
+    assert same_model.status_code == 200, same_model.text
+    assert same_model.json()["generation_model"] == "model-a"
+    assert same_model.json()["judge_model"] == "model-b"
+
+    cfg3 = client.post("/api/llm-configs", json={
+        "name": "同模型配置", "base_url": "https://example.com/v1",
+        "api_key": "sk-test", "model": "model-a",
+    }, headers=admin_h).json()
+    duplicate_model = client.post(f"/api/admin/rag/eval/sets/{s['id']}/runs", json={
+        "owner_id": admin_me["id"], "answer_eval": True,
+        "generation_config_id": cfg1["id"], "judge_config_id": cfg3["id"],
+    }, headers=admin_h)
+    assert duplicate_model.status_code == 400, duplicate_model.text

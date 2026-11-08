@@ -171,6 +171,17 @@ def _meter_chat(
             base_url = _bu
         if model is None:
             model = _model
+    # 失败且未收到任何 token 的调用（连不上/鉴权失败/超时）不产生记账行：
+    # 厂商未计费，按 prompt 估算 token 只会制造「未定价」噪声、污染成本口径。
+    # 若流式调用已收到部分增量（output_chars > 0），仍按估算记录真实消耗。
+    if (
+        status == "error"
+        and input_tokens <= 0
+        and output_tokens <= 0
+        and output_chars <= 0
+        and not output_text
+    ):
+        return
     source = "provider"
     if input_tokens <= 0 and prompt_text:
         input_tokens = pricing.estimate_tokens(prompt_text)

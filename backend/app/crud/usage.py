@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.system_setting import SystemSetting
@@ -64,7 +64,15 @@ def stats(db: Session, *, since: datetime, until: datetime | None = None) -> dic
     provider_events = _count(LLMUsageEvent.source == "provider")
     estimated_events = _count(LLMUsageEvent.source == "estimated")
     error_events = _count(LLMUsageEvent.status == "error")
-    unpriced_events = _count(LLMUsageEvent.priced_status == "unpriced")
+    # 未定价告警只统计「成功且实际消耗 tokens」的调用：
+    # 失败重试与空调用即使没有价格行也不应制造噪声。
+    unpriced_conds = [
+        LLMUsageEvent.priced_status == "unpriced",
+        func.coalesce(LLMUsageEvent.status, "ok") == "ok",
+        func.coalesce(LLMUsageEvent.input_tokens, 0)
+        + func.coalesce(LLMUsageEvent.output_tokens, 0) > 0,
+    ]
+    unpriced_events = _count(*unpriced_conds)
 
     # 按天趋势（平台/教师分开，页面可叠加或切换）
     day = func.date(LLMUsageEvent.created_at)
@@ -200,7 +208,7 @@ def stats(db: Session, *, since: datetime, until: datetime | None = None) -> dic
                 LLMUsageEvent.model,
                 func.count(),
             )
-            .where(*conds, LLMUsageEvent.priced_status == "unpriced")
+            .where(*conds, *unpriced_conds)
             .group_by(LLMUsageEvent.provider_host, LLMUsageEvent.model)
             .order_by(func.count().desc())
             .limit(20)
@@ -375,6 +383,42 @@ def delete_reconciliation(db: Session, recon_id: uuid.UUID) -> None:
         db.commit()
 
 
+def count_unpriced(
+    db: Session,
+    *,
+    since: datetime,
+    provider_host: str | None = None,
+    model: str | None = None,
+) -> int:
+    conds = [LLMUsageEvent.priced_status == "unpriced", LLMUsageEvent.created_at >= since]
+    if provider_host:
+        conds.append(LLMUsageEvent.provider_host == provider_host)
+    if model:
+        conds.append(LLMUsageEvent.model == model)
+    return int(db.scalar(select(func.count()).select_from(LLMUsageEvent).where(*conds)) or 0)
+
+
+def purge_unpriced(
+    db: Session,
+    *,
+    since: datetime,
+    provider_host: str | None = None,
+    model: str | None = None,
+) -> int:
+    """删除保留期内匹配的未定价明细（费用恒为 0，不影响已定价账本与月度汇总）。
+
+    典型用途：清理测试网关（如 example.com / model-a）或错误配置产生的噪声。
+    """
+    conds = [LLMUsageEvent.priced_status == "unpriced", LLMUsageEvent.created_at >= since]
+    if provider_host:
+        conds.append(LLMUsageEvent.provider_host == provider_host)
+    if model:
+        conds.append(LLMUsageEvent.model == model)
+    result = db.execute(delete(LLMUsageEvent).where(*conds))
+    db.commit()
+    return int(result.rowcount or 0)
+
+
 def month_ledger(db: Session, month: str) -> dict:
     """某月账本按 (provider_host, currency) 汇总，供与厂商账单对比。"""
     since = datetime.strptime(month + "-01", "%Y-%m-%d").replace(tzinfo=UTC)
@@ -436,6 +480,7 @@ def set_budget(db: Session, *, monthly_budget: float, alert_ratio: float) -> dic
 
 
 __all__ = [
+    "count_unpriced",
     "create_price",
     "delete_price",
     "delete_reconciliation",
@@ -446,6 +491,7 @@ __all__ = [
     "list_prices",
     "list_reconciliations",
     "month_ledger",
+    "purge_unpriced",
     "set_budget",
     "stats",
     "update_price",

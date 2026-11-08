@@ -185,6 +185,17 @@ function statusClass(s: string) {
   return s === 'ready' ? 'ok' : s === 'failed' ? 'bad' : 'pending'
 }
 
+function formatBytes(size: number | null | undefined) {
+  const n = Number(size || 0)
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+function fmtTime(iso: string | null | undefined) {
+  return iso ? iso.slice(0, 19).replace('T', ' ') : '-'
+}
+
 onMounted(() => {
   void loadDocs()
   void loadBases()
@@ -194,7 +205,7 @@ onMounted(() => {
 
 <template>
   <div>
-    <PageHead title="知识资产" eyebrow="RAG ASSETS" sub="文档接入、虚拟知识库与向量集合运维">
+    <PageHead title="知识资产" eyebrow="RAG ASSETS" sub="文档接入、索引档案、虚拟知识库与向量集合运维">
       <template #actions>
         <button class="btn ghost" @click="sync">增量同步</button>
         <button class="btn" :disabled="loading" @click="loadDocs">{{ loading ? '刷新中…' : '刷新' }}</button>
@@ -251,6 +262,7 @@ onMounted(() => {
               <td><button class="switch" :class="{ on: d.visible_to_parents }" @click="toggleParent(d)">{{ d.visible_to_parents ? '是' : '否' }}</button></td>
               <td class="mono">{{ d.updated_at?.slice(0, 16).replace('T', ' ') }}</td>
               <td class="ops">
+                <button class="mini" @click="openDoc(d)">档案</button>
                 <button class="mini" @click="reindex(d)">重建</button>
                 <button class="mini danger" @click="removeDoc(d)">删除</button>
               </td>
@@ -264,6 +276,9 @@ onMounted(() => {
           <span>{{ page }} / {{ totalPages }}</span>
           <button class="mini" :disabled="page >= totalPages" @click="changePage(1)">下一页</button>
         </div>
+        <p class="metric-note" style="margin:8px 4px 0">
+          点击「档案」查看索引时冻结的分块参数、Tokens、Embedding、向量维度与集合快照（历史文档按当前配置实时统计）。
+        </p>
       </section>
 
       <aside v-if="selected" class="drawer">
@@ -280,6 +295,47 @@ onMounted(() => {
           <div><span>文件</span><b class="ellipsis">{{ selected.file_name }}</b></div>
           <div><span>索引哈希</span><b class="mono">{{ selected.indexed_hash || '-' }}</b></div>
         </div>
+
+        <section v-if="selected.storage" class="storage-block">
+          <div class="panel-head" style="margin-top:0">
+            <h3>索引档案</h3>
+            <span class="muted">{{ selected.storage.live ? '历史文档：按当前配置实时统计' : '索引时冻结快照' }}</span>
+          </div>
+          <div class="meta-grid">
+            <div><span>源文件</span><b class="ellipsis" :title="selected.storage.source.file_name">{{ selected.storage.source.file_name || '-' }}</b></div>
+            <div><span>文件大小</span><b>{{ formatBytes(selected.storage.source.file_size) }}</b></div>
+            <div><span>原文字符</span><b>{{ selected.storage.char_count.toLocaleString() }}</b></div>
+            <div><span>估算 Tokens</span><b>{{ selected.storage.tokens_est.toLocaleString() }}</b></div>
+            <div><span>分块参数</span><b>{{ selected.storage.chunk_config.chunk_size }} 字 / 重叠 {{ selected.storage.chunk_config.chunk_overlap }} 字</b></div>
+            <div><span>父子切分</span><b>{{ selected.storage.chunk_config.parent_chunk_size ? `${selected.storage.chunk_config.parent_chunk_size} 字` : '关闭' }}</b></div>
+            <div><span>分块数</span><b>{{ selected.storage.chunk_count }}</b></div>
+            <div><span>块长（均/最短/最长）</span><b>{{ selected.storage.chunk_chars.avg }} / {{ selected.storage.chunk_chars.min }} / {{ selected.storage.chunk_chars.max }}</b></div>
+            <div><span>Embedding</span><b class="ellipsis" :title="selected.storage.embedding.model">{{ selected.storage.embedding.model || '-' }}</b></div>
+            <div><span>向量网关</span><b class="ellipsis">{{ selected.storage.embedding.base_url || '-' }}</b></div>
+            <div><span>向量维度</span><b>{{ selected.storage.vector_dim ?? '-' }}</b></div>
+            <div><span>集合</span><b class="mono ellipsis" :title="selected.storage.collection">{{ selected.storage.collection }}</b></div>
+            <div><span>指纹</span><b class="mono">{{ selected.storage.embedding.fingerprint }}</b></div>
+            <div><span>索引时间</span><b class="mono">{{ fmtTime(selected.storage.indexed_at) }}</b></div>
+            <div><span>源文件哈希</span><b class="mono ellipsis">{{ selected.storage.source.file_hash?.slice(0, 16) || '-' }}</b></div>
+            <div><span>索引快照</span><b>{{ selected.storage.profile_snapshot ? '已保存' : '未保存' }}</b></div>
+          </div>
+          <div v-if="selected.storage.vector_sample?.length" class="vector-sample">
+            <span class="muted">首块向量样例（前 8 维）</span>
+            <code>[{{ selected.storage.vector_sample.map((v) => v.toFixed(4)).join(', ') }}]</code>
+          </div>
+          <p class="metric-note">
+            文档按 {{ selected.storage.chunk_config.chunk_size }} 字窗口、{{ selected.storage.chunk_config.chunk_overlap }} 字重叠切块，
+            由 Embedding 模型生成向量后存入 Chroma 集合 <b>{{ selected.storage.collection }}</b>。集合名带 embedding 指纹，
+            换模型会自动落到新集合，避免不同向量空间混存；父子切分开启时，子块用于检索命中，父块用于扩展回答上下文。
+          </p>
+          <div v-if="selected.parent_storage" class="meta-grid parent-storage">
+            <div><span>家长索引</span><b>{{ selected.parent_storage.parent_dedicated ? '独立集合' : '复用系统集合' }}</b></div>
+            <div><span>家长索引集合</span><b class="mono ellipsis">{{ selected.parent_storage.collection }}</b></div>
+            <div><span>家长索引分片</span><b>{{ selected.parent_storage.chunk_count }}</b></div>
+            <div><span>家长向量维度</span><b>{{ selected.parent_storage.vector_dim ?? '-' }}</b></div>
+            <div><span>家长索引时间</span><b class="mono">{{ fmtTime(selected.parent_storage.indexed_at) }}</b></div>
+          </div>
+        </section>
         <p v-if="selected.error" class="error">{{ selected.error }}</p>
         <p v-if="selected.progress" class="muted">进度：{{ selected.progress.stage }} {{ selected.progress.percent }}% {{ selected.progress.detail }}</p>
         <div class="panel-head"><h3>分片预览</h3><span class="muted">{{ chunks.length }} 块</span></div>
@@ -288,8 +344,8 @@ onMounted(() => {
           <div v-for="c in chunks" :key="c.id" class="chunk">
             <div class="chunk-head">
               <span class="tag">#{{ c.chunk_no }}</span>
-              <span class="muted">{{ c.chars }} 字</span>
-              <span v-if="c.has_parent" class="tag ok">父子</span>
+              <span class="muted">{{ c.chars }} 字 · ~{{ c.tokens_est ?? 0 }} tokens</span>
+              <span v-if="c.has_parent" class="tag ok">父子 · 父块 {{ c.parent_chars ?? 0 }} 字</span>
             </div>
             <p>{{ c.preview }}</p>
           </div>
@@ -382,6 +438,12 @@ onMounted(() => {
 .meta-grid div { background: #f8fafc; border-radius: 10px; padding: 9px 10px; display: flex; flex-direction: column; gap: 3px; }
 .meta-grid span { color: var(--ink-3); font-size: 11.5px; }
 .meta-grid b { font-size: 12.5px; }
+.storage-block { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 14px 0; background: var(--surface); }
+.storage-block .panel-head h3 { font-size: 13.5px; }
+.parent-storage { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.vector-sample { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.vector-sample code { background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 8px 10px; font-size: 11px; overflow: auto; }
+.metric-note { margin: 10px 0 0; color: var(--ink-3); font-size: 11.5px; line-height: 1.7; background: #f8fafc; border-radius: 8px; padding: 8px 10px; }
 .chunk-list { display: flex; flex-direction: column; gap: 10px; }
 .chunk { border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
 .chunk-head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }

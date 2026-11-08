@@ -39,6 +39,51 @@ export async function uploadDoc(file: File, title: string, description: string):
   return data
 }
 
+export interface BulkUploadResult {
+  created: KnowledgeDoc[]
+  skipped: { file: string; reason: string }[]
+  failed: { file: string; error: string }[]
+  counts: { created: number; skipped: number; failed: number }
+}
+
+export async function uploadDocs(
+  files: File[],
+  description: string,
+  titles?: string[],
+  descriptions?: string[],
+): Promise<BulkUploadResult> {
+  const fd = new FormData()
+  for (const file of files) fd.append('files', file)
+  fd.append('description', description)
+  if (titles?.length) fd.append('titles', JSON.stringify(titles))
+  if (descriptions?.length) fd.append('descriptions', JSON.stringify(descriptions))
+  const { data } = await http.post<BulkUploadResult>('/knowledge/documents/bulk', fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+export interface DescribeDocResult {
+  description: string
+  model: string
+  config_name: string
+}
+
+export async function describeKnowledgeDoc(
+  file: File,
+  configId: string,
+  title?: string,
+): Promise<DescribeDocResult> {
+  const fd = new FormData()
+  fd.append('file', file)
+  fd.append('config_id', configId)
+  if (title?.trim()) fd.append('title', title.trim())
+  const { data } = await http.post<DescribeDocResult>('/knowledge/documents/describe', fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
 export async function publishDoc(id: string): Promise<KnowledgeDoc> {
   const { data } = await http.post(`/knowledge/documents/${id}/publish`)
   return data

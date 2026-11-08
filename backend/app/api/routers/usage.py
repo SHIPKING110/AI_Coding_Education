@@ -334,6 +334,41 @@ def reprice_unpriced(
     return {"scanned": len(rows), "repriced": repriced, "skipped": skipped}
 
 
+class PurgeUnpricedIn(BaseModel):
+    provider_host: str = ""
+    model: str = ""
+    since_days: int = 365
+    dry_run: bool = False
+
+
+@router.post(
+    "/events/purge-unpriced",
+    dependencies=[Depends(require_roles(Role.ADMIN))],
+)
+def purge_unpriced_events(payload: PurgeUnpricedIn, db: Session = Depends(get_db)) -> dict:
+    """清理未定价明细（仅删除 priced_status=unpriced 的行，费用恒为 0）。
+
+    用于移除测试网关/错误配置产生的噪声（如 example.com 上的 model-a/model-b）。
+    不影响已定价账本、月度汇总与对账数据。
+    """
+    since = datetime.now(UTC) - timedelta(days=max(1, min(3660, payload.since_days)))
+    scanned = crud.count_unpriced(
+        db,
+        since=since,
+        provider_host=payload.provider_host.strip() or None,
+        model=payload.model.strip() or None,
+    )
+    if payload.dry_run:
+        return {"scanned": scanned, "deleted": 0, "dry_run": True}
+    deleted = crud.purge_unpriced(
+        db,
+        since=since,
+        provider_host=payload.provider_host.strip() or None,
+        model=payload.model.strip() or None,
+    )
+    return {"scanned": scanned, "deleted": deleted, "dry_run": False}
+
+
 @router.post(
     "/prices",
     status_code=201,

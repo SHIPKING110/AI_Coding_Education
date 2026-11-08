@@ -32,6 +32,7 @@ import { listReports } from '@/api/report'
 import {
   collectDoc,
   deleteDoc,
+  describeKnowledgeDoc,
   listMyDocs,
   listPlaza,
   publishDoc,
@@ -40,7 +41,7 @@ import {
   toggleDocSearch,
   uncollectDoc,
   unpublishDoc,
-  uploadDoc,
+  uploadDocs,
   type KnowledgeDoc,
 } from '@/api/knowledge'
 import { renderMarkdown } from '@/utils/markdown'
@@ -131,11 +132,26 @@ const plazaMcps = ref<AgentMcp[]>([])
 const plazaSub = ref<'docs' | 'skills' | 'mcps'>('docs')
 const kbLoading = ref(false)
 const kbError = ref('')
-const upFile = ref<File | null>(null)
-const upTitle = ref('')
-const upDesc = ref('')
+const upItems = ref<{
+  file: File
+  title: string
+  desc: string
+  descLoading?: boolean
+  descError?: string
+  status: 'pending' | 'uploading' | 'ok' | 'error'
+  error?: string
+}[]>([])
+const autoDesc = ref(false)
+const descConfigId = ref('')
+const descGenerating = ref(false)
 const uploading = ref(false)
 const creating = ref(false)
+const kbNotice = ref('')
+const MAX_BATCH_FILES = 10
+const MAX_UPLOAD_MB = 20
+const canGenDesc = computed(
+  () => autoDesc.value && !!descConfigId.value && !descGenerating.value && !uploading.value,
+)
 
 const ICONS: Record<string, string> = {
   assistant: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 12.5h5',
@@ -1316,21 +1332,115 @@ async function doToggleParentVisible(d: KnowledgeDoc) {
   }
 }
 
+async function genDesc(item: (typeof upItems.value)[number]) {
+  if (!autoDesc.value) return
+  if (!descConfigId.value) {
+    kbError.value = '请选择用于生成描述的模型'
+    return
+  }
+  item.descLoading = true
+  item.descError = ''
+  try {
+    const r = await describeKnowledgeDoc(item.file, descConfigId.value, item.title)
+    item.desc = r.description
+  } catch (e: unknown) {
+    const status = (e as { response?: { status?: number } })?.response?.status
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    if (status === 403) {
+      showNoPermDialog('暂无「上传知识库文档」权限，请联系管理员在「权限管理」中开通。')
+    }
+    item.descError = detail || (e instanceof Error ? e.message : '生成失败')
+    kbError.value = `「${item.file.name}」描述生成失败：${item.descError}`
+  } finally {
+    item.descLoading = false
+  }
+}
+
+async function genAllDescs() {
+  if (!autoDesc.value || !descConfigId.value || descGenerating.value || uploading.value) return
+  const targets = upItems.value.filter((i) => !i.desc.trim())
+  if (!targets.length) {
+    kbNotice.value = '所有文件都已有描述'
+    return
+  }
+  descGenerating.value = true
+  kbError.value = ''
+  kbNotice.value = ''
+  try {
+    for (const item of targets) await genDesc(item)
+  } finally {
+    descGenerating.value = false
+  }
+}
+
 async function doUpload() {
   if (!canUploadDoc.value) {
     showNoPermDialog('暂无「上传知识库文档」权限，请联系管理员在「权限管理」中开通。')
     return
   }
-  if (!upFile.value || !upTitle.value.trim() || !upDesc.value.trim() || uploading.value) return
+  if (!upItems.value.length || uploading.value) return
+  if (upItems.value.some((i) => !i.title.trim())) {
+    kbError.value = '请为每个文件填写标题'
+    return
+  }
   uploading.value = true
   kbError.value = ''
+  kbNotice.value = ''
   try {
-    await uploadDoc(upFile.value, upTitle.value.trim(), upDesc.value.trim())
-    upFile.value = null
-    upTitle.value = ''
-    upDesc.value = ''
-    await loadKb()
-    startKbPoll()
+    if (autoDesc.value) {
+      if (!descConfigId.value) {
+        kbError.value = '请选择用于生成描述的模型，或关闭 AI 自动生成描述'
+        return
+      }
+      const missing = upItems.value.filter((i) => !i.desc.trim())
+      for (const item of missing) {
+        await genDesc(item)
+        if (!item.desc.trim()) {
+          kbError.value = `「${item.file.name}」缺少描述，请重试生成或手动填写`
+          return
+        }
+      }
+    }
+    if (upItems.value.some((i) => !i.desc.trim())) {
+      kbError.value = '请为每个文件填写描述，或开启 AI 自动生成描述'
+      return
+    }
+    upItems.value.forEach((i) => {
+      i.status = 'uploading'
+      i.error = ''
+    })
+    const res = await uploadDocs(
+      upItems.value.map((i) => i.file),
+      '',
+      upItems.value.map((i) => i.title.trim()),
+      upItems.value.map((i) => i.desc.trim()),
+    )
+    const okNames = new Set(res.created.map((d) => d.file_name))
+    const skipNames = new Set(res.skipped.map((s) => s.file))
+    const failMap = new Map(res.failed.map((f) => [f.file, f.error]))
+    for (const item of upItems.value) {
+      const fail = failMap.get(item.file.name)
+      if (fail) {
+        item.status = 'error'
+        item.error = fail
+      } else if (okNames.has(item.file.name) || skipNames.has(item.file.name)) {
+        item.status = 'ok'
+      }
+    }
+    const failed = res.counts.failed
+    const parts = [`成功 ${res.counts.created} 个`]
+    if (res.counts.skipped) parts.push(`跳过重复 ${res.counts.skipped} 个`)
+    if (failed) parts.push(`失败 ${failed} 个`)
+    kbNotice.value = `批量上传完成：${parts.join('，')}`
+    if (failed) {
+      upItems.value = upItems.value.filter((i) => i.status === 'error')
+    } else {
+      upItems.value = []
+    }
+    if (res.counts.created) {
+      await loadKb()
+      startKbPoll()
+    }
   } catch (e: unknown) {
     const status = (e as { response?: { status?: number } })?.response?.status
     if (status === 403) {
@@ -1399,12 +1509,59 @@ async function doUnpublishMcp(m: AgentMcp) {
   await loadKb()
 }
 
+function addUpFiles(files: FileList | File[]) {
+  const allowed = /\.(txt|md|markdown|pdf|docx)$/i
+  const existing = new Set(upItems.value.map((i) => `${i.file.name}:${i.file.size}`))
+  for (const file of Array.from(files)) {
+    if (upItems.value.length >= MAX_BATCH_FILES) {
+      kbError.value = `单次最多上传 ${MAX_BATCH_FILES} 个文件`
+      break
+    }
+    if (!allowed.test(file.name)) {
+      kbError.value = `暂不支持的文件类型：${file.name}`
+      continue
+    }
+    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      kbError.value = `文件超过 ${MAX_UPLOAD_MB}MB：${file.name}`
+      continue
+    }
+    const key = `${file.name}:${file.size}`
+    if (existing.has(key)) continue
+    existing.add(key)
+    upItems.value.push({
+      file,
+      title: file.name.replace(/\.[^.]+$/, ''),
+      desc: '',
+      status: 'pending',
+    })
+  }
+}
+
 function onFileChange(e: Event) {
   const t = e.target as HTMLInputElement
-  upFile.value = t.files?.[0] ?? null
-  if (upFile.value && !upTitle.value) {
-    upTitle.value = upFile.value.name.replace(/\.[^.]+$/, '')
-  }
+  addUpFiles(t.files ?? [])
+  t.value = ''
+}
+
+function onDropFiles(e: DragEvent) {
+  const files = e.dataTransfer?.files
+  if (files?.length) addUpFiles(files)
+}
+
+function removeUpItem(index: number) {
+  upItems.value.splice(index, 1)
+}
+
+function clearUpItems() {
+  upItems.value = []
+  kbNotice.value = ''
+  kbError.value = ''
+}
+
+function formatFileSize(size: number) {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
 function citationsOf(m: { citations?: Record<string, unknown> | null }): RagHit[] {
@@ -2547,26 +2704,84 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
         <!-- 我的知识库 -->
         <template v-else-if="tab === 'mine'">
           <div class="kb-scroll">
-          <div class="kb-upload">
+          <div class="kb-upload" @dragover.prevent @drop.prevent="onDropFiles">
             <div class="kb-upload-head">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
-              上传文档
-              <span>支持 txt / md / pdf / docx</span>
+              批量上传文档
+              <span>支持 txt / md / pdf / docx · 单次最多 {{ MAX_BATCH_FILES }} 个 · 单文件 ≤ {{ MAX_UPLOAD_MB }}MB</span>
             </div>
             <div class="kb-form">
-              <label class="file-drop">
-                <input type="file" accept=".txt,.md,.markdown,.pdf,.docx" @change="onFileChange" />
-                <span v-if="!upFile">点击选择文件</span>
-                <span v-else class="picked">{{ upFile.name }}</span>
+              <label class="file-drop" :class="{ 'has-files': upItems.length }">
+                <input type="file" multiple accept=".txt,.md,.markdown,.pdf,.docx" @change="onFileChange" />
+                <span v-if="!upItems.length">点击选择文件（可按住 Ctrl/Shift 多选），或拖拽到此处</span>
+                <span v-else class="picked">已选择 {{ upItems.length }} 个文件，可继续添加</span>
               </label>
-              <input v-model="upTitle" class="kb-input" placeholder="标题（必填）" maxlength="160" />
-              <input v-model="upDesc" class="kb-input" placeholder="描述（必填，广场展示用）" />
-              <button class="btn primary" :disabled="uploading || !upFile || !upTitle.trim() || !upDesc.trim()" @click="doUpload">
-                {{ uploading ? '上传中…' : '上传并入库' }}
-              </button>
+              <div v-if="upItems.length" class="up-list">
+                <div v-for="(item, idx) in upItems" :key="`${item.file.name}-${item.file.size}`" class="up-item" :class="item.status">
+                  <div class="up-item-main">
+                    <span class="up-name" :title="item.file.name">{{ item.file.name }}</span>
+                    <span class="up-size">{{ formatFileSize(item.file.size) }}</span>
+                    <span v-if="item.status === 'error'" class="up-err">{{ item.error }}</span>
+                  </div>
+                  <input v-model="item.title" class="kb-input up-title" placeholder="标题（必填）" maxlength="160" :disabled="uploading" />
+                  <button class="mini-btn danger up-remove" :disabled="uploading" @click="removeUpItem(idx)">移除</button>
+                  <div class="up-desc-row">
+                    <textarea
+                      v-model="item.desc"
+                      class="kb-input up-desc"
+                      rows="2"
+                      maxlength="500"
+                      placeholder="描述（必填，广场展示用；可手动填写或 AI 生成）"
+                      :disabled="uploading || item.descLoading"
+                    />
+                    <button
+                      class="mini-btn up-gen"
+                      :disabled="!canGenDesc || item.descLoading"
+                      @click="genDesc(item)"
+                    >
+                      {{ item.descLoading ? '生成中…' : 'AI 生成' }}
+                    </button>
+                  </div>
+                  <p v-if="item.descError" class="up-err">{{ item.descError }}</p>
+                </div>
+              </div>
+              <div class="up-auto-desc">
+                <label class="check">
+                  <input v-model="autoDesc" type="checkbox" :disabled="uploading || descGenerating" />
+                  用 AI 自动生成描述
+                </label>
+                <select
+                  v-model="descConfigId"
+                  class="kb-input up-model"
+                  :disabled="!autoDesc || uploading || descGenerating"
+                >
+                  <option value="">选择已配置模型</option>
+                  <option v-for="c in llmConfigs" :key="c.id" :value="c.id">{{ c.name }}（{{ c.model }}）</option>
+                </select>
+                <button class="mini-btn" :disabled="!canGenDesc" @click="genAllDescs">
+                  {{ descGenerating ? '生成中…' : '生成空描述' }}
+                </button>
+              </div>
+              <p v-if="autoDesc && !llmConfigs.length" class="pick-hint">
+                还没有已配置的模型，请先到 设置 → 模型配置 添加；也可以关闭 AI 自动生成后手动填写描述。
+              </p>
+              <p v-else-if="autoDesc && !descConfigId" class="pick-hint">
+                请选择用于生成描述的模型，生成结果会写入每条文档，并计入「用量与成本」。
+              </p>
+              <div class="up-actions">
+                <button
+                  class="btn primary"
+                  :disabled="uploading || descGenerating || !upItems.length || upItems.some((i) => !i.title.trim() || (!i.desc.trim() && !autoDesc)) || (autoDesc && !descConfigId)"
+                  @click="doUpload"
+                >
+                  {{ uploading ? '处理中…' : `上传并入库（${upItems.length}）` }}
+                </button>
+                <button v-if="upItems.length" class="mini-btn" :disabled="uploading || descGenerating" @click="clearUpItems">清空</button>
+              </div>
               <p v-if="!canUploadDoc" class="pick-hint">当前账号暂无「上传知识库文档」权限，点击上传会提示并需管理员开通。</p>
             </div>
           </div>
+          <p v-if="kbNotice" class="ok-note">{{ kbNotice }}</p>
           <p v-if="kbError" class="error">{{ kbError }}</p>
           <p v-if="kbLoading" class="empty">加载中…</p>
           <div class="kb-grid">
@@ -3700,6 +3915,26 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .kb-input { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 9px 12px; font-size: 13px; font-family: inherit; }
 .kb-input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-glow); }
 .kb-form .btn { grid-column: 1 / -1; justify-self: start; }
+.kb-form > .kb-input { grid-column: 1 / -1; }
+.file-drop.has-files { padding: 10px; }
+.up-list { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow: auto; }
+.up-item { display: grid; grid-template-columns: minmax(0, 1fr) 220px auto; gap: 8px; align-items: start; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface); }
+.up-item.error { border-color: #fecaca; background: #fffafa; }
+.up-item-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-top: 6px; }
+.up-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.up-size { font-size: 11px; color: var(--ink-3); }
+.up-err { grid-column: 1 / -1; font-size: 11px; color: #b91c1c; margin: 0; }
+.up-title { padding: 6px 9px; font-size: 12px; }
+.up-remove { margin-top: 2px; }
+.up-desc-row { grid-column: 1 / -1; display: flex; gap: 8px; align-items: flex-start; }
+.up-desc { flex: 1; min-height: 54px; resize: vertical; padding: 7px 9px; font-size: 12px; line-height: 1.5; }
+.up-gen { white-space: nowrap; margin-top: 4px; }
+.up-auto-desc { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 10px; background: var(--surface); }
+.up-auto-desc .check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+.up-model { min-width: 220px; padding: 6px 9px; font-size: 12px; }
+.up-actions { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+.up-actions .btn { justify-self: auto; }
+.ok-note { color: #047857; background: var(--success-soft, #ecfdf5); padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; font-size: 12.5px; }
 
 .kb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .kb-card { display: flex; flex-direction: column; gap: 6px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); transition: all .18s; }

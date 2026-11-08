@@ -138,6 +138,11 @@ class RagEvalRun(Base):
     top_k: Mapped[int] = mapped_column(Integer, default=5)
     rerank: Mapped[bool] = mapped_column(Boolean, default=True)
     answer_eval: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 答案质量评测的模型选择：生成回答与裁判打分分离，避免同源偏好
+    generation_config_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    judge_config_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    generation_model: Mapped[str] = mapped_column(String(128), default="")
+    judge_model: Mapped[str] = mapped_column(String(128), default="")
     config_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     compare: Mapped[dict | None] = mapped_column(JSON, nullable=True)

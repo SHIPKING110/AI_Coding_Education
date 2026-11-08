@@ -147,6 +147,15 @@ export async function repriceUnpricedUsage(
   return data
 }
 
+export async function purgeUnpricedUsage(payload: {
+  provider_host?: string
+  model?: string
+  since_days?: number
+}): Promise<{ scanned: number; deleted: number; dry_run: boolean }> {
+  const { data } = await http.post('/admin/usage/events/purge-unpriced', payload)
+  return data
+}
+
 export interface UsageBudget {
   monthly_budget: number
   alert_ratio: number

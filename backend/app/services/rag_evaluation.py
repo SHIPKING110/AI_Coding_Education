@@ -49,6 +49,28 @@ def start_run(run_id) -> None:
     threading.Thread(target=_run, args=(str(run_id),), daemon=True).start()
 
 
+def _resolve_run_models(db: Session, run: RagEvalRun, llm_context):
+    """解析本次运行的生成模型与评测模型；显式配置不可用时让运行失败而非静默换模型。"""
+    if not run.answer_eval:
+        try:
+            resolved = llm_context.optional_resolved(db, run.owner_id, "rag_eval")
+        except Exception:
+            resolved = None
+        return resolved, resolved
+
+    def _pick(config_id):
+        if config_id is None:
+            try:
+                return llm_context.optional_resolved(db, run.owner_id, "rag_eval")
+            except Exception:
+                return None
+        return llm_context.resolve_override(
+            db, run.owner_id, "rag_eval", config_id=config_id
+        )
+
+    return _pick(run.generation_config_id), _pick(run.judge_config_id)
+
+
 def _run(run_id: str) -> None:
     factory = _session_factory()
     db: Session = factory()
@@ -69,13 +91,16 @@ def _run(run_id: str) -> None:
         # 以便在「用量与成本」中单独统计评测成本；无可用个人模型时优雅降级。
         from app.services import llm_context
 
-        try:
-            resolved = llm_context.optional_resolved(db, run.owner_id, "rag_eval")
-        except Exception:
-            resolved = None
-        with llm_context.use_llm(resolved):
-            off_metrics, _ = _run_pass(db, run, cases, rerank=False)
-            on_metrics, rows = _run_pass(db, run, cases, rerank=True)
+        gen_resolved, judge_resolved = _resolve_run_models(db, run, llm_context)
+        with llm_context.use_llm(gen_resolved):
+            off_metrics, _ = _run_pass(
+                db, run, cases, rerank=False,
+                gen_resolved=gen_resolved, judge_resolved=judge_resolved,
+            )
+            on_metrics, rows = _run_pass(
+                db, run, cases, rerank=True,
+                gen_resolved=gen_resolved, judge_resolved=judge_resolved,
+            )
         run.metrics = {"off": off_metrics, "on": on_metrics, "answer": _aggregate_answer(rows)}
         run.compare = compare_runs(off_metrics, on_metrics, key="hit@3")
         run.status = "done"
@@ -104,7 +129,10 @@ def _run(run_id: str) -> None:
         db.close()
 
 
-def _run_pass(db: Session, run: RagEvalRun, cases: list, *, rerank: bool) -> tuple[dict, list[dict]]:
+def _run_pass(
+    db: Session, run: RagEvalRun, cases: list, *, rerank: bool,
+    gen_resolved=None, judge_resolved=None,
+) -> tuple[dict, list[dict]]:
     from app.services import rag as rag_service
     from app.services import rag_trace
 
@@ -149,20 +177,24 @@ def _run_pass(db: Session, run: RagEvalRun, cases: list, *, rerank: bool) -> tup
             "trace_id": diag.get("trace_id"),
         })
         if run.answer_eval and rerank:
-            ans = _answer_case(c, hits)
+            ans = _answer_case(c, hits, gen_resolved=gen_resolved, judge_resolved=judge_resolved)
             rows[-1]["answer"] = ans
             rows[-1]["metrics"]["answer"] = ans
     return evaluate_retrieval(eval_cases, k_values=(1, 3, 5)), rows
 
 
-def _answer_case(case, hits: list[dict]) -> dict:
+def _answer_case(case, hits: list[dict], *, gen_resolved=None, judge_resolved=None) -> dict:
     """Q-DOC-A：生成回答并计算关键词命中 + LLM 质量评分。"""
+    from app.services import llm_context
+
     contexts = [h.get("text", "") for h in hits[:5]]
-    answer = _generate_answer(case.query, contexts)
+    with llm_context.use_llm(gen_resolved):
+        answer = _generate_answer(case.query, contexts)
     keywords = [str(k).strip() for k in (case.gt_keywords or []) if str(k).strip()]
     missing = [k for k in keywords if k not in answer]
     keyword_hit = round((len(keywords) - len(missing)) / len(keywords), 4) if keywords else None
-    judge = _judge_quality(case.query, contexts, answer)
+    with llm_context.use_llm(judge_resolved):
+        judge = _judge_quality(case.query, contexts, answer)
     return {
         "answer": answer,
         "keyword_hit": keyword_hit,
@@ -187,8 +219,6 @@ def _generate_answer(query: str, contexts: list[str]) -> str:
 
 def _judge_quality(query: str, contexts: list[str], answer: str) -> dict | None:
     try:
-        from langchain_core.messages import HumanMessage, SystemMessage
-
         from app.services import llm
         from app.services.rag_judge import parse_judge_json
 
@@ -202,9 +232,7 @@ def _judge_quality(query: str, contexts: list[str], answer: str) -> dict | None:
             + ("\n---\n".join(f"[{i+1}] {c[:800]}" for i, c in enumerate(contexts[:5])) or "（无）")
             + f"\n回答：{answer[:2000] or '（空回答）'}"
         )
-        model = llm._chat_model()
-        resp = model.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
-        text = (resp.content or "").strip() if isinstance(resp.content, str) else str(resp.content)
+        text = llm.invoke_text(system, prompt, temperature=0.0, timeout=120).strip()
         return parse_judge_json(text)
     except Exception:
         return None

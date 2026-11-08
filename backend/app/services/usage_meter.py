@@ -199,6 +199,8 @@ def record_embedding(
     """记一笔 embedding 调用（系统级配置 → 平台成本；网关通常不返回 usage，按字符估算）。"""
     if resolved is None or getattr(resolved, "provider", "") == "local":
         return  # 本机模型无费用
+    if status == "error":
+        return  # 失败调用未产生向量/计费 token，估算只会制造「未定价」噪声
     from app.services import pricing
 
     tokens = pricing.estimate_tokens_many(texts)
@@ -241,6 +243,8 @@ def record_rerank(
     """记一笔 rerank 调用（教师自配 → 个人成本；家长客服共享 → 机构成本）。"""
     if resolved is None or getattr(resolved, "provider", "") == "local":
         return
+    if status == "error":
+        return  # 失败重排未产生计费 token，不写估算行
     from app.services import pricing
 
     tokens = pricing.estimate_tokens(query) + pricing.estimate_tokens_many(documents)
@@ -334,6 +338,9 @@ def cleanup_expired() -> dict:
                 .where(
                     LLMUsageEvent.created_at < cutoff,
                     LLMUsageEvent.priced_status == "unpriced",
+                    func.coalesce(LLMUsageEvent.status, "ok") == "ok",
+                    func.coalesce(LLMUsageEvent.input_tokens, 0)
+                    + func.coalesce(LLMUsageEvent.output_tokens, 0) > 0,
                 )
                 .group_by(month_expr, LLMUsageEvent.currency)
             ).all()

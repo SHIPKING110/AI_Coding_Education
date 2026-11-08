@@ -301,6 +301,67 @@ def test_estimate_tokens():
     assert estimate_tokens("hello world") >= 2
 
 
+def test_meter_chat_skips_failed_calls_without_tokens(monkeypatch):
+    """失败且未收到 token 的调用不写账本；流式已收到部分增量仍记录。"""
+    from app.services import llm, usage_meter
+
+    captured: dict = {}
+    monkeypatch.setattr(usage_meter, "record_chat", lambda **kw: captured.update(kw))
+
+    llm._meter_chat(
+        input_tokens=0,
+        output_tokens=0,
+        prompt_text="连接失败" * 100,
+        status="error",
+    )
+    assert captured == {}
+
+    llm._meter_chat(
+        input_tokens=0,
+        output_tokens=0,
+        prompt_text="已部分输出",
+        output_chars=8,
+        status="error",
+    )
+    assert captured.get("status") == "error"
+
+
+def test_purge_unpriced_only_deletes_unpriced(TestSession):
+    from datetime import UTC, datetime, timedelta
+
+    from app.crud import usage as usage_crud
+    from app.models.usage import LLMUsageEvent
+
+    since = datetime.now(UTC) - timedelta(days=1)
+    with TestSession() as db:
+        db.add_all(
+            [
+                LLMUsageEvent(
+                    kind="chat", module="rag_eval", provider_host="example.com",
+                    model="model-a", priced_status="unpriced", cost=0.0, created_at=datetime.now(UTC),
+                ),
+                LLMUsageEvent(
+                    kind="chat", module="rag_eval", provider_host="example.com",
+                    model="model-b", priced_status="unpriced", cost=0.0, created_at=datetime.now(UTC),
+                ),
+                LLMUsageEvent(
+                    kind="chat", module="rag_eval", provider_host="api.deepseek.com",
+                    model="deepseek-chat", priced_status="priced", cost=1.5, created_at=datetime.now(UTC),
+                ),
+            ]
+        )
+        db.commit()
+        scanned = usage_crud.count_unpriced(
+            db, since=since, provider_host="example.com", model="model-a"
+        )
+        deleted = usage_crud.purge_unpriced(
+            db, since=since, provider_host="example.com", model="model-a"
+        )
+        assert scanned == 1 and deleted == 1
+        remaining = db.scalars(select(LLMUsageEvent)).all()
+        assert {r.model for r in remaining} == {"model-b", "deepseek-chat"}
+
+
 # ---------------- 记账与归属 ----------------
 
 
@@ -421,6 +482,32 @@ def test_stats_aggregation_and_permissions(client, TestSession):
 
     teacher = _register(client, "teacher", "usage-teacher")
     assert client.get("/api/admin/usage/stats", headers=teacher).status_code == 403
+
+
+def test_stats_unpriced_excludes_failed_and_empty_calls(client, TestSession):
+    from app.models.usage import LLMUsageEvent
+
+    admin = _register(client, "admin", "usage-noise")
+    now = datetime.now(UTC)
+    with TestSession() as s:
+        common = {
+            "kind": "chat",
+            "module": "report",
+            "provider_host": "api.deepseek.com",
+            "model": "deepseek-chat",
+            "cost": 0.0,
+            "priced_status": "unpriced",
+            "source": "provider",
+            "created_at": now,
+        }
+        s.add(LLMUsageEvent(input_tokens=100, output_tokens=50, status="ok", **common))
+        s.add(LLMUsageEvent(input_tokens=100, output_tokens=50, status="error", **common))
+        s.add(LLMUsageEvent(input_tokens=0, output_tokens=0, status="ok", **common))
+        s.commit()
+
+    d = client.get("/api/admin/usage/stats?days=7", headers=admin).json()
+    assert d["unpriced_events"] == 1
+    assert sum(u["events"] for u in d["unpriced"]) == 1
 
 
 def test_price_crud_export_and_reconcile(client, TestSession):

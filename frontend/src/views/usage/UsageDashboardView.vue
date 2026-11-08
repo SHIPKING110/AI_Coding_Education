@@ -17,6 +17,7 @@ import {
   listPrices,
   listReconciliations,
   listUsageEvents,
+  purgeUnpricedUsage,
   repriceUnpricedUsage,
   updatePrice,
   updateUsageSettings,
@@ -34,6 +35,7 @@ echarts.use([LineChart, BarChart, GridComponent, LegendComponent, TooltipCompone
 const days = ref(30)
 const loading = ref(false)
 const error = ref('')
+const notice = ref('')
 const stats = ref<UsageStats | null>(null)
 
 const events = ref<UsageEvent[]>([])
@@ -123,6 +125,7 @@ const MODULE_LABELS: Record<string, string> = {
   report: '报告总结',
   evaluation: '学员评估',
   rag_eval: 'RAG 评测',
+  knowledge: '知识库描述生成',
   assignment: 'AI 习题',
   feedback: '客户反馈',
   parent_service: '家长客服',
@@ -357,6 +360,47 @@ function repriceUnpriced() {
   )
 }
 
+function purgeAllUnpriced() {
+  ask(
+    '清理全部未定价明细',
+    `删除最近 ${days.value} 天内所有未定价记录？未定价记录费用恒为 0，删除不影响已定价账本与月度汇总。失败重试/零 Token 调用已不再计入未定价统计。`,
+    async () => {
+      error.value = ''
+      notice.value = ''
+      try {
+        const r = await purgeUnpricedUsage({ since_days: days.value })
+        await Promise.all([loadStats(), loadEvents()])
+        if (r.deleted) notice.value = `已清理 ${r.deleted} 笔未定价记录`
+      } catch (e) {
+        error.value = e instanceof Error ? e.message : '清理失败'
+      }
+    },
+  )
+}
+
+function purgeUnpriced(row: { provider_host: string; model: string; events: number }) {
+  const label = `${row.model || '未知模型'} · ${row.provider_host || '未知网关'}`
+  ask(
+    '清理未定价明细',
+    `删除最近 ${days.value} 天内「${label}」的 ${row.events} 笔未定价记录？未定价记录费用恒为 0，删除不影响已定价账本与月度汇总。`,
+    async () => {
+      error.value = ''
+      notice.value = ''
+      try {
+        const r = await purgeUnpricedUsage({
+          provider_host: row.provider_host || undefined,
+          model: row.model || undefined,
+          since_days: days.value,
+        })
+        await Promise.all([loadStats(), loadEvents()])
+        if (r.deleted) notice.value = `已清理 ${r.deleted} 笔未定价记录`
+      } catch (e) {
+        error.value = e instanceof Error ? e.message : '清理失败'
+      }
+    },
+  )
+}
+
 async function saveBudget() {
   budgetSaving.value = true
   budgetTip.value = ''
@@ -442,6 +486,7 @@ onBeforeUnmount(() => {
     </PageHead>
 
     <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="notice" class="notice">{{ notice }}</p>
 
     <template v-if="stats">
       <section class="grid cards">
@@ -466,7 +511,7 @@ onBeforeUnmount(() => {
         <div class="card" :class="stats.unpriced_events ? 'tone-bad' : 'tone-good'">
           <div class="card-label">未定价事件</div>
           <div class="card-value">{{ stats.unpriced_events.toLocaleString() }}</div>
-          <div class="card-sub">无价格行的模型不臆造费用</div>
+          <div class="card-sub">无价格行的成功调用；失败/空调用不计入</div>
           <div v-if="stats.unpriced_events" class="card-alert">请在下方价格表补充 {{ stats.unpriced.length }} 个模型的价格</div>
         </div>
       </section>
@@ -476,10 +521,12 @@ onBeforeUnmount(() => {
           <h3>未定价模型（费用按 0 计）</h3>
           <span class="muted">新调用按当前价格表计价；已产生的保留期明细可重算</span>
           <button class="link-btn" :disabled="repricing" @click="repriceUnpriced">{{ repricing ? '重算中…' : '重算未定价' }}</button>
+          <button class="link-btn danger" @click="purgeAllUnpriced">清理全部未定价</button>
         </div>
         <div class="chips">
           <span v-for="u in stats.unpriced" :key="`${u.provider_host}-${u.model}`" class="chip">
             {{ u.model || '未知模型' }} · {{ u.provider_host || '未知网关' }} · {{ u.events }} 笔
+            <button class="chip-x" title="清理该模型的未定价明细" @click="purgeUnpriced(u)">清理</button>
           </span>
         </div>
       </section>
@@ -730,8 +777,10 @@ onBeforeUnmount(() => {
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
 .ellipsis { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .error { color: #b91c1c; background: #fef2f2; padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
+.notice { color: #047857; background: var(--success-soft); padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.chip { padding: 4px 10px; border-radius: 999px; background: #fef2f2; color: #b91c1c; font-size: 11.5px; }
+.chip { padding: 4px 10px; border-radius: 999px; background: #fef2f2; color: #b91c1c; font-size: 11.5px; display: inline-flex; align-items: center; gap: 6px; }
+.chip-x { border: none; background: #fff; color: #b91c1c; border-radius: 999px; font-size: 10.5px; padding: 1px 7px; cursor: pointer; font-weight: 600; }
 .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #f1f5f9; color: var(--ink-3); font-size: 11px; }
 .tag.provider, .tag.ok { background: var(--success-soft); color: #047857; }
 .tag.estimated { background: #fffbeb; color: #b45309; }
