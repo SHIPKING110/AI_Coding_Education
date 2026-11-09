@@ -321,6 +321,9 @@ export interface RagEvalCase {
   set_id: string
   query: string
   relevant: string[]
+  answerability: 'answerable' | 'unanswerable' | 'unlabeled'
+  split: 'tuning' | 'regression' | 'frozen'
+  business_criticality: 'critical' | 'important' | 'normal'
   gt_answer: string
   gt_keywords: string[]
   query_type: string
@@ -334,9 +337,14 @@ export interface RagEvalRun {
   id: string
   set_id: string
   status: string
+  total_cases: number
+  processed_cases: number
+  stage: string
+  progress: number
   owner_id: string | null
   top_k: number
   rerank: boolean
+  retrieval_mode: string
   answer_eval: boolean
   generation_config_id: string | null
   judge_config_id: string | null
@@ -376,6 +384,10 @@ export interface RagEvalResult {
   metrics: any
   retrieval_summary: string
   bad_case_type: string
+  human_score: number | null
+  human_judge: string | null
+  human_at: string | null
+  human_reason: string | null
   created_at: string | null
 }
 
@@ -438,6 +450,13 @@ export async function generateEvalCases(setId: string, payload: Record<string, u
   return data
 }
 
+export async function createEvalCaseFromTrace(
+  setId: string, payload: { trace_id: string; relevant?: string[]; answerability?: string; split?: string; business_criticality?: string; query_type?: string; difficulty?: string; notes?: string },
+): Promise<RagEvalCase> {
+  const { data } = await http.post(`/admin/rag/eval/sets/${setId}/cases/from-trace`, payload)
+  return data
+}
+
 export async function createEvalRun(setId: string, payload: Record<string, unknown>): Promise<RagEvalRun> {
   const { data } = await http.post(`/admin/rag/eval/sets/${setId}/runs`, payload)
   return data
@@ -450,5 +469,12 @@ export async function listEvalRuns(setId?: string): Promise<RagEvalRun[]> {
 
 export async function getEvalRun(runId: string): Promise<{ run: RagEvalRun; results: RagEvalResult[] }> {
   const { data } = await http.get(`/admin/rag/eval/runs/${runId}`)
+  return data
+}
+
+export async function setEvalResultHumanScore(
+  resultId: string, payload: { score: number; judge?: string; reason?: string },
+): Promise<{ result_id: string; run_id: string; human_score: number; calibration: any }> {
+  const { data } = await http.post(`/admin/rag/eval/results/${resultId}/human-score`, payload)
   return data
 }

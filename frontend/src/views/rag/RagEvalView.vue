@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
@@ -17,6 +17,7 @@ import {
   listEvalModels,
   listEvalRuns,
   listEvalSets,
+  setEvalResultHumanScore,
   type RagEvalCase,
   type RagEvalModel,
   type RagEvalResult,
@@ -53,6 +54,7 @@ const newCase = ref({ query: '', relevant: '', gt_answer: '', notes: '', query_t
 const runForm = ref({
   top_k: 5,
   rerank: true,
+  retrieval_mode: 'auto',
   answer_eval: false,
   generation_config_id: '',
   judge_config_id: '',
@@ -90,6 +92,9 @@ function normalizeImportRow(row: any): Record<string, unknown> {
   return {
     query,
     relevant: toArray(row.relevant ?? row['应命中文档'] ?? row['相关文档']),
+    answerability: String(row.answerability ?? 'unlabeled').trim(),
+    split: String(row.split ?? 'regression').trim(),
+    business_criticality: String(row.business_criticality ?? 'normal').trim(),
     gt_answer: String(row.gt_answer ?? row['标准答案'] ?? '').trim(),
     gt_keywords: toArray(row.gt_keywords ?? row['关键词']),
     query_type: String(row.query_type ?? 'fact').trim() || 'fact',
@@ -275,7 +280,7 @@ async function importCases() {
 }
 
 function downloadTemplate() {
-  const header = ['query', 'relevant', 'gt_answer', 'gt_keywords', 'query_type', 'difficulty', 'notes', 'source']
+  const header = ['query', 'relevant', 'answerability', 'split', 'business_criticality', 'gt_answer', 'gt_keywords', 'query_type', 'difficulty', 'notes', 'source']
   const example = [
     '如何办理退费？',
     '退费政策文档',
@@ -299,9 +304,74 @@ function downloadTemplate() {
   URL.revokeObjectURL(url)
 }
 
+const STAGE_LABELS: Record<string, string> = {
+  pending: '排队中',
+  retrieval_off: '关闭重排检索',
+  retrieval_on: '开启重排检索',
+  answer: '生成并评判答案',
+  done: '已完成',
+  failed: '失败',
+}
+
 const metricsOn = computed(() => activeRun.value?.metrics?.on || null)
 const metricsOff = computed(() => activeRun.value?.metrics?.off || null)
+const isRunning = computed(() => {
+  const s = activeRun.value?.status
+  return s === 'pending' || s === 'running'
+})
+const progressPct = computed(() => {
+  const p = activeRun.value?.progress
+  return typeof p === 'number' ? Math.max(0, Math.min(100, p)) : 0
+})
+const processedCases = computed(() => activeRun.value?.processed_cases ?? 0)
+const totalCases = computed(() => activeRun.value?.total_cases ?? 0)
+const stageLabel = computed(() => {
+  const s = activeRun.value?.stage || activeRun.value?.status || ''
+  return STAGE_LABELS[s] || s || '准备中'
+})
 const casePageCount = computed(() => Math.max(1, Math.ceil(caseTotal.value / casePageSize.value)))
+
+let pollTimer: number | undefined
+let pollRunId = ''
+let pollBusy = false
+
+function stopPoll() {
+  if (pollTimer !== undefined) {
+    window.clearInterval(pollTimer)
+    pollTimer = undefined
+  }
+  pollRunId = ''
+  pollBusy = false
+}
+
+async function refreshRun(runId: string, stopWhenDone = true) {
+  if (pollBusy || pollRunId !== runId) return
+  pollBusy = true
+  try {
+    const data = await getEvalRun(runId)
+    if (pollRunId !== runId) return
+    activeRun.value = data.run
+    results.value = data.results
+    if (stopWhenDone && data.run.status !== 'running' && data.run.status !== 'pending') {
+      stopPoll()
+      msg.value = data.run.status === 'done' ? '评测完成' : '评测失败'
+      if (activeSet.value) runs.value = await listEvalRuns(activeSet.value.id)
+    }
+  } catch {
+    // 单次轮询失败不打断；下一轮继续
+  } finally {
+    pollBusy = false
+  }
+}
+
+function startPoll(runId: string) {
+  stopPoll()
+  pollRunId = runId
+  pollTimer = window.setInterval(() => void refreshRun(runId), 2000)
+  void refreshRun(runId)
+}
+
+onBeforeUnmount(stopPoll)
 
 async function loadSets() {
   loading.value = true
@@ -339,6 +409,7 @@ async function loadEvalModels(ownerId?: string | null) {
 }
 
 async function selectSet(s: RagEvalSet) {
+  stopPoll()
   activeSet.value = s
   activeRun.value = null
   results.value = []
@@ -351,6 +422,8 @@ async function selectSet(s: RagEvalSet) {
       listEvalRuns(s.id).then((r) => { runs.value = r }),
       loadEvalModels(s.owner_id),
     ])
+    const latestRunning = runs.value.find((r) => r.status === 'running' || r.status === 'pending')
+    if (latestRunning) await openRun(latestRunning)
   } catch (e) {
     error.value = e instanceof Error ? e.message : '加载失败'
   }
@@ -442,12 +515,15 @@ async function startRun() {
     const run = await createEvalRun(activeSet.value.id, {
       top_k: runForm.value.top_k,
       rerank: runForm.value.rerank,
+      retrieval_mode: runForm.value.retrieval_mode,
       answer_eval: runForm.value.answer_eval,
       generation_config_id: runForm.value.answer_eval ? runForm.value.generation_config_id || undefined : undefined,
       judge_config_id: runForm.value.answer_eval ? runForm.value.judge_config_id || undefined : undefined,
     })
-    msg.value = '评测已启动，稍后刷新查看结果'
+    msg.value = '评测已启动，正在后台运行'
     activeRun.value = run
+    results.value = []
+    startPoll(run.id)
     runs.value = await listEvalRuns(activeSet.value.id)
   } catch (e) {
     error.value = e instanceof Error ? e.message : '启动失败'
@@ -471,11 +547,42 @@ async function generateCases() {
   }
 }
 
+// 人工复核打分（0-5）：用于与 LLM Judge 计算 Cohen's Kappa，作为裁判可信度闸门
+const editingResultId = ref<string | null>(null)
+const humanScoreForm = ref({ score: '', judge: '', reason: '' })
+function cancelHumanScore() {
+  editingResultId.value = null
+  humanScoreForm.value = { score: '', judge: '', reason: '' }
+}
+async function submitHumanScore(r: RagEvalResult) {
+  const s = Number(humanScoreForm.value.score)
+  if (!Number.isInteger(s) || s < 0 || s > 5) {
+    error.value = '请输入 0-5 的整数分'
+    return
+  }
+  try {
+    await setEvalResultHumanScore(r.id, {
+      score: s,
+      judge: humanScoreForm.value.judge || '',
+      reason: humanScoreForm.value.reason || '',
+    })
+    const runId = activeRun.value?.id || r.run_id
+    editingResultId.value = null
+    humanScoreForm.value = { score: '', judge: '', reason: '' }
+    await openRun({ id: runId } as RagEvalRun)
+    msg.value = '人工评分已保存，裁判一致性已重算'
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '评分失败'
+  }
+}
+
 async function openRun(r: RagEvalRun) {
+  stopPoll()
   try {
     const data = await getEvalRun(r.id)
     activeRun.value = data.run
     results.value = data.results
+    if (data.run.status === 'running' || data.run.status === 'pending') startPoll(data.run.id)
   } catch (e) {
     error.value = e instanceof Error ? e.message : '加载失败'
   }
@@ -551,6 +658,13 @@ onMounted(loadSets)
         <div class="panel-head"><h3>运行评测</h3><span class="muted">{{ activeSet?.name || '请选择评测集' }}</span></div>
         <div class="run-form">
           <label>top_k <input v-model.number="runForm.top_k" type="number" min="1" max="50" /></label>
+          <label>检索模式
+            <select v-model="runForm.retrieval_mode">
+              <option value="auto">跟随当前配置</option>
+              <option value="dense">Dense（关闭 Hybrid）</option>
+              <option value="hybrid">Hybrid（Dense + BM25 + RRF）</option>
+            </select>
+          </label>
           <label class="check"><input v-model="runForm.rerank" type="checkbox" /> 启用 rerank（同时跑 off/on 对比）</label>
           <label class="check"><input v-model="runForm.answer_eval" type="checkbox" /> 答案质量评测（LLM 裁判）</label>
           <label class="model-pick">生成模型
@@ -690,11 +804,19 @@ onMounted(loadSets)
     <section v-if="activeSet" class="panel">
       <div class="panel-head"><h3>运行记录</h3></div>
       <table class="table">
-        <thead><tr><th>状态</th><th>top_k</th><th>模型（生成 / 评测）</th><th>配置版本</th><th>hit@3 off → on</th><th>MRR off → on</th><th>时间</th><th></th></tr></thead>
+        <thead><tr><th>状态</th><th>top_k</th><th>模式</th><th>模型（生成 / 评测）</th><th>配置版本</th><th>hit@3 off → on</th><th>MRR off → on</th><th>时间</th><th></th></tr></thead>
         <tbody>
           <tr v-for="r in runs" :key="r.id">
-            <td><span class="tag" :class="r.status === 'done' ? 'ok' : r.status === 'failed' ? 'bad' : 'pending'">{{ r.status }}</span></td>
+            <td>
+              <span class="tag" :class="r.status === 'done' ? 'ok' : r.status === 'failed' ? 'bad' : 'pending'">
+                {{ STAGE_LABELS[r.status] || r.status }}
+              </span>
+              <div v-if="r.status === 'running' || r.status === 'pending'" class="run-mini">
+                {{ STAGE_LABELS[r.stage] || r.stage }} · 本阶段 {{ r.processed_cases }}/{{ r.total_cases }} · {{ r.progress }}%
+              </div>
+            </td>
             <td>{{ r.top_k }}</td>
+            <td class="muted">{{ r.retrieval_mode || 'auto' }}</td>
             <td class="muted">{{ r.generation_model || '默认' }} / {{ r.judge_model || '默认' }}</td>
             <td>{{ r.config_version ?? '-' }}</td>
             <td>{{ fixed(r.metrics?.off?.['hit@3']) }} → {{ fixed(r.metrics?.on?.['hit@3']) }}</td>
@@ -702,37 +824,94 @@ onMounted(loadSets)
             <td class="mono">{{ r.created_at?.slice(0, 16).replace('T', ' ') }}</td>
             <td><button class="mini" @click="openRun(r)">详情</button></td>
           </tr>
-          <tr v-if="!runs.length"><td colspan="8" class="muted">暂无运行记录</td></tr>
+          <tr v-if="!runs.length"><td colspan="9" class="muted">暂无运行记录</td></tr>
         </tbody>
       </table>
     </section>
 
     <section v-if="activeRun" class="panel">
-      <div class="panel-head"><h3>评测结果</h3><span class="muted">{{ activeRun.status }}</span></div>
+      <div class="panel-head">
+        <h3>评测结果</h3>
+        <span class="tag" :class="activeRun.status === 'done' ? 'ok' : activeRun.status === 'failed' ? 'bad' : 'pending'">
+          {{ STAGE_LABELS[activeRun.status] || activeRun.status }}
+        </span>
+      </div>
+      <div v-if="isRunning" class="eval-progress">
+        <div class="progress-track"><div class="progress-fill" :style="{ width: progressPct + '%' }"></div></div>
+        <div class="progress-meta">
+          <span>{{ stageLabel }}</span>
+          <span>本阶段 {{ processedCases }} / {{ totalCases }} 条 · {{ progressPct }}%</span>
+        </div>
+        <p class="muted">评测在后台运行，可离开页面；重新进入会继续显示进度。</p>
+      </div>
       <p v-if="activeRun.error" class="error">{{ activeRun.error }}</p>
-      <div class="metrics">
+      <div v-if="activeRun.metrics?.gate?.gate === 'fail'" class="warn">
+        验收闸门未通过：{{ (activeRun.metrics.gate.reasons || []).join('；') }}
+      </div>
+      <p v-else-if="activeRun.metrics?.gate?.gate === 'pass'" class="muted">验收闸门通过（冻结集/关键用例无回退，无依据回答率与异常率未超限）。</p>
+      <div v-if="activeRun.metrics" class="metrics">
         <div class="metric"><span>hit@3 (off)</span><b>{{ fixed(metricsOff?.['hit@3']) }}</b></div>
         <div class="metric"><span>hit@3 (on)</span><b>{{ fixed(metricsOn?.['hit@3']) }}</b></div>
         <div class="metric"><span>MRR (off)</span><b>{{ fixed(metricsOff?.mrr) }}</b></div>
         <div class="metric"><span>MRR (on)</span><b>{{ fixed(metricsOn?.mrr) }}</b></div>
-        <div class="metric"><span>recall@5 (on)</span><b>{{ fixed(metricsOn?.['recall@5']) }}</b></div>
+        <div class="metric"><span>Context Precision@5 (on)</span><b>{{ fixed(metricsOn?.['precision@5']) }}</b></div>
+        <div class="metric"><span>Context Recall@5 (on)</span><b>{{ fixed(metricsOn?.['recall@5']) }}</b></div>
         <div class="metric"><span>nDCG@5 (on)</span><b>{{ fixed(metricsOn?.['ndcg@5']) }}</b></div>
-        <div class="metric"><span>答案关键词命中</span><b>{{ pct(activeRun.metrics?.answer?.keyword_hit) }}</b></div>
+        <div v-if="metricsOn?.error_cases" class="metric"><span>检索异常（不计入指标）</span><b class="error">{{ metricsOn.error_cases }}</b></div>
+        <div v-if="activeRun.metrics?.critical?.cases" class="metric"><span>关键用例 hit@3 (on)</span><b>{{ fixed(activeRun.metrics.critical?.['hit@3']) }}</b></div>
+        <div v-if="activeRun.metrics?.frozen?.cases" class="metric"><span>冻结集 hit@3 (on)</span><b>{{ fixed(activeRun.metrics.frozen?.['hit@3']) }}</b></div>
+        <div class="metric"><span>答案关键词命中（可答）</span><b>{{ pct(activeRun.metrics?.answer?.answerable?.keyword_hit ?? activeRun.metrics?.answer?.keyword_hit) }}</b></div>
+        <div v-if="activeRun.metrics?.answer?.unanswerable?.abstention_rate != null || activeRun.metrics?.answer?.unanswerable?.keyword_hit != null" class="metric"><span>不可答拒答率</span><b>{{ pct(activeRun.metrics.answer.unanswerable.abstention_rate ?? activeRun.metrics.answer.unanswerable.keyword_hit) }}</b></div>
+        <div v-if="activeRun.metrics?.answer?.answerable?.citation_coverage != null" class="metric"><span>引用覆盖率（可答）</span><b>{{ pct(activeRun.metrics.answer.answerable.citation_coverage) }}</b></div>
+        <div v-if="activeRun.metrics?.answer?.answerable?.invalid_citation_rate != null" class="metric"><span>无效引用率（可答）</span><b>{{ pct(activeRun.metrics.answer.answerable.invalid_citation_rate) }}</b></div>
+        <div v-if="activeRun.metrics?.answer?.unsupported_answer_rate != null" class="metric"><span>无依据回答率</span><b :class="{ error: (activeRun.metrics.answer.unsupported_answer_rate ?? 0) > 0.01 }">{{ pct(activeRun.metrics.answer.unsupported_answer_rate) }}</b></div>
+        <div class="metric"><span>答案正确性</span><b>{{ fixed(activeRun.metrics?.answer?.correctness) }}</b></div>
         <div class="metric"><span>忠实度</span><b>{{ fixed(activeRun.metrics?.answer?.faithfulness) }}</b></div>
         <div class="metric"><span>完整性</span><b>{{ fixed(activeRun.metrics?.answer?.completeness) }}</b></div>
         <div class="metric"><span>逻辑性</span><b>{{ fixed(activeRun.metrics?.answer?.logic) }}</b></div>
+        <div v-if="activeRun.metrics?.calibration?.pairs" class="metric"><span>裁判-人工 Kappa（{{ activeRun.metrics.calibration.pairs }} 对）</span><b :class="{ error: activeRun.metrics.calibration.kappa != null && activeRun.metrics.calibration.kappa < 0.6 }">{{ activeRun.metrics.calibration.kappa ?? '样本不足' }}</b></div>
       </div>
+      <p v-if="activeRun.metrics" class="muted">
+        <template v-if="metricsOn?.answerable_cases != null">
+          检索指标仅统计可答用例（{{ metricsOn.answerable_cases }} 条）；
+          不可答 {{ metricsOn.unanswerable_cases ?? 0 }} 条、未标注 {{ metricsOn.unlabeled_cases ?? 0 }} 条单列，不计入命中率；
+          检索异常 {{ metricsOn.error_cases ?? 0 }} 条单列且不计入质量指标。
+        </template>
+        <template v-else>
+          该运行生成于指标口径升级前，未区分不可答/未标注用例；建议重跑以获取修正后的指标。
+        </template>
+      </p>
+      <p v-if="metricsOn?.retrieval_modes" class="muted">
+        检索模式分布（on）：<span v-for="(count, mode) in metricsOn.retrieval_modes" :key="mode" class="mode-chip">{{ mode }} × {{ count }}</span>
+      </p>
       <table class="table">
-        <thead><tr><th>query</th><th>ranked</th><th>relevant</th><th>Bad Case</th><th>检索链</th></tr></thead>
+        <thead><tr><th>query</th><th>ranked</th><th>relevant</th><th>Bad Case</th><th>关键词</th><th>正确性</th><th>人工复核</th><th>检索链</th></tr></thead>
         <tbody>
           <tr v-for="r in results" :key="r.id">
             <td>{{ r.query }}</td>
             <td class="muted">{{ r.ranked.join('、') || '-' }}</td>
             <td class="muted">{{ r.relevant.join('、') || '-' }}</td>
             <td><span class="tag" :class="r.bad_case_type === 'ok' ? 'ok' : 'bad'">{{ r.bad_case_type || '-' }}</span></td>
+            <td>{{ pct(r.metrics?.answer?.keyword_hit) }}</td>
+            <td>{{ fixed(r.metrics?.answer?.judge?.correctness) }}</td>
+            <td>
+              <span v-if="editingResultId === r.id" class="human-score-row">
+                <input v-model.number="humanScoreForm.score" type="number" min="0" max="5" placeholder="0-5" />
+                <input v-model="humanScoreForm.judge" placeholder="裁判" />
+                <button class="mini ok" @click="submitHumanScore(r)">保存</button>
+                <button class="mini ghost" @click="cancelHumanScore">取消</button>
+              </span>
+              <span v-else-if="r.human_score != null" class="tag ok">
+                人工 {{ r.human_score }} 分
+                <span v-if="r.human_judge" class="muted">（{{ r.human_judge }}）</span>
+              </span>
+              <span v-else>
+                <button class="mini" @click="editingResultId = r.id">评分</button>
+              </span>
+            </td>
             <td class="muted ellipsis">{{ r.retrieval_summary }}</td>
           </tr>
-          <tr v-if="!results.length"><td colspan="5" class="muted">暂无逐条结果（运行中或未完成）</td></tr>
+          <tr v-if="!results.length"><td colspan="8" class="muted">暂无逐条结果（运行中或未完成）</td></tr>
         </tbody>
       </table>
     </section>
@@ -756,6 +935,12 @@ onMounted(loadSets)
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 16px; box-shadow: var(--shadow-sm); }
 .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .panel-head h3 { font-size: 14px; font-weight: 800; }
+.eval-progress { margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2, var(--surface)); }
+.progress-track { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.progress-fill { height: 100%; border-radius: 999px; background: var(--brand); transition: width .4s ease; }
+.progress-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 7px; font-size: 12.5px; color: var(--ink); }
+.eval-progress .muted { margin-top: 5px; font-size: 12px; }
+.run-mini { margin-top: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .set-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .set-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); cursor: pointer; text-align: left; }
 .set-item.on { border-color: var(--brand); background: var(--brand-soft); }
@@ -786,6 +971,9 @@ onMounted(loadSets)
 .error { color: #b91c1c; background: #fef2f2; padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
 .ok { color: #047857; background: var(--success-soft); padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
 .ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.human-score-row { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+.human-score-row input[type='number'] { width: 44px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 12px; }
+.human-score-row input:not([type='number']) { width: 64px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 12px; }
 .field-hint { margin: 8px 0 4px; font-size: 11.5px; color: var(--ink-3); line-height: 1.7; background: #f8fafc; border-radius: 8px; padding: 8px 10px; }
 .field-hint b { color: var(--ink-2); }
 .import-box { border: 1px dashed var(--line); border-radius: 12px; padding: 12px; margin: 10px 0 14px; background: var(--surface); }

@@ -1,7 +1,10 @@
-"""LLM 裁判答案质量：给定「问题 + 检索片段 + 回答」，打 faithfulness / relevance。
+"""LLM 裁判答案质量：给定「问题 + 检索片段 + 回答」，打质量分。
 
 - faithfulness（忠实度）：回答是否只基于检索片段，未编造片段之外的事实；
 - relevance（相关性）：回答是否真正回答了问题；
+- completeness（完整性）：是否覆盖回答该问题所需的关键信息；
+- logic（逻辑性）：论述是否自洽、有条理；
+- correctness（正确性）：与标准答案事实是否一致（有标准答案时）。
 - 每维 0-5 整数 + 一句话理由；输出严格 JSON，便于评估脚本解析。
 
 调用方：evals/run_rag_eval.py --judge（复用教师在 agent 模块配置的对话模型）。
@@ -26,13 +29,15 @@ JUDGE_TEMPLATE = """问题：
 待评回答：
 {answer}
 
-请从两维打分（每维 0-5 整数）：
+请从四维打分（每维 0-5 整数，必须全部输出）：
 - faithfulness（忠实度）：回答中的事实断言是否有片段支撑；无支撑的编造扣分；
   回答明确说"不知道/片段不足"不扣分。
 - relevance（相关性）：回答是否切题、是否解决了问题；答非所问扣分。
+- completeness（完整性）：是否覆盖回答该问题所需的关键信息。
+- logic（逻辑性）：论述是否自洽、有条理。
 
 只返回如下 JSON：
-{{"faithfulness": <int>, "relevance": <int>, "reason": "<一句话理由>"}}"""
+{{"faithfulness": <int>, "relevance": <int>, "completeness": <int>, "logic": <int>, "reason": "<一句话理由>"}}"""
 
 
 def judge_answer(question: str, contexts: list[str], answer: str) -> dict:
@@ -57,7 +62,7 @@ def judge_answer(question: str, contexts: list[str], answer: str) -> dict:
 
 
 def parse_judge_json(text: str) -> dict:
-    """宽容解析裁判输出；解析失败返回 0 分 + 原文截断（不让评估中断）。"""
+    """宽容解析裁判输出；保留所有评分维度，解析失败时兜底 0 分。"""
     t = (text or "").strip()
     if t.startswith("```"):
         t = t.strip("`")
@@ -70,11 +75,17 @@ def parse_judge_json(text: str) -> dict:
     try:
         data = json.loads(t)
         if isinstance(data, dict):
-            return {
-                "faithfulness": max(0, min(5, int(data.get("faithfulness", 0)))),
-                "relevance": max(0, min(5, int(data.get("relevance", 0)))),
-                "reason": str(data.get("reason", ""))[:200],
-            }
+            out: dict = {"reason": str(data.get("reason", ""))[:200]}
+            for key in ("faithfulness", "relevance", "completeness", "logic", "expression", "correctness"):
+                if key in data:
+                    try:
+                        out[key] = max(0, min(5, int(float(data[key]))))
+                    except (TypeError, ValueError):
+                        pass
+            # 兼容旧调用方：至少保证 faithfulness / relevance 存在
+            out.setdefault("faithfulness", 0)
+            out.setdefault("relevance", 0)
+            return out
     except (ValueError, TypeError):
         pass
     return {"faithfulness": 0, "relevance": 0, "reason": (text or "")[:200] or "解析失败"}

@@ -261,9 +261,11 @@ def eval_set_to_dict(r: RagEvalSet) -> dict:
 def eval_case_to_dict(r: RagEvalCase) -> dict:
     return {
         "id": str(r.id), "set_id": str(r.set_id), "query": r.query,
-        "relevant": r.relevant or [], "gt_answer": r.gt_answer,
-        "gt_keywords": r.gt_keywords or [], "query_type": r.query_type,
-        "difficulty": r.difficulty, "notes": r.notes, "source": r.source,
+        "relevant": r.relevant or [], "answerability": r.answerability or "unlabeled",
+        "split": r.split or "regression", "business_criticality": r.business_criticality or "normal",
+        "gt_answer": r.gt_answer, "gt_keywords": r.gt_keywords or [],
+        "query_type": r.query_type, "difficulty": r.difficulty,
+        "notes": r.notes, "source": r.source,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
 
@@ -271,13 +273,18 @@ def eval_case_to_dict(r: RagEvalCase) -> dict:
 def eval_run_to_dict(r: RagEvalRun) -> dict:
     return {
         "id": str(r.id), "set_id": str(r.set_id), "status": r.status,
+        "total_cases": r.total_cases, "processed_cases": r.processed_cases,
+        "stage": r.stage or "", "progress": r.progress,
         "owner_id": str(r.owner_id) if r.owner_id else None,
-        "top_k": r.top_k, "rerank": r.rerank, "answer_eval": bool(r.answer_eval),
+        "top_k": r.top_k, "rerank": r.rerank,
+        "retrieval_mode": r.retrieval_mode or "auto",
+        "answer_eval": bool(r.answer_eval),
         "generation_config_id": str(r.generation_config_id) if r.generation_config_id else None,
         "judge_config_id": str(r.judge_config_id) if r.judge_config_id else None,
         "generation_model": r.generation_model or "",
         "judge_model": r.judge_model or "",
         "config_version": r.config_version,
+        "eval_snapshot": r.eval_snapshot,
         "metrics": r.metrics, "compare": r.compare, "error": r.error,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "finished_at": r.finished_at.isoformat() if r.finished_at else None,
@@ -290,6 +297,10 @@ def eval_result_to_dict(r: RagEvalResult) -> dict:
         "query": r.query, "ranked": r.ranked or [], "relevant": r.relevant or [],
         "hits": r.hits or [], "metrics": r.metrics, "retrieval_summary": r.retrieval_summary,
         "bad_case_type": r.bad_case_type,
+        "human_score": r.human_score,
+        "human_judge": r.human_judge,
+        "human_at": r.human_at.isoformat() if r.human_at else None,
+        "human_reason": r.human_reason,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
 
@@ -341,14 +352,37 @@ def count_eval_cases(db: Session, set_id) -> int:
     )
 
 
+_ANSWERABILITY_VALUES = ("answerable", "unanswerable", "unlabeled")
+_SPLIT_VALUES = ("tuning", "regression", "frozen")
+_CRITICALITY_VALUES = ("critical", "important", "normal")
+
+
+def _norm_enum(value, allowed: tuple[str, ...], default: str) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in allowed else default
+
+
+def normalize_answerability(value, relevant: list | None = None) -> str:
+    """可答性归一：未声明时按是否有 relevant 推导，避免脏值进库。"""
+    v = str(value or "").strip().lower()
+    if v in _ANSWERABILITY_VALUES:
+        return v
+    return "answerable" if (relevant or []) else "unlabeled"
+
+
 def add_eval_case(
     db: Session, *, set_id, query: str, relevant: list | None = None,
+    answerability: str = "", split: str = "regression",
+    business_criticality: str = "normal",
     gt_answer: str = "", gt_keywords: list | None = None,
     query_type: str = "fact", difficulty: str = "normal",
     notes: str = "", source: str = "manual",
 ) -> RagEvalCase:
     row = RagEvalCase(
         set_id=set_id, query=query.strip(), relevant=relevant or [],
+        answerability=normalize_answerability(answerability, relevant),
+        split=_norm_enum(split, _SPLIT_VALUES, "regression"),
+        business_criticality=_norm_enum(business_criticality, _CRITICALITY_VALUES, "normal"),
         gt_answer=gt_answer or "", gt_keywords=gt_keywords or [],
         query_type=query_type or "fact", difficulty=difficulty or "normal",
         notes=notes or "", source=source or "manual",
@@ -373,9 +407,11 @@ def create_eval_run(
     answer_eval: bool = False, config_version: int | None, created_by,
     generation_config_id=None, judge_config_id=None,
     generation_model: str = "", judge_model: str = "",
+    retrieval_mode: str = "auto",
 ) -> RagEvalRun:
     row = RagEvalRun(
         set_id=set_id, owner_id=owner_id, top_k=top_k, rerank=rerank,
+        retrieval_mode=retrieval_mode or "auto",
         answer_eval=answer_eval, config_version=config_version, status="pending", created_by=created_by,
         generation_config_id=generation_config_id, judge_config_id=judge_config_id,
         generation_model=generation_model or "", judge_model=judge_model or "",
@@ -397,6 +433,21 @@ def list_eval_runs(db: Session, *, set_id=None, limit: int = 30) -> list[RagEval
     return list(db.scalars(stmt).all())
 
 
+def previous_done_run(db: Session, set_id, exclude_id) -> RagEvalRun | None:
+    """同一评测集最近一次成功的运行：用于验收闸门的前后对比。"""
+    stmt = (
+        select(RagEvalRun)
+        .where(
+            RagEvalRun.set_id == set_id,
+            RagEvalRun.status == "done",
+            RagEvalRun.id != exclude_id,
+        )
+        .order_by(desc(RagEvalRun.created_at))
+        .limit(1)
+    )
+    return db.scalars(stmt).first()
+
+
 def list_eval_results(db: Session, run_id) -> list[RagEvalResult]:
     return list(db.scalars(
         select(RagEvalResult).where(RagEvalResult.run_id == run_id).order_by(RagEvalResult.created_at)
@@ -410,6 +461,28 @@ def delete_eval_run(db: Session, run_id) -> bool:
     db.delete(row)
     db.commit()
     return True
+
+
+def update_eval_result_human_score(
+    db: Session, *, result_id, score: int | None, judge: str | None = None,
+    reason: str | None = None,
+) -> RagEvalResult | None:
+    """人工复核打分：0-5 分，与 LLM Judge 的 0-5 维度计算 Cohen's Kappa。"""
+    from datetime import UTC, datetime
+
+    row = db.get(RagEvalResult, result_id)
+    if row is None:
+        return None
+    if score is not None:
+        row.human_score = max(0, min(5, int(score)))
+    if judge is not None:
+        row.human_judge = judge.strip() or None
+    row.human_at = datetime.now(UTC)
+    if reason is not None:
+        row.human_reason = reason.strip() or None
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 def list_parent_sessions(

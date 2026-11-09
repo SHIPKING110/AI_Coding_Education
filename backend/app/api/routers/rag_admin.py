@@ -613,6 +613,10 @@ def delete_eval_set(set_id: uuid.UUID, db: Session = Depends(get_db), user: User
 class EvalCaseIn(BaseModel):
     query: str
     relevant: list[str] = Field(default_factory=list)
+    # 显式可答性：answerable / unanswerable / unlabeled；留空保持历史推断逻辑
+    answerability: str = ""
+    split: str = "regression"
+    business_criticality: str = "normal"
     gt_answer: str = ""
     gt_keywords: list[str] = Field(default_factory=list)
     query_type: str = "fact"
@@ -676,6 +680,8 @@ def add_eval_case(set_id: uuid.UUID, body: EvalCaseIn, db: Session = Depends(get
         raise HTTPException(status_code=404, detail="评测集不存在")
     row = crud.add_eval_case(
         db, set_id=set_id, query=body.query, relevant=body.relevant,
+        answerability=body.answerability, split=body.split,
+        business_criticality=body.business_criticality,
         gt_answer=body.gt_answer, gt_keywords=body.gt_keywords,
         query_type=body.query_type, difficulty=body.difficulty,
         notes=body.notes, source=body.source,
@@ -723,6 +729,8 @@ def add_eval_cases(
             continue
         row = crud.add_eval_case(
             db, set_id=set_id, query=c.query, relevant=c.relevant,
+            answerability=c.answerability, split=c.split,
+            business_criticality=c.business_criticality,
             gt_answer=c.gt_answer, gt_keywords=c.gt_keywords,
             query_type=c.query_type, difficulty=c.difficulty,
             notes=c.notes, source=c.source,
@@ -773,10 +781,69 @@ def generate_eval_cases(set_id: uuid.UUID, body: GenerateCasesIn, db: Session = 
     )
 
 
+class TraceToCaseIn(BaseModel):
+    trace_id: str
+    relevant: list[str] | None = None
+    answerability: str = ""
+    split: str = "regression"
+    business_criticality: str = "normal"
+    query_type: str = "fact"
+    difficulty: str = "normal"
+    notes: str = ""
+
+
+@router.post("/eval/sets/{set_id}/cases/from-trace", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
+def add_eval_case_from_trace(
+    set_id: uuid.UUID, body: TraceToCaseIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+) -> dict:
+    """把线上真实 trace 转为评测用例：线上 Bad Case → 回归集闭环。
+
+    不自动把当次命中标为 relevant（那会把错误结果固化成标准答案）；
+    命中标题仅写入 notes 作为复核参考，标注由人工确认。
+    """
+    if crud.get_eval_set(db, set_id) is None:
+        raise HTTPException(status_code=404, detail="评测集不存在")
+    trace = crud.get_trace(db, body.trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="trace 不存在或已过期")
+    if not (trace.query or "").strip():
+        raise HTTPException(status_code=400, detail="该 trace 没有 query，无法生成用例")
+    hit_titles = [str((h or {}).get("title") or "") for h in (trace.hits or [])]
+    hit_titles = list(dict.fromkeys(t for t in hit_titles if t))
+    status = "error" if trace.is_error else "zero_result" if trace.zero_result else "hit"
+    note_parts = [
+        f"来源 trace {trace.trace_id}",
+        f"route={trace.route} status={status} latency={trace.latency_ms}ms",
+    ]
+    if trace.rewritten_query and trace.rewritten_query != trace.query:
+        note_parts.append(f"改写：{trace.rewritten_query}")
+    if hit_titles:
+        note_parts.append("当次命中（请复核，不自动标为相关）：" + "、".join(hit_titles[:8]))
+    if body.notes:
+        note_parts.append(body.notes)
+    row = crud.add_eval_case(
+        db, set_id=set_id, query=trace.query,
+        relevant=body.relevant or [],
+        answerability=body.answerability,
+        split=body.split, business_criticality=body.business_criticality,
+        query_type=body.query_type, difficulty=body.difficulty,
+        notes="；".join(note_parts),
+        source=f"trace:{trace.route or 'unknown'}",
+    )
+    crud.add_audit(
+        db, action="eval.case.from_trace", target=str(set_id),
+        detail={"trace_id": trace.trace_id, "case_id": str(row.id)},
+        operator_id=user.id,
+    )
+    return crud.eval_case_to_dict(row)
+
+
 class EvalRunIn(BaseModel):
     owner_id: uuid.UUID | None = None
     top_k: int = 5
     rerank: bool = True
+    retrieval_mode: str = "auto"
     answer_eval: bool = False
     generation_config_id: uuid.UUID | None = None
     judge_config_id: uuid.UUID | None = None
@@ -821,12 +888,16 @@ def create_eval_run(set_id: uuid.UUID, body: EvalRunIn, db: Session = Depends(ge
     run = crud.create_eval_run(
         db, set_id=set_id, owner_id=owner_id,
         top_k=max(1, min(50, body.top_k)), rerank=body.rerank,
+        retrieval_mode=(body.retrieval_mode if body.retrieval_mode in ("auto", "dense", "hybrid") else "auto"),
         answer_eval=body.answer_eval, config_version=version, created_by=user.id,
         generation_config_id=body.generation_config_id if body.answer_eval else None,
         judge_config_id=body.judge_config_id if body.answer_eval else None,
         generation_model=gen_cfg.model if gen_cfg else "",
         judge_model=judge_cfg.model if judge_cfg else "",
     )
+    run.total_cases = len(cases)
+    run.stage = "pending"
+    db.commit()
     rag_evaluation.start_run(run.id)
     crud.add_audit(
         db, action="eval.run.start", target=str(run.id),
@@ -853,6 +924,46 @@ def eval_run_detail(run_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     return {
         "run": crud.eval_run_to_dict(run),
         "results": [crud.eval_result_to_dict(x) for x in crud.list_eval_results(db, run_id)],
+    }
+
+
+class EvalHumanScoreIn(BaseModel):
+    score: int = Field(ge=0, le=5)
+    judge: str = ""
+    reason: str = ""
+
+
+@router.post("/eval/results/{result_id}/human-score", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
+def set_eval_result_human_score(
+    result_id: uuid.UUID, body: EvalHumanScoreIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+) -> dict:
+    """对单条评测结果做人工复核打分（0-5），并重算该运行的裁判-人工一致性（Kappa）。
+
+    Kappa ≥ 0.6 且样本 ≥ 10 对时，自动评测结论才被视为可信；否则闸门判 fail。
+    """
+    updated = crud.update_eval_result_human_score(
+        db, result_id=result_id, score=body.score,
+        judge=body.judge or None, reason=body.reason or None,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="评测结果不存在")
+    run_id = updated.run_id
+    run = crud.get_eval_run(db, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="评测运行不存在")
+    calibration = rag_evaluation.recompute_run_calibration(db, run_id)
+    crud.add_audit(
+        db, action="eval.result.human_score", target=str(result_id),
+        detail={"score": body.score, "judge": body.judge, "run_id": str(run_id),
+                "kappa": calibration.get("kappa"), "pairs": calibration.get("pairs")},
+        operator_id=user.id,
+    )
+    return {
+        "result_id": str(result_id),
+        "run_id": str(run_id),
+        "human_score": updated.human_score,
+        "calibration": calibration,
     }
 
 

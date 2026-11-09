@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
 import { getRagOverview, getRagTrace, listRagTraces, setRagTraceFeedback, type RagOverview, type RagTrace } from '@/api/ragAdmin'
+import { createEvalCaseFromTrace, listEvalSets, type RagEvalSet } from '@/api/ragAdmin'
 
 const route = useRoute()
 const loading = ref(false)
@@ -18,6 +19,11 @@ const q = ref('')
 const ragStatus = ref('')
 const selected = ref<RagTrace | null>(null)
 const overview = ref<RagOverview | null>(null)
+const evalSets = ref<RagEvalSet[]>([])
+const targetSetId = ref('')
+const traceCriticality = ref('normal')
+const traceNotice = ref('')
+const addingCase = ref(false)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
@@ -25,7 +31,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [res, ov] = await Promise.all([
+    const [res, ov, sets] = await Promise.all([
       listRagTraces({
         domain: domain.value || undefined,
         q: q.value || undefined,
@@ -34,10 +40,12 @@ async function load() {
         page_size: pageSize,
       }),
       getRagOverview(),
+      listEvalSets(),
     ])
     items.value = res.items
     total.value = res.total
     overview.value = ov
+    evalSets.value = sets
   } catch (e) {
     error.value = e instanceof Error ? e.message : '加载失败'
   } finally {
@@ -68,6 +76,23 @@ async function feedback(t: RagTrace, value: string) {
     if (selected.value?.trace_id === t.trace_id) selected.value.feedback = value
   } catch (e) {
     error.value = e instanceof Error ? e.message : '提交失败'
+  }
+}
+
+async function addToEvalSet(t: RagTrace) {
+  if (!targetSetId.value) return
+  addingCase.value = true
+  traceNotice.value = ''
+  try {
+    await createEvalCaseFromTrace(targetSetId.value, {
+      trace_id: t.trace_id,
+      business_criticality: traceCriticality.value,
+    })
+    traceNotice.value = '已加入评测集：请到评测页补标 relevant / answerability'
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '加入失败'
+  } finally {
+    addingCase.value = false
   }
 }
 
@@ -225,6 +250,27 @@ onMounted(async () => {
       <div v-if="selected.conversation_id" class="block">
         <RouterLink class="btn ghost" to="/rag/sessions">session observability</RouterLink>
       </div>
+      <div class="block">
+        <div class="muted">加入评测集（从此 trace 生成评测用例）</div>
+        <div class="to-case">
+          <select v-model="targetSetId">
+            <option value="">选择评测集…</option>
+            <option v-for="s in evalSets" :key="s.id" :value="s.id">{{ s.name }}</option>
+          </select>
+          <select v-model="traceCriticality">
+            <option value="normal">普通</option>
+            <option value="important">重要</option>
+            <option value="critical">关键</option>
+          </select>
+          <button
+            class="mini"
+            :disabled="!targetSetId || addingCase"
+            @click="addToEvalSet(selected)"
+          >{{ addingCase ? '加入中…' : '加入' }}</button>
+        </div>
+        <p v-if="traceNotice" class="muted">{{ traceNotice }}</p>
+        <p class="muted" style="margin-top:4px">加入后请在评测页补标 relevant（应命中文档）与 answerability，命中标题仅作为参考写入 notes。</p>
+      </div>
     </aside>
   </div>
 </template>
@@ -272,5 +318,7 @@ label { font-size: 12.5px; color: var(--ink-2); display: flex; gap: 5px; align-i
 .hit { border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
 .hit-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; font-size: 12.5px; }
 .hit p { font-size: 12.5px; line-height: 1.6; color: var(--ink-2); white-space: pre-wrap; }
+.to-case { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+.to-case select { padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); font-size: 12.5px; max-width: 220px; }
 @media (max-width: 1100px) { .drawer { left: 20px; width: auto; } }
 </style>

@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 import app.models  # noqa: F401 —— 注册全部 ORM 模型
 from app.core.database import Base
 from app.main import app
+from app.services.rag import _split_multi_intent, _title_overlap, _apply_title_boost, _demote_faq_on_tie, _effective_score
 
 TEST_DB_NAME = "child_code_rag_admin_test"
 
@@ -360,3 +361,66 @@ def test_eval_run_rejects_same_generation_and_judge_model(client, monkeypatch):
         "generation_config_id": cfg1["id"], "judge_config_id": cfg3["id"],
     }, headers=admin_h)
     assert duplicate_model.status_code == 400, duplicate_model.text
+
+
+def test_split_multi_intent_parallel_signals():
+    query = (
+        "家长发现机构教室电脑很旧、上课经常卡顿，同时顾问说老师都是清北毕业。"
+        "文档里对这两个信号分别怎么判断？"
+    )
+    parts = _split_multi_intent(query)
+    assert len(parts) == 2
+    assert "电脑很旧" in parts[0]
+    assert "清北毕业" in parts[1]
+    assert all("这两个信号" not in p for p in parts)
+
+
+def test_split_multi_intent_two_questions():
+    query = (
+        "孩子从Scratch转Python后频繁报错、开始抵触，家长应该先排查课程匹配度"
+        "还是先考虑退费？退费时合同里哪条最关键？"
+    )
+    parts = _split_multi_intent(query)
+    assert len(parts) == 2
+    assert "课程匹配度" in parts[0]
+    assert "合同" in parts[1]
+
+
+def test_split_multi_intent_single_question():
+    query = "GESP和CSP怎么衔接？"
+    assert _split_multi_intent(query) == [query]
+
+
+def test_split_multi_intent_ignores_short_followups():
+    query = "听说现在强基计划省一都不好使了？真的假的？那银牌呢？"
+    # 短追问不是独立检索意图，不能把主问句拆成噪声子查询
+    assert _split_multi_intent(query) == [query]
+
+
+def test_title_overlap_prefers_specific_document():
+    ratio = _title_overlap("退费多久到账？", "C3 合同与退费操作手册")
+    assert ratio > 0
+    assert _title_overlap("退费多久到账？", "家长常见540问") == 0
+
+
+def test_title_boost_skips_faq_and_scores_specific_document():
+    cands = [
+        {"title": "家长常见540问", "rerank_score": 0.9, "similarity": 0.8},
+        {"title": "C3 合同与退费操作手册", "rerank_score": 0.8, "similarity": 0.7},
+    ]
+    _apply_title_boost(cands, "退费多久到账？", 0.12)
+    assert cands[0].get("title_boost") is None
+    assert cands[1]["title_boost"] > 0
+    assert _effective_score(cands[1]) > 0.8
+
+
+def test_faq_demoted_only_on_close_tie():
+    faq = {"title": "家长常见540问", "rerank_score": 0.90}
+    specific = {"title": "C3 合同与退费操作手册", "rerank_score": 0.895}
+    out = _demote_faq_on_tie([faq, specific], 0.01)
+    assert out[0] is specific
+
+    faq2 = {"title": "家长常见540问", "rerank_score": 0.90}
+    specific2 = {"title": "C3 合同与退费操作手册", "rerank_score": 0.70}
+    out2 = _demote_faq_on_tie([faq2, specific2], 0.01)
+    assert out2[0] is faq2

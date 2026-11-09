@@ -115,6 +115,10 @@ class RagEvalCase(Base):
     )
     query: Mapped[str] = mapped_column(Text)
     relevant: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 显式区分可答/不可答/未标注，避免从备注文本猜测评测分母
+    answerability: Mapped[str] = mapped_column(String(16), default="unlabeled")
+    split: Mapped[str] = mapped_column(String(16), default="regression")
+    business_criticality: Mapped[str] = mapped_column(String(16), default="normal")
     gt_answer: Mapped[str] = mapped_column(Text, default="")
     gt_keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
     query_type: Mapped[str] = mapped_column(String(32), default="fact")
@@ -134,9 +138,15 @@ class RagEvalRun(Base):
         ForeignKey("rag_eval_sets.id", ondelete="CASCADE"), index=True
     )
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    # 运行进度：后台线程逐条更新，前端轮询展示，避免长评测“看起来没在跑”
+    total_cases: Mapped[int] = mapped_column(Integer, default=0)
+    processed_cases: Mapped[int] = mapped_column(Integer, default=0)
+    stage: Mapped[str] = mapped_column(String(32), default="pending")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
     owner_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, index=True)
     top_k: Mapped[int] = mapped_column(Integer, default=5)
     rerank: Mapped[bool] = mapped_column(Boolean, default=True)
+    retrieval_mode: Mapped[str] = mapped_column(String(16), default="auto")
     answer_eval: Mapped[bool] = mapped_column(Boolean, default=False)
     # 答案质量评测的模型选择：生成回答与裁判打分分离，避免同源偏好
     generation_config_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
@@ -144,6 +154,8 @@ class RagEvalRun(Base):
     generation_model: Mapped[str] = mapped_column(String(128), default="")
     judge_model: Mapped[str] = mapped_column(String(128), default="")
     config_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 运行时配置、评测集哈希与索引指纹快照，保证历史结果可复现
+    eval_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     compare: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -153,7 +165,11 @@ class RagEvalRun(Base):
 
 
 class RagEvalResult(Base):
-    """单条评测结果：逐 case 的 ranked / 命中 / 诊断 / Bad Case 分类。"""
+    """单条评测结果：逐 case 的 ranked / 命中 / 诊断 / Bad Case 分类。
+
+    人工评分用于 LLM 裁判与人工一致性（Cohen's Kappa）校准，只有 Kappa
+    达标时才信任自动评测结果作为上线依据。
+    """
 
     __tablename__ = "rag_eval_results"
 
@@ -169,6 +185,11 @@ class RagEvalResult(Base):
     metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     retrieval_summary: Mapped[str] = mapped_column(Text, default="")
     bad_case_type: Mapped[str] = mapped_column(String(32), default="")
+    # 人工复核评分（0-5）、标注人、时间与理由，用于 Kappa 校准
+    human_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    human_judge: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    human_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    human_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

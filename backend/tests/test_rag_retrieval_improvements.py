@@ -71,3 +71,66 @@ def test_retrieve_applies_route_override_and_parent_context(monkeypatch):
     assert out[0]["doc_id"] == "d1"
     assert out[0]["text"] == "父块上下文一"
     assert out[0]["child_text"] == "子块一"
+    assert diag.get("retrieval_mode") == "dense"
+
+
+def test_retrieval_mode_labels():
+    assert rag._compute_retrieval_mode({"error": "boom"}) == "error"
+    assert rag._compute_retrieval_mode({"vector": True, "hybrid": True}) == "hybrid"
+    assert rag._compute_retrieval_mode({"vector": True}) == "dense"
+    assert rag._compute_retrieval_mode({"vector": True, "multi_query": True}) == "dense_multi"
+    assert rag._compute_retrieval_mode({"keyword": True}) == "keyword_fallback"
+    assert rag._compute_retrieval_mode({}) == "none"
+
+
+def _fake_retrieval_env(monkeypatch, dists=(0.1,)):
+    docs = ["内容一"] * len(dists)
+    metas = [{"doc_id": f"d{i}", "title": "文档一"} for i in range(len(dists))]
+    monkeypatch.setattr(rag, "get_collection", lambda: _FakeCollection(docs, metas, list(dists)))
+    monkeypatch.setattr(rag, "embed_texts", lambda texts: [[0.1, 0.2, 0.3]])
+    monkeypatch.setattr("app.crud.knowledge.usable_doc_ids", lambda db, doc_ids: set(doc_ids))
+    kw = [{"text": "内容一", "title": "文档一", "doc_id": "d0", "similarity": 0.5}]
+    monkeypatch.setattr(rag, "_keyword_search", lambda q, **kwargs: kw)
+
+
+def test_hybrid_override_forces_hybrid_even_if_config_off(monkeypatch):
+    _set_cfg(monkeypatch, hybrid_enabled=False, route_overrides={})
+    _fake_retrieval_env(monkeypatch)
+    diag: dict = {}
+    out = rag.retrieve(
+        "家长政策", db=object(), owner_id=uuid.uuid4(), rerank=False,
+        diag=diag, hybrid_override=True,
+    )
+    assert diag.get("hybrid") is True
+    assert diag.get("retrieval_mode") == "hybrid"
+    assert out and out[0]["doc_id"] == "d0"
+
+
+def test_route_override_can_enable_hybrid_per_route(monkeypatch):
+    _set_cfg(monkeypatch, hybrid_enabled=False, route_overrides={"eval": {"hybrid_enabled": True}})
+    _fake_retrieval_env(monkeypatch)
+    diag: dict = {}
+    rag.retrieve(
+        "家长政策", db=object(), owner_id=uuid.uuid4(), rerank=False,
+        diag=diag, route_key="eval",
+    )
+    assert diag.get("hybrid") is True
+    # 其他路由不受影响：eval 路由的覆盖不应泄漏到生产路由
+    diag2: dict = {}
+    rag.retrieve(
+        "家长政策", db=object(), owner_id=uuid.uuid4(), rerank=False,
+        diag=diag2, route_key="agent_teacher",
+    )
+    assert diag2.get("hybrid") is not True
+    assert diag2.get("retrieval_mode") == "dense"
+
+
+def test_hybrid_mode_uses_keyword_when_vector_empty(monkeypatch):
+    _set_cfg(monkeypatch, hybrid_enabled=True, route_overrides={})
+    _fake_retrieval_env(monkeypatch, dists=())
+    diag: dict = {}
+    out = rag.retrieve(
+        "家长政策", db=object(), owner_id=uuid.uuid4(), rerank=False, diag=diag,
+    )
+    assert out and out[0]["doc_id"] == "d0"
+    assert diag.get("retrieval_mode") == "hybrid", "Hybrid 模式下向量空但关键词命中，仍属 hybrid 架构而非降级兜底"

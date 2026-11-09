@@ -1294,6 +1294,168 @@ def _rrf_merge(vector_cands: list[dict], keyword_cands: list[dict], *, k: int = 
     return out
 
 
+def _rrf_merge_many(hit_lists: list[list[dict]], *, k: int = 60) -> list[dict]:
+    """多路子查询的 RRF 融合：每一路独立排名，按 1/(k+rank) 累加。"""
+    merged: dict[tuple[str, str], dict] = {}
+    scores: dict[tuple[str, str], float] = {}
+    for items in hit_lists:
+        for rank, c in enumerate(items):
+            key = (str(c.get("doc_id") or ""), (c.get("text") or "")[:120])
+            if key not in merged:
+                merged[key] = dict(c)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+    out = []
+    for key, c in merged.items():
+        c["rrf_score"] = round(scores[key], 6)
+        out.append(c)
+    out.sort(key=lambda x: x.get("rrf_score", 0.0), reverse=True)
+    return out
+
+
+_MULTI_INTENT_MARKERS = ("同时", "以及", "并且", "另外", "此外", "还有", "；", ";")
+# 过短的片段（“真的假的”“那银牌呢”“我咋核实”）不是独立检索意图，
+# 拆出来只会引入噪声；只把足够长的并列问句当作子查询。
+_MULTI_SUBQUERY_MIN_LEN = 8
+# auto 模式只在 baseline top1/top2 分差很小、排序本身不自信时才启用多意图，
+# 避免把已经稳定命中的 FAQ 大文档从 top1 挤下去。
+_MULTI_QUERY_MARGIN = 0.15
+# 标题命中加成：query 与文档标题有实体词重叠时，给该文档一个轻量加分，
+# 让“GESP 报考、退费流程、教师评估”这类具体问题优先落到对应制度文档，
+# 而不是永远被大而全的 FAQ 压住。FAQ 本身不加成，避免自我强化。
+_TITLE_MATCH_BOOST = 0.12
+# FAQ 只在“几乎并列”时让位给具体制度文档；差距明显时仍保留 FAQ，
+# 避免把本来命中 FAQ 的宽泛问题强行改成具体文档。
+_FAQ_TIE_MARGIN = 0.01
+_FAQ_TITLE_MARKERS = ("常见", "540", "FAQ", "问答", "百科")
+
+
+def _split_multi_intent(query: str) -> list[str]:
+    """轻量多意图拆分子查询：只对明显的并列/多问句生效，避免误伤单问句。
+
+    不依赖额外 LLM 调用：命中并列词、分号或两个问号时，按句子边界拆开。
+    返回长度 >=2 才表示值得多路检索。
+    """
+    q = _norm_text(query)
+    if not q:
+        return [q]
+    question_marks = q.count("？") + q.count("?")
+    if question_marks < 2 and not any(m in q for m in _MULTI_INTENT_MARKERS):
+        return [q]
+    parts = re.split(r"[。！？!?；;]|同时|另外|此外|并且|以及|还有", q)
+    intent = next(
+        (m for m in ("怎么判断", "如何判断", "怎么选", "如何选择", "怎么办", "怎么处理") if m in q),
+        "",
+    )
+    cleaned: list[str] = []
+    for part in parts:
+        p = part.strip(" ，,、")
+        # 去掉“文档里/资料中……分别怎么判断”这类元话语尾巴
+        p = re.sub(r"^(?:文档里|文档中|资料里|资料中|其中)", "", p)
+        p = re.sub(r"^(?:对)?(?:这|那)?(?:两|三|几)?个?(?:信号|环节|问题|方面)[，,、]?", "", p)
+        p = re.sub(r"(?:分别|各自)?(?:怎么|如何|怎样)?(?:判断|处理|选择|看|算|做)?[？?]?$", "", p)
+        p = p.strip(" ，,、")
+        if len(p) >= _MULTI_SUBQUERY_MIN_LEN:
+            if intent and intent not in p:
+                p = f"{p}，{intent}"
+            cleaned.append(p)
+    cleaned = list(dict.fromkeys(cleaned))
+    return cleaned if len(cleaned) >= 2 else [q]
+
+
+def _retrieve_multi_query(
+    query: str, *, subqueries: list[str], db, owner_id, collected_ids=None,
+    top_k: int = 5, min_similarity=None, per_doc_cap: int = 2,
+    rerank: bool = True, route_key: str | None = None,
+    parent_mode: bool = False, diag: dict | None = None,
+    hybrid_override: bool | None = None,
+) -> list[dict]:
+    """多意图：逐个子查询检索，再用 RRF 融合，最后做 per_doc_cap/top_k 截断。
+
+    子查询多取一些候选（top_k*2）并允许同一文档出现 2 个分片，这样“一篇大文档
+    分别覆盖多个子问题”时不会因为单文档只留一个分片而被挤掉；融合后按 doc_id
+    汇总 RRF 分，多分片文档给一点覆盖加成。
+    """
+    sub_top_k = max(int(top_k) * 2, int(top_k) + 5)
+    sub_cap = max(int(per_doc_cap), 2)
+    hit_lists: list[list[dict]] = []
+    subdiags: list[dict] = []
+    for sub in subqueries:
+        sub_diag: dict = {}
+        try:
+            hits = retrieve(
+                sub, db=db, owner_id=owner_id, collected_ids=collected_ids,
+                top_k=sub_top_k, min_similarity=min_similarity, per_doc_cap=sub_cap,
+                rerank=rerank, diag=sub_diag, route_key=route_key,
+                parent_mode=parent_mode, multi_query=False, record_trace=False,
+                hybrid_override=hybrid_override,
+            )
+        except Exception:
+            hits = []
+        hit_lists.append(hits)
+        subdiags.append(sub_diag)
+    merged = _rrf_merge_many(hit_lists)
+
+    # 文档级聚合：同一文档多个分片的 RRF 分累加，保留分最高的分片作为代表
+    doc_scores: dict[str, float] = {}
+    doc_best: dict[str, dict] = {}
+    doc_chunks: dict[str, int] = {}
+    for c in merged:
+        doc_id = str(c.get("doc_id") or "")
+        if not doc_id:
+            continue
+        score = float(c.get("rrf_score") or 0.0)
+        doc_scores[doc_id] = doc_scores.get(doc_id, 0.0) + score
+        doc_chunks[doc_id] = doc_chunks.get(doc_id, 0) + 1
+        if doc_id not in doc_best or score > float(doc_best[doc_id].get("rrf_score") or 0.0):
+            doc_best[doc_id] = c
+    # 覆盖加成：同一文档覆盖多个分片（可能对应多个子问题）时略加分
+    for doc_id, n in doc_chunks.items():
+        if n > 1:
+            doc_scores[doc_id] += 0.002 * (n - 1)
+    ordered = sorted(doc_scores, key=lambda d: doc_scores[d], reverse=True)
+    out: list[dict] = []
+    for doc_id in ordered:
+        c = dict(doc_best[doc_id])
+        c["rrf_score"] = round(doc_scores[doc_id], 6)
+        c["multi_chunk_count"] = doc_chunks[doc_id]
+        out.append(c)
+        if len(out) >= top_k:
+            break
+    if diag is not None:
+        diag.update({
+            "multi_query": True,
+            "multi_query_sub": subqueries,
+            "multi_query_sub_diag": subdiags,
+            "vector": any(d.get("vector") for d in subdiags),
+            "keyword": any(d.get("keyword") for d in subdiags),
+            "hybrid": any(d.get("hybrid") for d in subdiags),
+            "rerank": any(d.get("rerank") for d in subdiags),
+            "final": len(out),
+        })
+        diag["retrieval_mode"] = _compute_retrieval_mode(diag)
+    return out
+
+
+def _compute_retrieval_mode(diag: dict) -> str:
+    """把诊断压成单一检索模式标签，供 trace / 评测按架构切片。
+
+    dense / dense_multi / hybrid / keyword_fallback / none / error：
+    - hybrid 与 keyword_fallback 是两种不同契约：前者是并行召回+RRF，
+      后者是向量不可用时的降级兜底，指标不能混在一起比较。
+    """
+    if diag.get("error"):
+        return "error"
+    if diag.get("hybrid") or diag.get("hybrid_enabled"):
+        return "hybrid"
+    if diag.get("vector"):
+        return "dense_multi" if diag.get("multi_query") else "dense"
+    if diag.get("keyword"):
+        return "keyword_fallback"
+    if diag.get("multi_query"):
+        return "dense_multi"
+    return "none"
+
+
 def _hit_preview(hit: dict, *, limit: int = 500) -> dict:
     """trace 里只保留命中预览，避免重复存储整篇文档。"""
     return {
@@ -1306,11 +1468,55 @@ def _hit_preview(hit: dict, *, limit: int = 500) -> dict:
     }
 
 
+def _is_general_faq(title: str) -> bool:
+    return any(m in (title or "") for m in _FAQ_TITLE_MARKERS)
+
+
+def _bigrams(text: str) -> set[str]:
+    s = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text or "")
+    return {s[i : i + 2] for i in range(max(0, len(s) - 1))}
+
+
+def _title_overlap(query: str, title: str) -> float:
+    """query 与标题的字符 bigram 覆盖率，用来做轻量“实体命中”判断。"""
+    qg = _bigrams(query)
+    tg = _bigrams(re.sub(r"^[A-Z]\d+\s*", "", title or ""))
+    if not qg or not tg:
+        return 0.0
+    return len(qg & tg) / len(qg)
+
+
+def _apply_title_boost(cands: list[dict], query: str, boost: float) -> None:
+    if boost <= 0:
+        return
+    for c in cands:
+        if _is_general_faq(c.get("title", "")):
+            continue
+        ratio = _title_overlap(query, c.get("title", ""))
+        if ratio > 0:
+            c["title_boost"] = round(float(boost) * ratio, 6)
+
+
+def _demote_faq_on_tie(out: list[dict], margin: float) -> list[dict]:
+    """FAQ 与具体文档几乎并列时，让具体制度文档优先；差距明显则不干预。"""
+    if margin <= 0 or len(out) < 2 or not _is_general_faq(out[0].get("title", "")):
+        return out
+    second = next((h for h in out[1:] if not _is_general_faq(h.get("title", ""))), None)
+    if second is None:
+        return out
+    faq_score = float(out[0].get("rerank_score") or out[0].get("similarity") or 0.0)
+    second_score = float(second.get("rerank_score") or second.get("similarity") or 0.0)
+    if faq_score - second_score < float(margin):
+        return [second, *[h for h in out if h is not second]]
+    return out
+
+
 def retrieve(
     query: str, *, db, owner_id: uuid.UUID, collected_ids: list[uuid.UUID] | None = None,
     top_k: int | None = None, min_similarity: float | None = None, per_doc_cap: int | None = None,
     rerank: bool = True, diag: dict | None = None, route_key: str | None = None,
-    parent_mode: bool = False,
+    parent_mode: bool = False, multi_query: bool | str = "auto", record_trace: bool = True,
+    hybrid_override: bool | None = None,
 ) -> list[dict]:
     """两阶段检索：向量过召回（top_k*oversample）→（可选）rerank 精排 → 取 top_k。
 
@@ -1344,12 +1550,44 @@ def retrieve(
         min_similarity = get_settings().RAG_MIN_SIMILARITY
     gate = float(min_similarity)
     oversample = int(overrides.get("rerank_oversample", cfg.get("rerank_oversample", RERANK_OVERSAMPLE)))
+    # 路由级 hybrid 开关：评测路由（eval）可单独开 Hybrid 做 A/B，不影响生产路由；
+    # 评测运行可显式传 hybrid_override 做同环境 dense/hybrid 对比。
+    hybrid_enabled = bool(overrides.get("hybrid_enabled", cfg.get("hybrid_enabled")))
+    if hybrid_override is not None:
+        hybrid_enabled = bool(hybrid_override)
+
+    always_multi = multi_query is True
+    auto_multi = multi_query == "auto"
+    auto_parts: list[str] = []
+    if always_multi or auto_multi:
+        parts = _split_multi_intent(query)
+        if len(parts) > 1:
+            if always_multi:
+                return _retrieve_multi_query(
+                    query, subqueries=parts, db=db, owner_id=owner_id,
+                    collected_ids=collected_ids, top_k=int(top_k),
+                    min_similarity=min_similarity, per_doc_cap=int(per_doc_cap),
+                    rerank=rerank, route_key=route_key, parent_mode=parent_mode,
+                    diag=diag, hybrid_override=hybrid_override,
+                )
+            auto_parts = parts
+        else:
+            auto_multi = False
 
     d = diag if diag is not None else {}
     d.update({
         "vector": False, "keyword": False, "rerank": False, "rerank_model": None,
         "gate": gate, "route": route_key, "stage_timings": {},
+        "hybrid_enabled": hybrid_enabled,
     })
+    title_boost = float(cfg.get("title_match_boost", _TITLE_MATCH_BOOST) or 0.0)
+    faq_tie_margin = float(cfg.get("faq_tie_margin", _FAQ_TIE_MARGIN) or 0.0)
+    d["title_match_boost"] = title_boost
+    d["faq_tie_margin"] = faq_tie_margin
+    if auto_multi:
+        d["auto_multi_query"] = False
+        d["auto_margin"] = None
+        d["auto_multi_threshold"] = _MULTI_QUERY_MARGIN
     if trace is not None:
         d["trace_id"] = trace.trace_id
     t0 = time.time()
@@ -1370,7 +1608,9 @@ def retrieve(
     parent_texts: dict[int, str] = {}
 
     def _emit(out: list[dict], *, error: str | None = None) -> None:
-        if trace is None:
+        # 模式标签先于 trace 判断计算：无 trace 时 diag 也要可读
+        d["retrieval_mode"] = _compute_retrieval_mode(d)
+        if trace is None or not record_trace:
             return
         elapsed_ms = int((time.time() - t0) * 1000)
         timings = dict(trace.stage_timings)
@@ -1396,6 +1636,30 @@ def retrieve(
             stage_timings=timings,
             hits=[_hit_preview(h) for h in out],
         )
+
+    def _maybe_auto_multi(out: list[dict]) -> list[dict]:
+        """auto 模式：先看 baseline 的 top1/top2 分差，不自信时才跑多意图。"""
+        if not auto_multi or not d.get("vector") or len(out) < 2:
+            return out
+        margin = _effective_score(out[0]) - _effective_score(out[1])
+        d["auto_margin"] = round(margin, 4)
+        if margin > _MULTI_QUERY_MARGIN:
+            return out
+        try:
+            multi = _retrieve_multi_query(
+                query, subqueries=auto_parts, db=db, owner_id=owner_id,
+                collected_ids=collected_ids, top_k=int(top_k),
+                min_similarity=min_similarity, per_doc_cap=int(per_doc_cap),
+                rerank=rerank, route_key=route_key, parent_mode=parent_mode,
+                diag=d,
+            )
+        except Exception:
+            multi = []
+        if multi:
+            d["auto_multi_query"] = True
+            d["final"] = len(multi)
+            return multi
+        return out
 
     try:
         # —— 第一阶段：向量召回（embedding 不可用/异常/无结果时静默降级到关键词） ——
@@ -1432,8 +1696,10 @@ def retrieve(
         usable = _kb.usable_doc_ids(db, doc_ids=[c["doc_id"] for c in cands]) if cands else set()
         cands = [c for c in cands if c["doc_id"] in usable]
 
-        # 混合检索：向量候选 + 关键词候选 RRF 融合（默认关闭，评测后再开）
-        if cands and cfg.get("hybrid_enabled"):
+        # 正式 Hybrid：无论向量是否有结果，都执行关键词召回，再用 RRF 融合。
+        # 向量异常/空结果时，关键词结果仍属于可解释的 hybrid 运行，不伪装成
+        # 普通 keyword fallback；两种模式在诊断和评测中分开统计。
+        if hybrid_enabled:
             t_kw = time.time()
             kw = _keyword_search(
                 search_query, db=db, owner_id=owner_id,
@@ -1447,8 +1713,8 @@ def retrieve(
             d["stage_timings"]["keyword"] = round((time.time() - t_kw) * 1000, 2)
 
         if not cands:
-            # —— 兜底：向量召回为空 → 关键词检索，保证有结果可用 ——
-            if cfg.get("keyword_fallback_enabled", True):
+            # —— 兜底：向量/Hybrid 均为空 → 关键词检索，保证有结果可用 ——
+            if cfg.get("keyword_fallback_enabled", True) and not hybrid_enabled:
                 _bump("keyword_fallback")
                 t_kw = time.time()
                 out = _keyword_search(
@@ -1468,6 +1734,8 @@ def retrieve(
                     c["child_text"] = c.get("text", "")
                     c["text"] = pt
             _sort_by_score(out)
+            out = _demote_faq_on_tie(out, faq_tie_margin)
+            out = _maybe_auto_multi(out)
             _record_query(out, t0)
             _emit(out)
             return out
@@ -1480,6 +1748,12 @@ def retrieve(
             d.update(rmeta)
             d["rerank_in"] = rerank_in
             d["stage_timings"]["rerank"] = round((time.time() - t_rr) * 1000, 2)
+
+        # 标题/实体命中加成 + FAQ 并列让位：在重排之后、截断之前做，
+        # 只调整“具体制度文档”的排序，不改变向量召回与 rerank 原始分。
+        _apply_title_boost(cands, search_query, title_boost)
+        if title_boost > 0 and cands:
+            cands.sort(key=_effective_score, reverse=True)
 
         # 父子切分：子块检索/重排，命中后回填父块作为 LLM 上下文
         for c in cands:
@@ -1506,6 +1780,8 @@ def retrieve(
 
         # 统一按「有效分」显式排序：有重排分用重排分，否则用 RRF/向量相似度
         _sort_by_score(out)
+        out = _demote_faq_on_tie(out, faq_tie_margin)
+        out = _maybe_auto_multi(out)
         d["final"] = len(out)
         _record_query(out, t0)
         _emit(out)
@@ -1518,11 +1794,13 @@ def retrieve(
 
 def _effective_score(hit: dict) -> float:
     """命中分片的排序依据分：重排分优先，其次 RRF，最后向量相似度。"""
+    base = float(hit.get("similarity") or 0.0)
     for key in ("rerank_score", "rrf_score"):
         v = hit.get(key)
         if isinstance(v, (int, float)):
-            return float(v)
-    return float(hit.get("similarity") or 0.0)
+            base = float(v)
+            break
+    return base + float(hit.get("title_boost") or 0.0)
 
 
 def _sort_by_score(hits: list[dict]) -> None:
@@ -1533,6 +1811,8 @@ def _sort_by_score(hits: list[dict]) -> None:
 def retrieval_summary(diag: dict) -> str:
     """把检索诊断压成一句人话，用于「引用来源」标注：向量/关键词/重排是否生效。"""
     stages: list[str] = []
+    if diag.get("multi_query"):
+        stages.append(f"多意图拆分 {len(diag.get('multi_query_sub') or [])} 路")
     if diag.get("vector"):
         stages.append(f"向量召回 {diag.get('vector_in', 0)} 条")
         if diag.get("gated_out"):
@@ -1546,7 +1826,9 @@ def retrieval_summary(diag: dict) -> str:
         stages.append("未重排")
     if diag.get("keyword"):
         stages.append("关键词兜底")
-    return " → ".join(stages) if stages else "未检索"
+    summary = " → ".join(stages) if stages else "未检索"
+    mode = diag.get("retrieval_mode")
+    return f"[{mode}] {summary}" if mode else summary
 
 
 def _record_query(out: list[dict], t0: float) -> None:

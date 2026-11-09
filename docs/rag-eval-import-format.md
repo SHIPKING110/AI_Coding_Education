@@ -20,6 +20,9 @@
 |------|------|------|------|
 | `query` | 是 | string | 用户问题（评测输入）。 |
 | `relevant` | 否 | string[] / string | 应命中/相关文档标题（数组或用 `;` 分隔的字符串）。与知识资产中的文档标题一致，用于计算 hit@k / MRR / recall。 |
+| `answerability` | 否 | enum | `answerable` / `unanswerable` / `unlabeled`。显式声明可答性；留空时按 `relevant` 与备注文本推断。明确不可答的问题请标 `unanswerable`，会单独统计拒答率。 |
+| `split` | 否 | enum | `tuning`（调参集）/ `regression`（默认）/ `frozen`（冻结验收集，不参与调参，单独汇总）。 |
+| `business_criticality` | 否 | enum | `critical` / `important` / `normal`（默认）。关键用例单独汇总，验收时不看被平均值稀释的结果。 |
 | `gt_answer` | 否 | string | 标准答案（可选，用于答案质量评测）。 |
 | `gt_keywords` | 否 | string[] / string | 标准答案关键词（数组或 `;` 分隔），用于答案关键词命中率。 |
 | `query_type` | 否 | enum | `fact`（事实查询，默认） / `compare`（对比） / `howto`（操作指南） / `policy`（政策） |

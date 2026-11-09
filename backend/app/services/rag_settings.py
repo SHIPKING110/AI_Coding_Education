@@ -35,6 +35,8 @@ DEFAULTS: dict = {
     "hybrid_enabled": False,
     "hybrid_candidates": 50,
     "query_rewrite_enabled": False,
+  "title_match_boost": 0.12,
+  "faq_tie_margin": 0.01,
     # 观测
     "trace_success_sample_rate": 1.0,
     "trace_retention_days": 30,
@@ -82,6 +84,8 @@ def sanitize(raw: dict | None) -> dict:
     out["hybrid_enabled"] = bool(src.get("hybrid_enabled", False))
     out["hybrid_candidates"] = _clamp_int(src.get("hybrid_candidates", 50), 5, 200, 50)
     out["query_rewrite_enabled"] = bool(src.get("query_rewrite_enabled", False))
+    out["title_match_boost"] = _clamp_float(src.get("title_match_boost", 0.12), 0.0, 0.5, 0.12)
+    out["faq_tie_margin"] = _clamp_float(src.get("faq_tie_margin", 0.01), 0.0, 0.2, 0.01)
     out["trace_success_sample_rate"] = _clamp_float(src.get("trace_success_sample_rate", 1.0), 0.0, 1.0, 1.0)
     out["trace_retention_days"] = _clamp_int(src.get("trace_retention_days", 30), 1, 365, 30)
     out["trace_error_retention_days"] = _clamp_int(src.get("trace_error_retention_days", 90), 1, 365, 90)
