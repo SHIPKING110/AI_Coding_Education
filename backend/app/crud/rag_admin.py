@@ -393,6 +393,53 @@ def add_eval_case(
     return row
 
 
+def update_eval_case(
+    db: Session, case_id, *,
+    query: str | None = None,
+    relevant: list | None = None,
+    answerability: str | None = None,
+    split: str | None = None,
+    business_criticality: str | None = None,
+    gt_answer: str | None = None,
+    gt_keywords: list | None = None,
+    query_type: str | None = None,
+    difficulty: str | None = None,
+    notes: str | None = None,
+) -> RagEvalCase | None:
+    """行内编辑用例：只改传入字段；relevant 变化且未显式给可答性时按标注重新推导。"""
+    row = db.get(RagEvalCase, case_id)
+    if row is None:
+        return None
+    if query is not None and query.strip():
+        row.query = query.strip()
+    if relevant is not None:
+        row.relevant = relevant
+    if answerability is not None:
+        row.answerability = normalize_answerability(answerability, row.relevant)
+    elif relevant is not None:
+        # 未显式给可答性时按最新标注推导，避免「不可答 + 有 relevant」的矛盾数据
+        row.answerability = normalize_answerability("", row.relevant)
+    if split is not None:
+        row.split = _norm_enum(split, _SPLIT_VALUES, row.split or "regression")
+    if business_criticality is not None:
+        row.business_criticality = _norm_enum(
+            business_criticality, _CRITICALITY_VALUES, row.business_criticality or "normal"
+        )
+    if gt_answer is not None:
+        row.gt_answer = gt_answer
+    if gt_keywords is not None:
+        row.gt_keywords = gt_keywords
+    if query_type is not None:
+        row.query_type = query_type or row.query_type
+    if difficulty is not None:
+        row.difficulty = difficulty or row.difficulty
+    if notes is not None:
+        row.notes = notes
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 def delete_eval_case(db: Session, case_id) -> bool:
     row = db.get(RagEvalCase, case_id)
     if row is None:

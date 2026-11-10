@@ -313,6 +313,41 @@ def test_eval_cases_bulk_partial_and_dedupe(client):
     assert body["errors"][0]["index"] == 3
 
 
+def test_eval_case_update_inline(client):
+    admin_h, admin_me = _register(client, "admin", "rag-eval-edit")
+    s = client.post("/api/admin/rag/eval/sets", json={
+        "name": "编辑集", "domain": "agent_teacher", "owner_id": admin_me["id"],
+    }, headers=admin_h).json()
+    c = client.post(f"/api/admin/rag/eval/sets/{s['id']}/cases", json={
+        "query": "怎么请假？", "relevant": [], "answerability": "unanswerable", "notes": "反例",
+    }, headers=admin_h).json()
+
+    # 补标 relevant 后未显式给可答性 → 按标注推导为 answerable
+    r = client.put(f"/api/admin/rag/eval/cases/{c['id']}", json={
+        "relevant": ["请假制度"], "split": "frozen", "business_criticality": "critical",
+    }, headers=admin_h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["relevant"] == ["请假制度"]
+    assert body["answerability"] == "answerable"
+    assert body["split"] == "frozen"
+    assert body["business_criticality"] == "critical"
+
+    # 显式可答性优先于推导
+    r2 = client.put(f"/api/admin/rag/eval/cases/{c['id']}", json={
+        "relevant": [], "answerability": "unlabeled",
+    }, headers=admin_h)
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["answerability"] == "unlabeled"
+
+    # 不存在的用例 → 404
+    r3 = client.put(f"/api/admin/rag/eval/cases/{uuid.uuid4()}", json={"split": "tuning"}, headers=admin_h)
+    assert r3.status_code == 404
+
+    audit = client.get("/api/admin/rag/audit", headers=admin_h).json()["items"]
+    assert any(a["action"] == "eval.case.update" for a in audit)
+
+
 def test_eval_run_rejects_same_generation_and_judge_model(client, monkeypatch):
     from app.services import rag_evaluation
 

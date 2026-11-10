@@ -756,6 +756,36 @@ def add_eval_cases(
     }
 
 
+class EvalCaseUpdateIn(BaseModel):
+    query: str | None = None
+    relevant: list[str] | None = None
+    answerability: str | None = None
+    split: str | None = None
+    business_criticality: str | None = None
+    gt_answer: str | None = None
+    gt_keywords: list[str] | None = None
+    query_type: str | None = None
+    difficulty: str | None = None
+    notes: str | None = None
+
+
+@router.put("/eval/cases/{case_id}", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
+def update_eval_case(
+    case_id: uuid.UUID, body: EvalCaseUpdateIn,
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+) -> dict:
+    """行内编辑评测用例：补标 relevant、调整可答性/分层/关键度等。"""
+    row = crud.update_eval_case(db, case_id, **body.model_dump(exclude_none=True))
+    if row is None:
+        raise HTTPException(status_code=404, detail="用例不存在")
+    crud.add_audit(
+        db, action="eval.case.update", target=str(case_id),
+        detail={"fields": sorted(body.model_dump(exclude_none=True).keys())},
+        operator_id=user.id,
+    )
+    return crud.eval_case_to_dict(row)
+
+
 @router.delete("/eval/cases/{case_id}", dependencies=[Depends(require_teacher_permission("rag_eval_case_add", staff_allowed=False))])
 def delete_eval_case(case_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
     ok = crud.delete_eval_case(db, case_id)

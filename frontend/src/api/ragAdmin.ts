@@ -445,6 +445,24 @@ export async function deleteEvalCase(caseId: string): Promise<void> {
   await http.delete(`/admin/rag/eval/cases/${caseId}`)
 }
 
+export async function updateEvalCase(
+  caseId: string, payload: {
+    query?: string
+    relevant?: string[]
+    answerability?: string
+    split?: string
+    business_criticality?: string
+    gt_answer?: string
+    gt_keywords?: string[]
+    query_type?: string
+    difficulty?: string
+    notes?: string
+  },
+): Promise<RagEvalCase> {
+  const { data } = await http.put(`/admin/rag/eval/cases/${caseId}`, payload)
+  return data
+}
+
 export async function generateEvalCases(setId: string, payload: Record<string, unknown>): Promise<any> {
   const { data } = await http.post(`/admin/rag/eval/sets/${setId}/generate`, payload)
   return data

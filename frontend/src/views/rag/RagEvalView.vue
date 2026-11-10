@@ -18,6 +18,7 @@ import {
   listEvalRuns,
   listEvalSets,
   setEvalResultHumanScore,
+  updateEvalCase,
   type RagEvalCase,
   type RagEvalModel,
   type RagEvalResult,
@@ -492,6 +493,58 @@ async function removeCase(c: RagEvalCase) {
   })
 }
 
+// 用例行内编辑：补标 relevant、调整可答性/分层/关键度，避免“删除再导入”
+const editingCaseId = ref<string | null>(null)
+const editCaseForm = ref({
+  query: '',
+  relevantText: '',
+  answerability: 'unlabeled',
+  split: 'regression',
+  business_criticality: 'normal',
+})
+function startEditCase(c: RagEvalCase) {
+  editingCaseId.value = c.id
+  editCaseForm.value = {
+    query: c.query,
+    relevantText: (c.relevant || []).join('，'),
+    answerability: c.answerability || 'unlabeled',
+    split: c.split || 'regression',
+    business_criticality: c.business_criticality || 'normal',
+  }
+}
+function cancelEditCase() {
+  editingCaseId.value = null
+}
+async function saveEditCase(c: RagEvalCase) {
+  const relevant = editCaseForm.value.relevantText
+    .split(/[,，、]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  try {
+    await updateEvalCase(c.id, {
+      query: editCaseForm.value.query,
+      relevant,
+      answerability: editCaseForm.value.answerability,
+      split: editCaseForm.value.split,
+      business_criticality: editCaseForm.value.business_criticality,
+    })
+    editingCaseId.value = null
+    msg.value = '用例已更新'
+    if (activeSet.value) await loadCases(activeSet.value.id, casePage.value)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '更新失败'
+  }
+}
+function answerabilityLabel(v: string | undefined) {
+  return v === 'answerable' ? '可答' : v === 'unanswerable' ? '不可答' : '未标注'
+}
+function splitLabel(v: string | undefined) {
+  return v === 'frozen' ? '冻结' : v === 'tuning' ? '调参' : '回归'
+}
+function criticalityLabel(v: string | undefined) {
+  return v === 'critical' ? '关键' : v === 'important' ? '重要' : '普通'
+}
+
 async function startRun() {
   if (!activeSet.value) return
   if (runForm.value.answer_eval) {
@@ -782,16 +835,55 @@ onMounted(loadSets)
       </div>
 
       <table class="table">
-        <thead><tr><th>query</th><th>relevant</th><th>类型</th><th>来源</th><th></th></tr></thead>
+        <thead><tr><th>query</th><th>relevant</th><th>可答性</th><th>分层</th><th>关键度</th><th>类型</th><th>来源</th><th></th></tr></thead>
         <tbody>
           <tr v-for="c in cases" :key="c.id">
-            <td>{{ c.query }}</td>
-            <td class="muted">{{ c.relevant.join('、') || '-' }}</td>
-            <td>{{ c.query_type }}</td>
-            <td>{{ c.source }}</td>
-            <td><button class="mini danger" @click="removeCase(c)">删除</button></td>
+            <template v-if="editingCaseId === c.id">
+              <td colspan="8">
+                <div class="case-edit">
+                  <label>query<input v-model="editCaseForm.query" /></label>
+                  <label>relevant（逗号分隔标题）<input v-model="editCaseForm.relevantText" placeholder="文档标题A，文档标题B" /></label>
+                  <label>可答性
+                    <select v-model="editCaseForm.answerability">
+                      <option value="answerable">可答</option>
+                      <option value="unanswerable">不可答</option>
+                      <option value="unlabeled">未标注</option>
+                    </select>
+                  </label>
+                  <label>分层
+                    <select v-model="editCaseForm.split">
+                      <option value="regression">回归</option>
+                      <option value="tuning">调参</option>
+                      <option value="frozen">冻结</option>
+                    </select>
+                  </label>
+                  <label>关键度
+                    <select v-model="editCaseForm.business_criticality">
+                      <option value="normal">普通</option>
+                      <option value="important">重要</option>
+                      <option value="critical">关键</option>
+                    </select>
+                  </label>
+                  <button class="mini ok" @click="saveEditCase(c)">保存</button>
+                  <button class="mini ghost" @click="cancelEditCase">取消</button>
+                </div>
+              </td>
+            </template>
+            <template v-else>
+              <td>{{ c.query }}</td>
+              <td class="muted">{{ (c.relevant || []).join('、') || '-' }}</td>
+              <td><span class="tag" :class="c.answerability === 'answerable' ? 'ok' : c.answerability === 'unanswerable' ? 'pending' : ''">{{ answerabilityLabel(c.answerability) }}</span></td>
+              <td><span class="tag" :class="c.split === 'frozen' ? 'bad' : ''">{{ splitLabel(c.split) }}</span></td>
+              <td><span class="tag" :class="c.business_criticality === 'critical' ? 'bad' : c.business_criticality === 'important' ? 'pending' : ''">{{ criticalityLabel(c.business_criticality) }}</span></td>
+              <td>{{ c.query_type }}</td>
+              <td>{{ c.source }}</td>
+              <td>
+                <button class="mini" @click="startEditCase(c)">编辑</button>
+                <button class="mini danger" @click="removeCase(c)">删除</button>
+              </td>
+            </template>
           </tr>
-          <tr v-if="!cases.length"><td colspan="5" class="muted">暂无用例</td></tr>
+          <tr v-if="!cases.length"><td colspan="8" class="muted">暂无用例</td></tr>
         </tbody>
       </table>
       <div class="pager">
@@ -950,6 +1042,10 @@ onMounted(loadSets)
 .run-form label { display: flex; gap: 6px; align-items: center; font-size: 12.5px; }
 .run-form select { padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); font-size: 12.5px; max-width: 220px; }
 .model-pick { flex-direction: column; align-items: flex-start !important; gap: 4px !important; }
+.case-edit { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+.case-edit label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--ink-3); }
+.case-edit input, .case-edit select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 12px; }
+.case-edit label:nth-child(2) input { min-width: 240px; }
 .page-size { margin-left: 4px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 11.5px; }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 10px; }
 .warn { color: #b45309; background: #fffbeb; padding: 9px 12px; border-radius: 9px; font-size: 12px; margin-bottom: 10px; }
