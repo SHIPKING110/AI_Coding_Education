@@ -70,6 +70,21 @@ docker run --rm -v child_code_uploads:/data -v $(pwd):/bak alpine tar czf /bak/u
 - [ ] 备份 cron 已配（数据库 + uploads 卷）
 - [ ] 首个 admin 已创建；`SEED_ADMIN_*` 可从 `.env.prod` 删除
 - [ ] 全量回归通过：`pytest` / `ruff` / `npm run build`
+- [ ] **评测闸门通过**：`docker compose exec backend python -m scripts.deploy_gate --set-id <评测集UUID>`（exit 0 才允许发版）
+
+### 评测闸门（部署前必跑）
+
+后台「RAG → 评测」完成一次冻结集运行后，部署前执行：
+
+```bash
+# 闸门通过返回 0；未通过返回 1 并打印原因；无运行返回 2
+docker compose exec backend python -m scripts.deploy_gate --set-id <评测集UUID>
+
+# 按名称查找 / 机器可读输出（用于发布流水线）
+docker compose exec backend python -m scripts.deploy_gate --set-name "家长常见问答回归集" --json
+```
+
+判定规则：冻结集/关键用例 hit@3 较上次下降 >2pp、无依据回答率 >5%、检索异常率 >0.1%、或人工复核 ≥10 对时 Kappa <0.6，均判 fail，应回滚到上一个通过的配置版本（后台「RAG → 设置」可一键回滚）。历史运行对比可用 `python -m scripts.compare_eval_runs <set_id>`。
 
 
 

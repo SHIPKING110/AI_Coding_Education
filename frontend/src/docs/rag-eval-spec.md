@@ -155,6 +155,8 @@ query,relevant,gt_answer,gt_keywords,query_type,difficulty,notes,source
 闸门结果：`pass` / `fail` / `skip`（未建冻结集或关键用例时跳过）。`fail` 时应拒绝上线并回滚到上一个闸门通过的配置版本。
 
 > 没有 `split=frozen` 的用例时闸门跳过：先把至少 20% 的关键用例标为冻结集，再把闸门作为上线的强制条件。
+>
+> **部署前强制校验**：`python -m scripts.deploy_gate --set-id <评测集UUID>` 读取最近一次完成的运行并复用同一套闸门规则，exit 0 才允许发版（见 `DEPLOY.md` 生产 checklist）。
 
 ## 八、裁判人机一致性校准（Kappa）
 

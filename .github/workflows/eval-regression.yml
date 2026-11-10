@@ -33,3 +33,4 @@ jobs:
           app/models/parent_service.py app/models/user.py app/models/knowledge.py
           app/models/system_setting.py app/models/permission.py
           app/core/config.py evals/metrics.py evals/run_rag_eval.py evals/run_agent_eval.py
+          scripts/compare_eval_runs.py scripts/deploy_gate.py scripts/audit_eval_labels.py scripts/seed_eval_set.py

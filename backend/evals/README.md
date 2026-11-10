@@ -25,6 +25,14 @@ python -m evals.run_rag_eval --owner <你的用户名> --dataset evals/datasets/
 
 # 3) Agent 工具选择评估
 python -m evals.run_agent_eval --owner <你的用户名> --dataset evals/datasets/agent_seed.jsonl
+
+# 4) 种子数据集 → 后台评测集（可在「RAG → 评测」直接跑、做闸门验收）
+python -m scripts.seed_eval_set --dataset evals/datasets/parent_seed.jsonl \
+    --name "家长客服回归集" --domain parent_service
+
+# 5) 部署前闸门校验（exit 0 才允许发版）与历史运行对比
+python -m scripts.deploy_gate --set-id <评测集UUID>
+python -m scripts.compare_eval_runs <评测集UUID>
 ```
 
 ## 数据集格式（我们逐步共建）
