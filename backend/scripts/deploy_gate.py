@@ -4,7 +4,8 @@
 
     python -m scripts.deploy_gate --set-id <评测集UUID>
     python -m scripts.deploy_gate --set-name "家长常见问答回归集"
-    python -m scripts.deploy_gate --set-id <UUID> --json      # 机器可读输出
+    python -m scripts.deploy_gate --json      # 机器可读输出
+    # 也可用环境变量 RAG_GATE_SET_ID / RAG_GATE_SET_NAME（发版 wrapper 使用）
 
 退出码（可直接用于 CI/发布脚本拦截）：
     0 = 闸门通过（或 --allow-missing 且无历史运行）
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 
@@ -53,8 +55,10 @@ def _fmt(v) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="RAG 评测验收闸门（部署前校验）")
-    ap.add_argument("--set-id", default=None, help="评测集 UUID")
-    ap.add_argument("--set-name", default=None, help="评测集名称（与 --set-id 二选一）")
+    ap.add_argument("--set-id", default=os.environ.get("RAG_GATE_SET_ID") or None,
+                    help="评测集 UUID（也可用环境变量 RAG_GATE_SET_ID）")
+    ap.add_argument("--set-name", default=os.environ.get("RAG_GATE_SET_NAME") or None,
+                    help="评测集名称（也可用环境变量 RAG_GATE_SET_NAME，与 --set-id 二选一）")
     ap.add_argument("--allow-missing", action="store_true",
                     help="没有完成的运行时放行（默认阻断）")
     ap.add_argument("--json", action="store_true", help="输出机器可读 JSON")

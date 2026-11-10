@@ -17,6 +17,7 @@ const pageSize = 20
 const domain = ref('')
 const q = ref('')
 const ragStatus = ref('')
+const feedbackFilter = ref('')
 const selected = ref<RagTrace | null>(null)
 const overview = ref<RagOverview | null>(null)
 const evalSets = ref<RagEvalSet[]>([])
@@ -36,6 +37,7 @@ async function load() {
         domain: domain.value || undefined,
         q: q.value || undefined,
         rag_status: ragStatus.value || undefined,
+        feedback: feedbackFilter.value || undefined,
         page: page.value,
         page_size: pageSize,
       }),
@@ -141,6 +143,7 @@ onMounted(async () => {
       <div><span>P95 时延</span><b>{{ overview.retrieval_24h.p95_latency_ms == null ? '-' : `${overview.retrieval_24h.p95_latency_ms} ms` }}</b></div>
       <div><span>向量成功率</span><b>{{ pct(overview.retrieval_24h.vector_success_rate) }}</b></div>
       <div><span>重排成功率</span><b>{{ pct(overview.retrieval_24h.rerank_success_rate) }}</b></div>
+      <div><span>赞 / 踩（24h）</span><b>{{ overview.retrieval_24h.feedback_up ?? 0 }} / {{ overview.retrieval_24h.feedback_down ?? 0 }}</b></div>
     </section>
 
     <section class="toolbar">
@@ -157,6 +160,12 @@ onMounted(async () => {
         <option value="hit">hit</option>
         <option value="no_hit">no_hit</option>
         <option value="error">error</option>
+      </select>
+      <select v-model="feedbackFilter" @change="search">
+        <option value="">全部反馈</option>
+        <option value="down">踩（Bad Case）</option>
+        <option value="up">赞</option>
+        <option value="none">未反馈</option>
       </select>
       <button class="btn" @click="search">查询</button>
     </section>
@@ -277,12 +286,10 @@ onMounted(async () => {
 
 <style scoped>
 .btn { padding: 8px 14px; border-radius: 9px; border: 1px solid var(--brand); background: var(--brand); color: #fff; font-weight: 600; cursor: pointer; font-size: 13px; }
-.health-strip { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.health-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
 .health-strip > div { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 3px; }
 .health-strip span { font-size: 11px; color: var(--ink-3); }
 .health-strip b { font-size: 16px; color: var(--ink); }
-@media (max-width: 1000px) { .health-strip { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 600px) { .health-strip { grid-template-columns: repeat(2, 1fr); } }
 .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .toolbar input[type='text'], .toolbar input:not([type]), .toolbar select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); }
 label { font-size: 12.5px; color: var(--ink-2); display: flex; gap: 5px; align-items: center; }

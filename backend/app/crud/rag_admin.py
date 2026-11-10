@@ -80,7 +80,8 @@ def trace_to_dict(r: RagRetrievalTrace) -> dict:
 
 def list_traces(
     db: Session, *, domain: str | None = None, owner_id=None, conversation_id=None,
-    zero_only: bool = False, error_only: bool = False, rag_status: str | None = None, q: str | None = None,
+    zero_only: bool = False, error_only: bool = False, rag_status: str | None = None,
+    feedback: str | None = None, q: str | None = None,
     created_from: datetime | None = None, created_to: datetime | None = None,
     page: int = 1, page_size: int = 20,
 ) -> dict:
@@ -91,6 +92,12 @@ def list_traces(
         conds.append(RagRetrievalTrace.owner_id == owner_id)
     if conversation_id:
         conds.append(RagRetrievalTrace.conversation_id == conversation_id)
+    if feedback:
+        # "none" = 未反馈；"up"/"down" = 赞/踩（发现 Bad Case 的主要入口）
+        if feedback == "none":
+            conds.append(RagRetrievalTrace.feedback.is_(None))
+        elif feedback in ("up", "down"):
+            conds.append(RagRetrievalTrace.feedback == feedback)
     if rag_status:
         if rag_status == "error":
             conds.append(RagRetrievalTrace.is_error.is_(True))
@@ -172,6 +179,16 @@ def trace_stats(db: Session, *, since: datetime) -> dict:
             RagRetrievalTrace.rerank_candidates > 0,
         )
     ) or 0)
+    feedback_up = int(db.scalar(
+        select(func.count()).select_from(RagRetrievalTrace).where(
+            RagRetrievalTrace.created_at >= since, RagRetrievalTrace.feedback == "up"
+        )
+    ) or 0)
+    feedback_down = int(db.scalar(
+        select(func.count()).select_from(RagRetrievalTrace).where(
+            RagRetrievalTrace.created_at >= since, RagRetrievalTrace.feedback == "down"
+        )
+    ) or 0)
     hit = max(0, total - zero - errors)
     rows = db.execute(
         select(
@@ -213,6 +230,8 @@ def trace_stats(db: Session, *, since: datetime) -> dict:
         "rerank_fail": rerank_fail,
         "rerank_attempts": rerank_attempts,
         "rerank_success_rate": round(rerank_ok / rerank_attempts, 4) if rerank_attempts else None,
+        "feedback_up": feedback_up,
+        "feedback_down": feedback_down,
         "rag_status_counts": {
             "hit": hit,
             "no_hit": zero,

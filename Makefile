@@ -1,7 +1,7 @@
 # 质检线（Backend + Frontend + Docs）
 # 后端依赖需 uv + 科学上网安装；前端依赖需 npm install。
 
-.PHONY: help install install-ai setup lint format test run frontend dev check
+.PHONY: help install install-ai setup lint format test run frontend dev check release
 
 help:
 	@echo "Child Code 质检线"
@@ -14,6 +14,7 @@ help:
 	@echo "  make run         启动后端开发服务（8000）"
 	@echo "  make frontend    启动前端开发服务（5173）"
 	@echo "  make check       依次执行 lint + test"
+	@echo "  make release     生产发版：构建 → 评测闸门（GATE_SET_NAME）→ 上线"
 
 install:
 	cd backend && uv sync --extra dev
@@ -41,3 +42,18 @@ frontend:
 
 check: lint test
 	@echo "All checks passed."
+
+# 生产发版：先构建新镜像，用新镜像跑评测闸门（读线上库），通过后才上线。
+# 用法：GATE_SET_NAME="家长客服冻结集" make release
+# 未设置 GATE_SET_NAME 时跳过闸门（不推荐，仅应急）。
+release:
+	@if [ -z "$$GATE_SET_NAME" ]; then \
+		echo "警告：未设置 GATE_SET_NAME，跳过评测闸门（不推荐）"; \
+	fi
+	docker compose build backend
+	@if [ -n "$$GATE_SET_NAME" ]; then \
+		docker compose run --rm -T backend python -m scripts.deploy_gate --set-name "$$GATE_SET_NAME" \
+			|| { echo "评测闸门未通过，已中止发版"; exit 1; }; \
+	fi
+	docker compose up -d
+	@echo "发版完成：docker compose ps 查看状态"

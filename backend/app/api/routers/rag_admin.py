@@ -456,6 +456,7 @@ def list_traces(
     zero_only: bool = False,
     error_only: bool = False,
     rag_status: str | None = None,
+    feedback: str | None = None,
     q: str | None = None,
     created_from: datetime | None = None,
     created_to: datetime | None = None,
@@ -465,7 +466,7 @@ def list_traces(
 ) -> dict:
     return crud.list_traces(
         db, domain=domain, owner_id=owner_id, conversation_id=conversation_id,
-        zero_only=zero_only, error_only=error_only, rag_status=rag_status, q=q,
+        zero_only=zero_only, error_only=error_only, rag_status=rag_status, feedback=feedback, q=q,
         created_from=created_from, created_to=created_to,
         page=page, page_size=page_size,
     )

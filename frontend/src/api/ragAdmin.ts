@@ -31,6 +31,8 @@ export interface RagTraceStats {
   rerank_fail: number
   rerank_attempts?: number
   rerank_success_rate?: number | null
+  feedback_up?: number
+  feedback_down?: number
   rag_status_counts?: { hit: number; no_hit: number; error: number }
 }
 

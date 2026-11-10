@@ -187,6 +187,46 @@ def test_trace_persisted_and_virtual_bases(client):
     assert True
 
 
+def test_trace_feedback_filter(client):
+    admin_h, admin_me = _register(client, "admin", "rag-tr-fb")
+    from app.services import rag_trace
+
+    with rag_trace.trace_scope(
+        domain="fb_test", user_id=admin_me["id"], owner_id=admin_me["id"], route="fb_test",
+    ) as ctx:
+        rag_trace.record(ctx, query="反馈筛选测试", hits=[], vector_ok=True, latency_ms=5)
+    assert rag_trace.flush(3.0)
+    deadline = time.time() + 3
+    trace_id = None
+    while time.time() < deadline:
+        items = client.get(
+            "/api/admin/rag/traces", params={"domain": "fb_test"}, headers=admin_h,
+        ).json()["items"]
+        if items:
+            trace_id = items[0]["trace_id"]
+            break
+        time.sleep(0.1)
+    assert trace_id, "trace 应已落库"
+
+    r = client.post(
+        f"/api/admin/rag/traces/{trace_id}/feedback", json={"feedback": "down"}, headers=admin_h,
+    )
+    assert r.status_code == 200, r.text
+
+    down = client.get(
+        "/api/admin/rag/traces", params={"domain": "fb_test", "feedback": "down"}, headers=admin_h,
+    ).json()
+    assert any(x["trace_id"] == trace_id for x in down["items"])
+    up = client.get(
+        "/api/admin/rag/traces", params={"domain": "fb_test", "feedback": "up"}, headers=admin_h,
+    ).json()
+    assert all(x["trace_id"] != trace_id for x in up["items"])
+    none = client.get(
+        "/api/admin/rag/traces", params={"domain": "fb_test", "feedback": "none"}, headers=admin_h,
+    ).json()
+    assert all(x["trace_id"] != trace_id for x in none["items"])
+
+
 def test_route_override(client):
     admin_h, _ = _register(client, "admin", "rag-route")
     r = client.put("/api/admin/rag/routes/agent_teacher", json={
