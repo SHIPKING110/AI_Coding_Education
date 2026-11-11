@@ -11,6 +11,9 @@ evals/
 ├── run_agent_eval.py        # Agent 工具选择评估
 └── datasets/
     ├── rag_seed.jsonl       # RAG 查询种子集（relevant 用文档标题标注）
+    ├── parent_seed.jsonl    # 家长客服种子集（初始版）
+    ├── zhouxing_parent_eval.jsonl   # 行舟编程·家长客服域评测集（51 条，精标）
+    ├── zhouxing_teacher_eval.jsonl  # 行舟编程·教师内部域评测集（53 条，精标）
     └── agent_seed.jsonl     # Agent 任务种子集（expect/forbid 工具）
 ```
 
@@ -52,6 +55,40 @@ python -m scripts.compare_eval_runs <评测集UUID>
 ```
 - 工具名见 `app/services/agent_tools.py`（如 `my_schedule_overview`、`find_students`、`student_progress`）。
 - 覆盖：**单工具**、**多工具组合**、**闲聊不调工具**（`expect_tools: []` + `forbid_tools`）。
+
+## 行舟编程评测集（企业落地场景，104 条精标）
+
+| 文件 | 域 | 条数 | 场景 |
+|------|----|----|------|
+| `zhouxing_parent_eval.jsonl` | parent_service（家长客服） | 51 | 课程/课时/升班/收费/退费/资质/安全/竞赛/报告问答、退费纠纷与私下转账诱导（critical）、教师管理与薪酬等隔离反例、发票/加盟/转介绍不可答、闲聊 |
+| `zhouxing_teacher_eval.jsonl` | agent_teacher（教师内部） | 53 | 课程大纲/教学法/招聘培训评估/收费退费/安全应急/报考备赛/成绩报告/投诉流失/销售话术，含跨文档多跳与不可答负例 |
+
+字段在基础格式上扩展（逐条显式，seed 脚本原样采纳）：
+```json
+{"query": "...", "relevant": ["A3 阶段衔接与升班标准"],
+ "answerability": "answerable", "split": "frozen",
+ "business_criticality": "critical", "query_type": "multihop",
+ "difficulty": "hard", "gt_answer": "标准答案要点（供裁判）",
+ "gt_keywords": ["关键词1", "关键词2"], "notes": "标注理由"}
+```
+
+设计口径：
+- **冻结集**：每集约 25% 标 `split=frozen`（核心政策/路径/时限类），作为部署闸门的固定判据；其余 `regression` 可迭代替换；
+- **高风险**：退费、收费上限、私下转账、安全、年龄门槛、保过诱导 → `business_criticality=critical`（闸门单独看 critical 切片）；
+- **隔离反例**：家长域收录教师管理/薪酬/竞品话术等内部文档问题，`relevant=[]`，检验域内文档不可被跨域召回；
+- **不可答**：发票、加盟、转介绍、未来价格、具体分数线、通用代码题 → `answerability=unanswerable`；
+- **多跳**：GESP↔CSP 衔接、Scratch→CSP-J 全景路径、新教师成长链等标注两个以上来源文档；
+- `gt_answer`/`gt_keywords` 用于 LLM 裁判的参考答案与关键词命中校验。
+
+导入命令：
+```bash
+python -m scripts.seed_eval_set --dataset evals/datasets/zhouxing_parent_eval.jsonl \
+    --name "行舟-家长客服回归集" --domain parent_service
+python -m scripts.seed_eval_set --dataset evals/datasets/zhouxing_teacher_eval.jsonl \
+    --name "行舟-教师内部回归集" --domain agent_teacher
+```
+
+前置：知识库需先上传 A1~F3 文档并启用；家长域仅索引 `visible_to_parents=true` 的文档（A1/A2/A3/B1/B3/C1~C4/D1~D3/E1/E3/E4 建议对家长可见，B2/E2/F1~F3 保持内部）。`relevant` 用文档标题（如 `A1 课程体系总览`），与上传后的文档标题一致。
 
 ## 指标口径
 

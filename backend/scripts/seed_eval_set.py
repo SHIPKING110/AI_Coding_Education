@@ -9,11 +9,13 @@
     python -m scripts.seed_eval_set --dataset evals/datasets/parent_seed.jsonl \
         --name "家长客服回归集" --domain parent_service --owner <用户名>
 
-标注推断规则（可在导入后到评测页人工修正）：
-- notes 含「反例/隔离/高风险/闲聊/致谢」且 relevant 为空 → answerability=unanswerable；
-- relevant 为空且无上述标记 → unlabeled（待运营补标）；
-- notes 含「高风险」→ business_criticality=critical；
-- 默认 split=regression，可用 --split frozen 建冻结集。
+标注规则（逐条显式字段优先，缺省时按推断）：
+- 数据集行可直接给出 answerability / split / business_criticality / query_type /
+  difficulty / gt_answer / gt_keywords，脚本原样采纳；
+- 未给 answerability 时推断：notes 含「反例/隔离/高风险/闲聊/致谢」且 relevant 为空 →
+  unanswerable；relevant 为空且无上述标记 → unlabeled（待运营补标）；
+- 未给 business_criticality 时：notes 含「高风险」→ critical；
+- 未给 split 时用 --split（默认 regression）。
 """
 
 from __future__ import annotations
@@ -95,12 +97,24 @@ def main() -> int:
                 continue
             relevant = [str(x) for x in (item.get("relevant") or []) if str(x).strip()]
             notes = str(item.get("notes") or "")
+            answerability = str(item.get("answerability") or "").strip()
+            if answerability not in ("answerable", "unanswerable", "unlabeled"):
+                answerability = _infer_answerability(relevant, notes)
+            split = str(item.get("split") or "").strip()
+            if split not in ("tuning", "regression", "frozen"):
+                split = args.split
+            criticality = str(item.get("business_criticality") or "").strip()
+            if criticality not in ("normal", "important", "critical"):
+                criticality = "critical" if "高风险" in notes else "normal"
             crud.add_eval_case(
                 db, set_id=es.id, query=query, relevant=relevant,
-                answerability=_infer_answerability(relevant, notes),
-                split=args.split,
-                business_criticality="critical" if "高风险" in notes else "normal",
-                query_type="fact" if relevant else "negative",
+                answerability=answerability,
+                split=split,
+                business_criticality=criticality,
+                query_type=str(item.get("query_type") or ("fact" if relevant else "negative")),
+                difficulty=str(item.get("difficulty") or "normal"),
+                gt_answer=str(item.get("gt_answer") or ""),
+                gt_keywords=[str(x) for x in (item.get("gt_keywords") or [])],
                 notes=notes, source="seed",
             )
             existing.add(query)

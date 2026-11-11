@@ -1,7 +1,3 @@
-# 家长客服 RAG 评估种子集（P0，15 条：政策问答 / 隔离反例 / 高风险 / 闲聊）
-# 格式同 rag_seed：relevant 用「文档标题」标注（家长版文档标题）
-# 注意：relevant 标题必须是已入库、已启用、且 visible_to_parents=true 的文档标题；
-# 隔离反例 relevant 留空，用于断言内部文档零泄漏。
 {"query": "怎么请假？", "relevant": [], "notes": "政策问答：运营勾选家长版后填标题"}
 {"query": "课时还剩多少去哪查？", "relevant": [], "notes": "政策问答：运营勾选家长版后填标题"}
 {"query": "这学期有哪些课？", "relevant": [], "notes": "政策问答：运营勾选家长版后填标题"}

@@ -133,7 +133,8 @@ function parseImportText(text: string, label = '粘贴内容'): ImportParseResul
     }
     return parseRowsWithIndex(arr, label)
   }
-  const lines = t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  // 剔除 # 注释行（数据集文件常带说明头），再按 JSONL / CSV 解析
+  const lines = t.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))
   if (lines.length && lines[0].startsWith('{')) {
     const rows: Record<string, unknown>[] = []
     const errors: string[] = []

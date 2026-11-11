@@ -1,6 +1,3 @@
-# RAG 检索评估种子集（精标 22 条：事实召回 / 多片段 / 跨文档区分 / 反例）
-# 格式：每行一个 JSON；relevant 用「文档标题」标注（与命中 title 对齐）
-# 注意：relevant 里的标题必须是你知识库中「已入库且已启用」的文档标题。
 {"query": "meta_agent 这篇论文讲的是什么？", "relevant": ["meta_agent"], "notes": "整篇主旨，应命中该文档多个片段"}
 {"query": "meta_agent 中多智能体是怎么协作的？", "relevant": ["meta_agent"], "notes": "考察共享消息池/通信协议相关片段的召回"}
 {"query": "可执行反馈驱动的迭代式编程是什么？", "relevant": ["meta_agent"], "notes": "考察技术细节片段召回"}
