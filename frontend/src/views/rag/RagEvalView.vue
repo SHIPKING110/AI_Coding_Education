@@ -604,6 +604,28 @@ async function generateCases() {
 // 人工复核打分（0-5）：用于与 LLM Judge 计算 Cohen's Kappa，作为裁判可信度闸门
 const editingResultId = ref<string | null>(null)
 const humanScoreForm = ref({ score: '', judge: '', reason: '' })
+// 逐条评判详情展开（裁判五维分/理由、关键词缺失、引用校验、生成回答）
+const resultDetailId = ref<string | null>(null)
+const judgeKeys = ['faithfulness', 'relevance', 'completeness', 'logic', 'correctness'] as const
+const judgeShort: Record<string, string> = {
+  faithfulness: '忠实', relevance: '相关', completeness: '完整', logic: '逻辑', correctness: '正确',
+}
+function toggleResultDetail(r: RagEvalResult) {
+  resultDetailId.value = resultDetailId.value === r.id ? null : r.id
+}
+function judgeTagClass(v: unknown): string {
+  if (typeof v !== 'number') return ''
+  if (v >= 4) return 'ok'
+  if (v >= 3) return 'pending'
+  return 'bad'
+}
+function citationText(ans: any): string {
+  const c = ans?.citation
+  if (!c || !c.present) return '未引用'
+  const idx = (c.indices || []).join('、')
+  const invalid = (c.invalid || []).length
+  return invalid ? `引用[${idx}]（含${invalid}个无效编号）` : `引用[${idx}]`
+}
 function cancelHumanScore() {
   editingResultId.value = null
   humanScoreForm.value = { score: '', judge: '', reason: '' }
@@ -978,7 +1000,7 @@ onMounted(loadSets)
         检索模式分布（on）：<span v-for="(count, mode) in metricsOn.retrieval_modes" :key="mode" class="mode-chip">{{ mode }} × {{ count }}</span>
       </p>
       <table class="table">
-        <thead><tr><th>query</th><th>ranked</th><th>relevant</th><th>Bad Case</th><th>关键词</th><th>正确性</th><th>人工复核</th><th>检索链</th></tr></thead>
+        <thead><tr><th>query</th><th>ranked</th><th>relevant</th><th>Bad Case</th><th>关键词</th><th>裁判分</th><th>人工复核</th><th>检索链</th><th></th></tr></thead>
         <tbody>
           <tr v-for="r in results" :key="r.id">
             <td>{{ r.query }}</td>
@@ -986,7 +1008,13 @@ onMounted(loadSets)
             <td class="muted">{{ r.relevant.join('、') || '-' }}</td>
             <td><span class="tag" :class="r.bad_case_type === 'ok' ? 'ok' : 'bad'">{{ r.bad_case_type || '-' }}</span></td>
             <td>{{ pct(r.metrics?.answer?.keyword_hit) }}</td>
-            <td>{{ fixed(r.metrics?.answer?.judge?.correctness) }}</td>
+            <td>
+              <div class="judge-summary">
+                <span v-for="key in judgeKeys" :key="key" class="score-chip" :class="judgeTagClass(r.metrics?.answer?.judge?.[key])">
+                  {{ judgeShort[key] }} {{ fixed(r.metrics?.answer?.judge?.[key]) }}
+                </span>
+              </div>
+            </td>
             <td>
               <span v-if="editingResultId === r.id" class="human-score-row">
                 <input v-model.number="humanScoreForm.score" type="number" min="0" max="5" placeholder="0-5" />
@@ -1003,8 +1031,38 @@ onMounted(loadSets)
               </span>
             </td>
             <td class="muted ellipsis">{{ r.retrieval_summary }}</td>
+            <td><button class="mini" @click="toggleResultDetail(r)">{{ resultDetailId === r.id ? '收起' : '详情' }}</button></td>
           </tr>
-          <tr v-if="!results.length"><td colspan="8" class="muted">暂无逐条结果（运行中或未完成）</td></tr>
+          <tr v-for="r in results" :key="`${r.id}-detail`" v-show="resultDetailId === r.id" class="result-detail-row">
+            <td colspan="9">
+              <div class="result-detail">
+                <div class="detail-block">
+                  <b>裁判逐项评分（0-5）</b>
+                  <div class="judge-grid">
+                    <span v-for="key in judgeKeys" :key="key">
+                      {{ judgeShort[key] }}：
+                      <strong class="score-text" :class="judgeTagClass(r.metrics?.answer?.judge?.[key])">{{ fixed(r.metrics?.answer?.judge?.[key]) }}</strong>
+                    </span>
+                  </div>
+                  <p class="muted">裁判理由：{{ r.metrics?.answer?.judge?.reason || '无' }}</p>
+                </div>
+                <div class="detail-block">
+                  <b>生成回答</b>
+                  <p class="answer-text">{{ r.metrics?.answer?.answer || '（无回答）' }}</p>
+                  <p class="muted">
+                    {{ citationText(r.metrics?.answer) }}；关键词命中 {{ pct(r.metrics?.answer?.keyword_hit) }}；
+                    缺失关键词：{{ (r.metrics?.answer?.keyword_missing || []).join('、') || '无' }}
+                  </p>
+                </div>
+                <div class="detail-block">
+                  <b>检索判定</b>
+                  <p class="muted">检索命中：{{ r.ranked.join('、') || '无' }}；标注相关：{{ r.relevant.join('、') || '无（不可答/反例）' }}</p>
+                  <p class="muted">{{ r.retrieval_summary || '无检索诊断' }}</p>
+                </div>
+              </div>
+            </td>
+          </tr>
+          <tr v-if="!results.length"><td colspan="9" class="muted">暂无逐条结果（运行中或未完成）</td></tr>
         </tbody>
       </table>
     </section>
@@ -1047,6 +1105,20 @@ onMounted(loadSets)
 .case-edit label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--ink-3); }
 .case-edit input, .case-edit select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 12px; }
 .case-edit label:nth-child(2) input { min-width: 240px; }
+.judge-summary { display: flex; flex-wrap: wrap; gap: 3px; }
+.score-chip { font-size: 10.5px; padding: 1px 5px; border-radius: 6px; border: 1px solid var(--line); color: var(--ink-3); white-space: nowrap; }
+.score-chip.ok { border-color: transparent; background: rgba(34,158,88,.12); color: #1c7d47; }
+.score-chip.pending { border-color: transparent; background: rgba(190,140,20,.14); color: #8a6413; }
+.score-chip.bad { border-color: transparent; background: rgba(200,60,50,.12); color: #a03028; }
+.score-text.ok { color: #1c7d47; }
+.score-text.pending { color: #8a6413; }
+.score-text.bad { color: #a03028; }
+.result-detail-row td { background: var(--surface-2, rgba(0,0,0,.02)); }
+.result-detail { display: grid; gap: 10px; padding: 4px 2px; }
+.detail-block b { display: block; font-size: 12px; margin-bottom: 5px; }
+.detail-block + .detail-block { border-top: 1px dashed var(--line); padding-top: 9px; }
+.judge-grid { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; }
+.answer-text { white-space: pre-wrap; font-size: 12.5px; line-height: 1.65; margin: 4px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .page-size { margin-left: 4px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 11.5px; }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 10px; }
 .warn { color: #b45309; background: #fffbeb; padding: 9px 12px; border-radius: 9px; font-size: 12px; margin-bottom: 10px; }
