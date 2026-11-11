@@ -658,10 +658,69 @@ async function openRun(r: RagEvalRun) {
     const data = await getEvalRun(r.id)
     activeRun.value = data.run
     results.value = data.results
+    compareRunId.value = ''
+    compareRun.value = null
     if (data.run.status === 'running' || data.run.status === 'pending') startPoll(data.run.id)
   } catch (e) {
     error.value = e instanceof Error ? e.message : '加载失败'
   }
+}
+
+// 两次运行并排对比：选同一评测集的另一条已完成运行作基准（如 dense 基线 vs hybrid）
+const compareRunId = ref('')
+const compareRun = ref<RagEvalRun | null>(null)
+const compareCandidates = computed(() =>
+  runs.value.filter((r) => r.status === 'done' && r.id !== activeRun.value?.id),
+)
+async function onCompareChange() {
+  compareRun.value = null
+  if (!compareRunId.value) return
+  try {
+    const data = await getEvalRun(compareRunId.value)
+    compareRun.value = data.run
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '加载对比运行失败'
+  }
+}
+interface CompareRow {
+  label: string
+  cur: unknown
+  base: unknown
+  unit: 'pp' | 'score'
+  better: 'high' | 'low'
+}
+const compareRows = computed<CompareRow[]>(() => {
+  const cur: any = activeRun.value?.metrics
+  const base: any = compareRun.value?.metrics
+  if (!cur || !base) return []
+  const pick = (m: any, ...path: string[]) => path.reduce((acc, k) => (acc == null ? acc : acc[k]), m)
+  const rows: CompareRow[] = [
+    { label: 'hit@3（on）', cur: pick(cur, 'on', 'hit@3'), base: pick(base, 'on', 'hit@3'), unit: 'pp', better: 'high' },
+    { label: 'hit@1（on）', cur: pick(cur, 'on', 'hit@1'), base: pick(base, 'on', 'hit@1'), unit: 'pp', better: 'high' },
+    { label: 'MRR（on）', cur: pick(cur, 'on', 'mrr'), base: pick(base, 'on', 'mrr'), unit: 'pp', better: 'high' },
+    { label: 'Recall@5（on）', cur: pick(cur, 'on', 'recall@5'), base: pick(base, 'on', 'recall@5'), unit: 'pp', better: 'high' },
+    { label: 'nDCG@5（on）', cur: pick(cur, 'on', 'ndcg@5'), base: pick(base, 'on', 'ndcg@5'), unit: 'pp', better: 'high' },
+    { label: '冻结集 hit@3', cur: pick(cur, 'frozen', 'hit@3'), base: pick(base, 'frozen', 'hit@3'), unit: 'pp', better: 'high' },
+    { label: '关键用例 hit@3', cur: pick(cur, 'critical', 'hit@3'), base: pick(base, 'critical', 'hit@3'), unit: 'pp', better: 'high' },
+    { label: '忠实度', cur: pick(cur, 'answer', 'faithfulness'), base: pick(base, 'answer', 'faithfulness'), unit: 'score', better: 'high' },
+    { label: '完整性', cur: pick(cur, 'answer', 'completeness'), base: pick(base, 'answer', 'completeness'), unit: 'score', better: 'high' },
+    { label: '无依据回答率', cur: pick(cur, 'answer', 'unsupported_answer_rate'), base: pick(base, 'answer', 'unsupported_answer_rate'), unit: 'pp', better: 'low' },
+    { label: 'Kappa', cur: pick(cur, 'calibration', 'kappa'), base: pick(base, 'calibration', 'kappa'), unit: 'score', better: 'high' },
+  ]
+  return rows.filter((r) => typeof r.cur === 'number' || typeof r.base === 'number')
+})
+function deltaText(row: CompareRow): string {
+  if (typeof row.cur !== 'number' || typeof row.base !== 'number') return '样本不足'
+  const d = row.cur - row.base
+  const sign = d >= 0 ? '+' : ''
+  return row.unit === 'pp' ? `${sign}${(d * 100).toFixed(1)}pp` : `${sign}${d.toFixed(2)}`
+}
+function deltaClass(row: CompareRow): string {
+  if (typeof row.cur !== 'number' || typeof row.base !== 'number') return ''
+  const d = row.cur - row.base
+  if (Math.abs(d) < 1e-9) return ''
+  const improved = row.better === 'high' ? d > 0 : d < 0
+  return improved ? 'ok' : 'bad'
 }
 
 async function gotoCasePage(page: number) {
@@ -947,9 +1006,17 @@ onMounted(loadSets)
     <section v-if="activeRun" class="panel">
       <div class="panel-head">
         <h3>评测结果</h3>
-        <span class="tag" :class="activeRun.status === 'done' ? 'ok' : activeRun.status === 'failed' ? 'bad' : 'pending'">
-          {{ STAGE_LABELS[activeRun.status] || activeRun.status }}
-        </span>
+        <div class="head-right">
+          <select v-if="compareCandidates.length" v-model="compareRunId" @change="onCompareChange">
+            <option value="">与运行对比…（可选）</option>
+            <option v-for="c in compareCandidates" :key="c.id" :value="c.id">
+              {{ c.retrieval_mode || 'auto' }} · k{{ c.top_k }} · {{ c.created_at?.slice(5, 16).replace('T', ' ') }}
+            </option>
+          </select>
+          <span class="tag" :class="activeRun.status === 'done' ? 'ok' : activeRun.status === 'failed' ? 'bad' : 'pending'">
+            {{ STAGE_LABELS[activeRun.status] || activeRun.status }}
+          </span>
+        </div>
       </div>
       <div v-if="isRunning" class="eval-progress">
         <div class="progress-track"><div class="progress-fill" :style="{ width: progressPct + '%' }"></div></div>
@@ -964,6 +1031,20 @@ onMounted(loadSets)
         验收闸门未通过：{{ (activeRun.metrics.gate.reasons || []).join('；') }}
       </div>
       <p v-else-if="activeRun.metrics?.gate?.gate === 'pass'" class="muted">验收闸门通过（冻结集/关键用例无回退，无依据回答率与异常率未超限）。</p>
+      <div v-if="compareRun" class="compare-panel">
+        <p class="muted">
+          对比基准：{{ compareRun.retrieval_mode || 'auto' }} · k{{ compareRun.top_k }} ·
+          {{ compareRun.created_at?.slice(0, 16).replace('T', ' ') }}
+          （<b class="ok">绿=优于基准</b> / <b class="bad">红=劣于基准</b>）
+        </p>
+        <div class="compare-grid">
+          <div v-for="row in compareRows" :key="row.label" class="cmp-cell">
+            <span>{{ row.label }}</span>
+            <b>{{ typeof row.cur === 'number' ? fixed(row.cur) : '-' }}</b>
+            <i class="cmp-delta" :class="deltaClass(row)">{{ deltaText(row) }}</i>
+          </div>
+        </div>
+      </div>
       <div v-if="activeRun.metrics" class="metrics">
         <div class="metric"><span>hit@3 (off)</span><b>{{ fixed(metricsOff?.['hit@3']) }}</b></div>
         <div class="metric"><span>hit@3 (on)</span><b>{{ fixed(metricsOn?.['hit@3']) }}</b></div>
@@ -1086,6 +1167,19 @@ onMounted(loadSets)
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 16px; box-shadow: var(--shadow-sm); }
 .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .panel-head h3 { font-size: 14px; font-weight: 800; }
+.head-right { display: flex; align-items: center; gap: 10px; }
+.head-right select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 12px; }
+.compare-panel { margin: 4px 0 14px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; }
+.compare-panel .muted { margin-bottom: 8px; font-size: 12px; }
+.compare-panel .ok { color: #1c7d47; }
+.compare-panel .bad { color: #a03028; }
+.compare-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.cmp-cell { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; display: flex; flex-direction: column; gap: 2px; }
+.cmp-cell span { font-size: 11px; color: var(--ink-3); }
+.cmp-cell b { font-size: 15px; }
+.cmp-delta { font-size: 11px; font-style: normal; color: var(--ink-3); }
+.cmp-delta.ok { color: #1c7d47; }
+.cmp-delta.bad { color: #a03028; }
 .eval-progress { margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2, var(--surface)); }
 .progress-track { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; }
 .progress-fill { height: 100%; border-radius: 999px; background: var(--brand); transition: width .4s ease; }

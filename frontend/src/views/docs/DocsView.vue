@@ -108,6 +108,13 @@ const REGISTRY: DocMeta[] = [
     group: '后台管理',
     keywords: '评测 导入 jsonl json csv 合规 脱敏 指标',
   },
+  {
+    slug: 'rag-eval-metrics',
+    title: '评测指标解读',
+    desc: '各指标口径、参考线、闸门与判读手册',
+    group: '后台管理',
+    keywords: '指标 hit mrr ndcg recall 忠实度 完整性 kappa 闸门 阈值 判读 bad case',
+  },
   { slug: 'usage-cost', title: '用量与成本', desc: '计价、归属、预算告警与月度对账', group: '后台管理' },
   { slug: 'api', title: '接口约定', desc: '鉴权、分页、错误码与请求示例', group: '研发' },
   { slug: 'ops', title: '部署与运维', desc: '容器、迁移、备份、排障与安全', group: '研发' },
