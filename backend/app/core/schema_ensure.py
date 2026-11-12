@@ -134,7 +134,7 @@ def ensure_business_schema(engine: Engine) -> None:
     addcol("rag_eval_cases", "business_criticality VARCHAR(16) NOT NULL DEFAULT 'normal'", "business_criticality")
     addcol("rag_eval_results", "human_score INTEGER", "human_score")
     addcol("rag_eval_results", "human_judge VARCHAR(64)", "human_judge")
-    addcol("rag_eval_results", "human_at DATETIME", "human_at")
+    addcol("rag_eval_results", "human_at TIMESTAMPTZ", "human_at")
     addcol("rag_eval_results", "human_reason TEXT", "human_reason")
     # 用量与成本细粒度权限（默认关闭）
     for _usage_col in ("usage_view", "usage_price_create", "usage_budget_save", "usage_recon_upsert"):
