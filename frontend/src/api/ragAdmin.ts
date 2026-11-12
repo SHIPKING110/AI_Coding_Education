@@ -347,6 +347,7 @@ export interface RagEvalRun {
   top_k: number
   rerank: boolean
   retrieval_mode: string
+  parent_mode: boolean
   answer_eval: boolean
   generation_config_id: string | null
   judge_config_id: string | null

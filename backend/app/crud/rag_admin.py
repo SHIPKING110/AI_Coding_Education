@@ -297,6 +297,7 @@ def eval_run_to_dict(r: RagEvalRun) -> dict:
         "owner_id": str(r.owner_id) if r.owner_id else None,
         "top_k": r.top_k, "rerank": r.rerank,
         "retrieval_mode": r.retrieval_mode or "auto",
+        "parent_mode": bool(r.parent_mode),
         "answer_eval": bool(r.answer_eval),
         "generation_config_id": str(r.generation_config_id) if r.generation_config_id else None,
         "judge_config_id": str(r.judge_config_id) if r.judge_config_id else None,
@@ -473,11 +474,12 @@ def create_eval_run(
     answer_eval: bool = False, config_version: int | None, created_by,
     generation_config_id=None, judge_config_id=None,
     generation_model: str = "", judge_model: str = "",
-    retrieval_mode: str = "auto",
+    retrieval_mode: str = "auto", parent_mode: bool = False,
 ) -> RagEvalRun:
     row = RagEvalRun(
         set_id=set_id, owner_id=owner_id, top_k=top_k, rerank=rerank,
         retrieval_mode=retrieval_mode or "auto",
+        parent_mode=bool(parent_mode),
         answer_eval=answer_eval, config_version=config_version, status="pending", created_by=created_by,
         generation_config_id=generation_config_id, judge_config_id=judge_config_id,
         generation_model=generation_model or "", judge_model=judge_model or "",

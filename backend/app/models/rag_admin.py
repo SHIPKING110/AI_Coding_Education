@@ -147,6 +147,8 @@ class RagEvalRun(Base):
     top_k: Mapped[int] = mapped_column(Integer, default=5)
     rerank: Mapped[bool] = mapped_column(Boolean, default=True)
     retrieval_mode: Mapped[str] = mapped_column(String(16), default="auto")
+    # 评测口径：False=系统/教师集合；True=家长专属集合（与生产家长客服链路一致）
+    parent_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     answer_eval: Mapped[bool] = mapped_column(Boolean, default=False)
     # 答案质量评测的模型选择：生成回答与裁判打分分离，避免同源偏好
     generation_config_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)

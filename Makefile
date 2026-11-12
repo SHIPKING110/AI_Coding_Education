@@ -44,7 +44,8 @@ check: lint test
 	@echo "All checks passed."
 
 # 生产发版：先构建新镜像，用新镜像跑评测闸门（读线上库），通过后才上线。
-# 用法：GATE_SET_NAME="家长客服冻结集" make release
+# 用法：GATE_SET_NAME="行舟-家长客服回归集" make release
+# 发布证据要求（硬性）：answer_eval=on、人工复核 ≥10 对且 Kappa≥0.6、存在基线运行。
 # 未设置 GATE_SET_NAME 时跳过闸门（不推荐，仅应急）。
 release:
 	@if [ -z "$$GATE_SET_NAME" ]; then \
@@ -52,7 +53,8 @@ release:
 	fi
 	docker compose build backend
 	@if [ -n "$$GATE_SET_NAME" ]; then \
-		docker compose run --rm -T backend python -m scripts.deploy_gate --set-name "$$GATE_SET_NAME" \
+		docker compose run --rm -T backend /srv/app/.venv/bin/python -m scripts.deploy_gate \
+			--set-name "$$GATE_SET_NAME" --require-answer --require-calibration --require-baseline \
 			|| { echo "评测闸门未通过，已中止发版"; exit 1; }; \
 	fi
 	docker compose up -d

@@ -875,6 +875,8 @@ class EvalRunIn(BaseModel):
     top_k: int = 5
     rerank: bool = True
     retrieval_mode: str = "auto"
+    # None = 跟随评测集 domain（parent_service 自动走家长专属集合）；True/False 显式覆盖
+    parent_mode: bool | None = None
     answer_eval: bool = False
     generation_config_id: uuid.UUID | None = None
     judge_config_id: uuid.UUID | None = None
@@ -916,10 +918,12 @@ def create_eval_run(set_id: uuid.UUID, body: EvalRunIn, db: Session = Depends(ge
         version = versions[0]["version"] if versions else None
     except Exception:
         version = None
+    parent_mode = rag_evaluation.effective_parent_mode(body.parent_mode, es.domain)
     run = crud.create_eval_run(
         db, set_id=set_id, owner_id=owner_id,
         top_k=max(1, min(50, body.top_k)), rerank=body.rerank,
         retrieval_mode=(body.retrieval_mode if body.retrieval_mode in ("auto", "dense", "hybrid") else "auto"),
+        parent_mode=parent_mode,
         answer_eval=body.answer_eval, config_version=version, created_by=user.id,
         generation_config_id=body.generation_config_id if body.answer_eval else None,
         judge_config_id=body.judge_config_id if body.answer_eval else None,
@@ -934,6 +938,8 @@ def create_eval_run(set_id: uuid.UUID, body: EvalRunIn, db: Session = Depends(ge
         db, action="eval.run.start", target=str(run.id),
         detail={
             "set_id": str(set_id),
+            "parent_mode": parent_mode,
+            "set_domain": es.domain,
             "generation_config_id": str(body.generation_config_id) if body.answer_eval and body.generation_config_id else None,
             "judge_config_id": str(body.judge_config_id) if body.answer_eval and body.judge_config_id else None,
         },

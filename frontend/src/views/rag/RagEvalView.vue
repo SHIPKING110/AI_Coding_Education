@@ -56,6 +56,7 @@ const runForm = ref({
   top_k: 5,
   rerank: true,
   retrieval_mode: 'auto',
+  parent_scope: 'auto',
   answer_eval: false,
   generation_config_id: '',
   judge_config_id: '',
@@ -570,6 +571,7 @@ async function startRun() {
       top_k: runForm.value.top_k,
       rerank: runForm.value.rerank,
       retrieval_mode: runForm.value.retrieval_mode,
+      parent_mode: runForm.value.parent_scope === 'auto' ? undefined : runForm.value.parent_scope === 'on',
       answer_eval: runForm.value.answer_eval,
       generation_config_id: runForm.value.answer_eval ? runForm.value.generation_config_id || undefined : undefined,
       judge_config_id: runForm.value.answer_eval ? runForm.value.judge_config_id || undefined : undefined,
@@ -800,6 +802,13 @@ onMounted(loadSets)
               <option value="hybrid">Hybrid（Dense + BM25 + RRF）</option>
             </select>
           </label>
+          <label>检索口径
+            <select v-model="runForm.parent_scope">
+              <option value="auto">跟随评测集（parent_service → 家长索引）</option>
+              <option value="on">强制家长索引（parent_knowledge）</option>
+              <option value="off">强制系统集合（教/师知识库）</option>
+            </select>
+          </label>
           <label class="check"><input v-model="runForm.rerank" type="checkbox" /> 启用 rerank（同时跑 off/on 对比）</label>
           <label class="check"><input v-model="runForm.answer_eval" type="checkbox" /> 答案质量评测（LLM 裁判）</label>
           <label class="model-pick">生成模型
@@ -823,6 +832,10 @@ onMounted(loadSets)
         <p class="field-hint">
           生成模型负责基于检索片段作答；评测模型负责裁判打分。答案质量评测建议选择不同厂商/不同模型，降低同源偏好；两者不能相同。
           检索指标（hit@k / MRR / recall）不调用 LLM，未勾选答案质量评测时模型选择不生效。
+        </p>
+        <p class="field-hint">
+          检索口径决定评测打哪个向量集合：家长客服评测必须走家长索引（parent_knowledge），否则数字测的是教师库、与生产链路不一致。
+          「跟随评测集」按 domain 自动选择，parent_service 集默认家长索引。
         </p>
         <div v-if="runForm.answer_eval && evalModels.length < 2" class="warn">
           当前 owner 只配置了 {{ evalModels.length }} 个模型，无法同时选择生成与评测模型。请先在「设置 → 模型配置」中补充至少两个模型。
@@ -978,7 +991,7 @@ onMounted(loadSets)
     <section v-if="activeSet" class="panel">
       <div class="panel-head"><h3>运行记录</h3></div>
       <table class="table">
-        <thead><tr><th>状态</th><th>top_k</th><th>模式</th><th>模型（生成 / 评测）</th><th>配置版本</th><th>hit@3 off → on</th><th>MRR off → on</th><th>时间</th><th></th></tr></thead>
+        <thead><tr><th>状态</th><th>top_k</th><th>模式 / 口径</th><th>模型（生成 / 评测）</th><th>配置版本</th><th>hit@3 off → on</th><th>MRR off → on</th><th>时间</th><th></th></tr></thead>
         <tbody>
           <tr v-for="r in runs" :key="r.id">
             <td>
@@ -990,7 +1003,7 @@ onMounted(loadSets)
               </div>
             </td>
             <td>{{ r.top_k }}</td>
-            <td class="muted">{{ r.retrieval_mode || 'auto' }}</td>
+            <td class="muted">{{ r.retrieval_mode || 'auto' }} · {{ r.parent_mode ? '家长索引' : '系统集合' }}</td>
             <td class="muted">{{ r.generation_model || '默认' }} / {{ r.judge_model || '默认' }}</td>
             <td>{{ r.config_version ?? '-' }}</td>
             <td>{{ fixed(r.metrics?.off?.['hit@3']) }} → {{ fixed(r.metrics?.on?.['hit@3']) }}</td>
@@ -1010,7 +1023,7 @@ onMounted(loadSets)
           <select v-if="compareCandidates.length" v-model="compareRunId" @change="onCompareChange">
             <option value="">与运行对比…（可选）</option>
             <option v-for="c in compareCandidates" :key="c.id" :value="c.id">
-              {{ c.retrieval_mode || 'auto' }} · k{{ c.top_k }} · {{ c.created_at?.slice(5, 16).replace('T', ' ') }}
+              {{ c.retrieval_mode || 'auto' }} · {{ c.parent_mode ? '家长索引' : '系统集合' }} · k{{ c.top_k }} · {{ c.created_at?.slice(5, 16).replace('T', ' ') }}
             </option>
           </select>
           <span class="tag" :class="activeRun.status === 'done' ? 'ok' : activeRun.status === 'failed' ? 'bad' : 'pending'">

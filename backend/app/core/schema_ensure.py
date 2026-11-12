@@ -129,6 +129,7 @@ def ensure_business_schema(engine: Engine) -> None:
     addcol("rag_eval_runs", "progress INTEGER NOT NULL DEFAULT 0", "progress")
     addcol("rag_eval_runs", "eval_snapshot JSON", "eval_snapshot")
     addcol("rag_eval_runs", "retrieval_mode VARCHAR(16) NOT NULL DEFAULT 'auto'", "retrieval_mode")
+    addcol("rag_eval_runs", "parent_mode BOOLEAN NOT NULL DEFAULT FALSE", "parent_mode")
     addcol("rag_eval_cases", "answerability VARCHAR(16) NOT NULL DEFAULT 'unlabeled'", "answerability")
     addcol("rag_eval_cases", "split VARCHAR(16) NOT NULL DEFAULT 'regression'", "split")
     addcol("rag_eval_cases", "business_criticality VARCHAR(16) NOT NULL DEFAULT 'normal'", "business_criticality")

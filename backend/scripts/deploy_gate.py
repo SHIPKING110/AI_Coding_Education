@@ -53,6 +53,38 @@ def _fmt(v) -> str:
     return "-" if v is None else f"{v:.4f}" if isinstance(v, float) else str(v)
 
 
+def check_release_evidence(
+    metrics: dict, *, done_runs: int,
+    require_answer: bool = False,
+    require_calibration: bool = False,
+    require_baseline: bool = False,
+) -> list[str]:
+    """发布证据校验：闸门通过之外，发行运行还必须携带哪些质量证据。
+
+    闸门本身在“证据缺失”时是宽松的（没有人工样本就不查 Kappa），这里把
+    证据要求变成发布前的硬条件，堵住“几乎没有质量证据的运行也能 pass”的漏洞。
+    """
+    problems: list[str] = []
+    answer = metrics.get("answer") if isinstance(metrics, dict) else None
+    if require_answer:
+        cases = int((answer or {}).get("cases") or 0) if isinstance(answer, dict) else 0
+        if cases <= 0:
+            problems.append("发布运行未执行答案质量评测（answer_eval=off）：无依据率与裁判分缺失")
+    if require_calibration:
+        calib = (metrics.get("calibration") or {}) if isinstance(metrics, dict) else {}
+        pairs = int(calib.get("pairs") or 0)
+        kappa = calib.get("kappa")
+        if pairs < 10:
+            problems.append(f"人工复核样本不足：{pairs} 对（需 ≥10 对），裁判可信度未校准")
+        elif not isinstance(kappa, (int, float)):
+            problems.append("Kappa 无定义（评分档位退化），裁判可信度不可判定")
+        elif kappa < 0.6:
+            problems.append(f"裁判与人工一致性 kappa={kappa} 低于 0.6，自动评测结论不可信")
+    if require_baseline and done_runs < 2:
+        problems.append("同评测集没有更早的基线运行，冻结/关键回退无法对比（需先建立基线）")
+    return problems
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="RAG 评测验收闸门（部署前校验）")
     ap.add_argument("--set-id", default=os.environ.get("RAG_GATE_SET_ID") or None,
@@ -61,8 +93,15 @@ def main() -> int:
                     help="评测集名称（也可用环境变量 RAG_GATE_SET_NAME，与 --set-id 二选一）")
     ap.add_argument("--allow-missing", action="store_true",
                     help="没有完成的运行时放行（默认阻断）")
+    ap.add_argument("--require-answer", action="store_true",
+                    help="要求发布运行执行了答案质量评测（answer_eval），否则阻断")
+    ap.add_argument("--require-calibration", action="store_true",
+                    help="要求人工复核 ≥10 对且 Kappa ≥0.6，否则阻断")
+    ap.add_argument("--require-baseline", action="store_true",
+                    help="要求同集存在更早的基线运行（冻结/关键回退可对比），否则阻断")
     ap.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     args = ap.parse_args()
+    strict = args.require_answer or args.require_calibration or args.require_baseline
 
     db = SessionLocal()
     try:
@@ -90,6 +129,12 @@ def main() -> int:
                 return 3
 
         state = gate.get("gate") or ("pass" if gate.get("passed") else "fail")
+        evidence = check_release_evidence(
+            metrics, done_runs=len(runs),
+            require_answer=args.require_answer,
+            require_calibration=args.require_calibration,
+            require_baseline=args.require_baseline,
+        )
         frozen = (metrics.get("frozen") or {}).get("hit@3")
         critical = (metrics.get("critical") or {}).get("hit@3")
         unsupported = (metrics.get("answer") or {}).get("unsupported_answer_rate")
@@ -97,22 +142,27 @@ def main() -> int:
         calib = metrics.get("calibration") or {}
         payload = {
             "set": es.name,
+            "set_domain": es.domain,
+            "parent_mode": bool(getattr(run, "parent_mode", False)),
             "run_id": str(run.id),
             "config_version": run.config_version,
             "finished_at": run.finished_at.isoformat() if run.finished_at else None,
             "gate": state,
-            "reasons": gate.get("reasons") or [],
+            "reasons": list(gate.get("reasons") or []) + evidence,
+            "evidence_problems": evidence,
             "frozen_hit3": frozen,
             "critical_hit3": critical,
             "unsupported_answer_rate": unsupported,
             "eval_error_rate": error_rate,
             "kappa_pairs": calib.get("pairs"),
             "kappa": calib.get("kappa"),
+            "done_runs": len(runs),
         }
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
-            print(f"[deploy_gate] set={es.name} run={run.id} v{run.config_version} gate={state}")
+            print(f"[deploy_gate] set={es.name} run={run.id} v{run.config_version} gate={state}"
+                  f" parent_mode={bool(getattr(run, 'parent_mode', False))}")
             print(
                 f"  冻结集 hit@3={_fmt(frozen)} 关键用例 hit@3={_fmt(critical)} "
                 f"无依据率={_fmt(unsupported)} 异常率={_fmt(error_rate)} "
@@ -120,13 +170,19 @@ def main() -> int:
             )
             for reason in gate.get("reasons") or []:
                 print(f"  - {reason}")
+            for problem in evidence:
+                print(f"  - [证据] {problem}")
 
+        if evidence:
+            print("[deploy_gate] 发布证据不足，阻断发布", file=sys.stderr)
+            return 1
         if state == "pass":
             return 0
         if state == "skip":
             # 未配置冻结集/关键用例：不算通过；允许用 --allow-missing 显式豁免
+            # （严格证据模式下不可豁免）
             print("[deploy_gate] 闸门被跳过（未配置冻结集/关键用例），请先补齐验收切片", file=sys.stderr)
-            return 0 if args.allow_missing else 1
+            return 0 if (args.allow_missing and not strict) else 1
         return 1
     finally:
         db.close()

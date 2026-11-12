@@ -47,6 +47,17 @@ def classify_bad_case(ranked: list[str], relevant: list[str]) -> str:
     return "retrieval_miss"
 
 
+def effective_parent_mode(requested: bool | None, set_domain: str | None) -> bool:
+    """评测口径落到哪个向量集合：显式指定优先，未指定时跟随评测集 domain。
+
+    家长客服评测必须与生产链路同口径（parent_mode=True → 家长专属集合），
+    否则数字看似漂亮却测的是教师库检索。
+    """
+    if requested is not None:
+        return bool(requested)
+    return str(set_domain or "").strip() == "parent_service"
+
+
 def _case_kind(case) -> str:
     """区分可答 / 不可答 / 未标注：只有可答用例参与 hit@k 等检索指标。
 
@@ -161,7 +172,7 @@ def _build_snapshot(db: Session, run: RagEvalRun, cases: list) -> dict:
     except Exception:
         code_version = ""
     try:
-        collection = rag_service.active_collection_name()
+        collection = rag_service.active_collection_name(parent=bool(run.parent_mode))
     except Exception:
         collection = ""
     return {
@@ -172,6 +183,7 @@ def _build_snapshot(db: Session, run: RagEvalRun, cases: list) -> dict:
         "config": cfg,
         "top_k": run.top_k,
         "retrieval_mode": run.retrieval_mode or "auto",
+        "parent_mode": bool(run.parent_mode),
         "collection": collection,
         "code_version": code_version,
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -263,9 +275,13 @@ def _run(run_id: str) -> None:
             # 业务关键用例必须单独看：平均值会被大量普通用例稀释
             "critical": _slice_metrics(on_cases, "business_criticality", "critical"),
             "frozen": _slice_metrics(on_cases, "split", "frozen"),
-            # 裁判可信度：先记录样本对数，人工复核后由校准接口重算 Kappa
+            # 裁判可信度：先记录样本对数，人工复核后由校准接口重算 Kappa；
+            # 发行候选运行在「同裁判+同生成模型+同数据集」时可继承基线运行的校准
             "calibration": _build_calibration(rows),
         }
+        inherited = _inherit_calibration(db, run, run.metrics["calibration"])
+        if inherited is not None:
+            run.metrics["calibration"] = inherited
         run.compare = compare_runs(off_metrics, on_metrics, key="hit@3")
         try:
             prev = crud.previous_done_run(db, run.set_id, run.id)
@@ -322,6 +338,51 @@ def _build_calibration(rows: list[dict]) -> dict:
     return calibration_from_pairs(pairs, dimension="correctness")
 
 
+def choose_inherited_calibration(
+    current: dict, snapshot: dict, previous_runs: list[tuple[dict, dict]],
+) -> dict | None:
+    """发行候选运行的校准继承：同一裁判 + 同一生成模型 + 同一评测集哈希时，
+    沿用此前运行已人工复核的 Kappa，避免对同一配置重复人工打分。
+
+    previous_runs 为 [(eval_snapshot, metrics), ...]，按新→旧排列；只接受
+    pairs ≥ GATE_KAPPA_MIN_PAIRS 的已完成校准。返回 None 表示无可继承样本。
+    """
+    if int((current or {}).get("pairs") or 0) >= GATE_KAPPA_MIN_PAIRS:
+        return None
+    set_hash = (snapshot or {}).get("eval_set_hash")
+    judge = (snapshot or {}).get("judge_model")
+    gen = (snapshot or {}).get("generation_model")
+    if not set_hash or not judge:
+        return None
+    for prev_snap, prev_metrics in previous_runs:
+        prev_snap = prev_snap or {}
+        if prev_snap.get("eval_set_hash") != set_hash:
+            continue
+        if prev_snap.get("judge_model") != judge or prev_snap.get("generation_model") != gen:
+            continue
+        calib = (prev_metrics or {}).get("calibration")
+        if isinstance(calib, dict) and int(calib.get("pairs") or 0) >= GATE_KAPPA_MIN_PAIRS:
+            out = dict(calib)
+            out["inherited_from_run"] = str(prev_snap.get("run_id") or "")
+            return out
+    return None
+
+
+def _inherit_calibration(db: Session, run: RagEvalRun, current: dict) -> dict | None:
+    """从同集历史运行中挑选可继承的校准（见 choose_inherited_calibration）。"""
+    try:
+        prev_runs = [r for r in crud.list_eval_runs(db, set_id=run.set_id, limit=50)
+                     if r.id != run.id and r.status == "done" and r.answer_eval]
+    except Exception:
+        return None
+    pairs: list[tuple[dict, dict]] = []
+    for prev in prev_runs:
+        snap = dict(prev.eval_snapshot or {})
+        snap.setdefault("run_id", str(prev.id))
+        pairs.append((snap, prev.metrics or {}))
+    return choose_inherited_calibration(current, run.eval_snapshot or {}, pairs)
+
+
 def _slice_metrics(cases: list[dict], field: str, value: str) -> dict:
     """按冻结集/关键度切片，避免关键用例被总体平均值掩盖。"""
     selected = [c for c in cases if c.get(field) == value]
@@ -360,6 +421,7 @@ def _run_pass(
                 hits = rag_service.retrieve(
                     c.query, db=db, owner_id=run.owner_id, top_k=run.top_k,
                     rerank=rerank, diag=diag, route_key="eval",
+                    parent_mode=bool(run.parent_mode),
                     hybrid_override=(
                         True if run.retrieval_mode == "hybrid" else
                         False if run.retrieval_mode == "dense" else None
