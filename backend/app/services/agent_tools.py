@@ -10,8 +10,11 @@
 
 from __future__ import annotations
 
+import logging
+import pathlib
 import uuid
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -23,6 +26,172 @@ from app.models.evaluation import Evaluation, EvaluationStatus
 from app.models.schedule import Attendance, AttendanceStatus, Schedule, ScheduleStatus
 from app.models.user import Role, User
 from app.services import agent_sql
+
+logger = logging.getLogger(__name__)
+
+# 当前会话作用域：Skill 的 projects/ 工作区按会话隔离，避免不同对话串味（下载到别的会话 PPT）。
+# 规划层在开跑前 use_conversation(conv_id) 设置；工具内用它把 projects/ 路径改写到 conversations/<cid>/ 下。
+_CONV_SCOPE: ContextVar[str | None] = ContextVar("agent_conv_scope", default=None)
+
+# 当前 Agent 生效可用的 Skill id 白名单：None=不限制（兼容旧调用）；set=仅这些 id 可用。
+# 规划层按「per-agent 绑定 ∪ 全局默认」求出后设置，确保「没勾选的 Skill 不会被规划/执行」。
+_ALLOWED_SKILLS: ContextVar[frozenset[str] | None] = ContextVar("agent_allowed_skills", default=None)
+
+
+def use_conversation(conv_id) -> None:
+    _CONV_SCOPE.set(str(conv_id) if conv_id else None)
+
+
+def svg_page_title(content: str) -> str:
+    """从 SVG 源码提炼页面标题（大纲/正文摘要/工具回执共用，保证三处对齐）。
+
+    规则（按优先级）：
+      1) 语义 id（h1/title/main-title/headline…）的字号最大者；
+      2) 排除纯数字/符号（「01」「2000+」这类装饰性大数字不是页标题）；
+      3) 在接近最大字号（≥85%）的候选里取**最靠上**的文本（标题在页面上方）；
+      4) 标题被拆成多个同字号 <text> 行时拼回一句（如「孩子带回家的，/不是一个分数，/…」）；
+      5) 去掉尾部标点。
+    """
+    import re as _re
+
+    try:
+        txt = str(content or "")
+        cands: list[dict] = []
+        for m in _re.finditer(r"<text\b([^>]*)>(.*?)</text>", txt, _re.S):
+            attrs, inner = m.group(1), m.group(2)
+            label = _re.sub(r"<[^>]+>", "", inner)
+            label = (label.replace("&amp;", "&").replace("&lt;", "<")
+                     .replace("&gt;", ">").replace("&quot;", '"').replace("&apos;", "'")).strip()
+            if not label:
+                continue
+            fs = _re.search(r"""font-size\s*=\s*["']([0-9.]+)""", attrs)
+            try:
+                size = float(fs.group(1)) if fs else 0.0
+            except ValueError:
+                size = 0.0
+            ym = _re.search(r"""\by\s*=\s*["'](-?[0-9.]+)""", attrs)
+            xm = _re.search(r"""\bx\s*=\s*["'](-?[0-9.]+)""", attrs)
+            idm = _re.search(r"""\bid\s*=\s*["']([^"']+)""", attrs)
+            cands.append({
+                "label": label, "size": size,
+                "x": float(xm.group(1)) if xm else 0.0,
+                "y": float(ym.group(1)) if ym else 0.0,
+                "id": idm.group(1) if idm else "",
+            })
+        if not cands:
+            return ""
+
+        def _meaningful(c: dict) -> bool:
+            lab = c["label"]
+            if not _re.search(r"[0-9A-Za-z\u4e00-\u9fff]", lab):
+                return False
+            # 纯数字/符号串（编号、统计值、页码）不当标题
+            if _re.fullmatch(r"[0-9０-９\s.%+\-×xX/=*#°:：·•|]+", lab):
+                return False
+            # 「4 小时+」「1200+」这类短统计值也不当标题
+            if _re.search(r"[+%]", lab) and len(_re.sub(r"\s+", "", lab)) <= 6:
+                return False
+            return True
+
+        pool = [c for c in cands if _meaningful(c)] or cands
+        id_pref = [
+            c for c in pool
+            if _re.fullmatch(
+                r"(h1|h0|title|main[-_]?title|headline|page[-_]?title|t[-_]?title|section[-_]?title)",
+                c["id"], _re.I,
+            )
+        ]
+        best = None
+        if id_pref:
+            best = max(id_pref, key=lambda c: c["size"])
+        else:
+            max_size = max(c["size"] for c in pool)
+            for ratio in (0.85, 0.7, 0.55, 0.0):
+                near = [c for c in pool if c["size"] >= max_size * ratio]
+                if near:
+                    best = min(near, key=lambda c: (c["y"], -c["size"]))
+                    break
+        if best is None:
+            return ""
+        # 标题被拆成多行 <text>：同字号、纵向紧邻、当前行无句末标点时拼下一行
+        parts = [best["label"]]
+        used = {id(best)}
+        cur = best
+        for _ in range(3):
+            if _re.search(r"[。！？!?…]$", cur["label"]):
+                break
+            nxt = [
+                c for c in cands
+                if id(c) not in used
+                and abs(c["size"] - best["size"]) <= max(2.0, best["size"] * 0.15)
+                and 0 < (c["y"] - cur["y"]) <= best["size"] * 1.8
+            ]
+            if not nxt:
+                break
+            nxt.sort(key=lambda c: c["y"])
+            cur = nxt[0]
+            used.add(id(cur))
+            parts.append(cur["label"])
+        title = "".join(parts).strip()
+        title = _re.sub(r"[，,、：:；;。\s]+$", "", title).strip()
+        return title[:60]
+    except Exception:
+        return ""
+
+
+def use_allowed_skills(ids) -> None:
+    """设置当前 Agent 生效可用的 Skill id 集合（None 表示不限制）。"""
+    _ALLOWED_SKILLS.set(frozenset(str(x) for x in ids) if ids is not None else None)
+
+
+def _skill_allowed(skill_id) -> bool:
+    allow = _ALLOWED_SKILLS.get()
+    if allow is None:
+        return True
+    return str(skill_id) in allow
+
+
+def _conv_prefix() -> str:
+    """会话隔离的 projects 子目录前缀（含尾斜杠）；无会话作用域时返回空。"""
+    cid = _CONV_SCOPE.get()
+    if not cid:
+        return ""
+    # 取短 id，避免路径过长
+    return "conversations/conv_" + str(cid).replace("-", "")[:12] + "/"
+
+
+def _scope_path(rel: str) -> str:
+    """把模型给的包内相对路径里以 projects/ 开头的部分，改写到当前会话子目录。
+
+    例：projects/demo/svg_output/01.svg → conversations/conv_xxx/projects/demo/svg_output/01.svg
+    非 projects/ 路径原样返回（脚本/资源/模板等不受影响）。
+    容忍模型常见的 `./projects/...`、反斜杠、前导斜杠等写法。
+    """
+    rel = (rel or "").replace("\\", "/")
+    # 归一化开头的 ./ 与前导斜杠（容忍 .//、/./ 等）
+    while True:
+        changed = False
+        if rel.startswith("./"):
+            rel = rel[2:]; changed = True
+        if rel.startswith("/"):
+            rel = rel[1:]; changed = True
+        if not changed:
+            break
+    prefix = _conv_prefix()
+    if not prefix:
+        return rel
+    if rel == "projects" or rel.startswith("projects/"):
+        return prefix + rel
+    return rel
+
+
+def _unscope_path(rel: str) -> str:
+    """把内部会话作用域路径还原成「模型可见」的 projects/ 形式（用于列目录回显）。"""
+    prefix = _conv_prefix()
+    rel = (rel or "").replace("\\", "/")
+    if prefix and rel.startswith(prefix):
+        return rel[len(prefix):]
+    return rel
 
 # ---------------------------------------------------------------------------
 # 时间范围解析：把自然语言周期映射为 [start, end)
@@ -461,8 +630,441 @@ def _tool_sql_query(db: Session, user: User, *, sql: str = "") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 联网搜索工具（Tavily）：补充「公网外部事实」，不用于内部政策/数据问答
+# ---------------------------------------------------------------------------
+
+def _tool_web_search(
+    db: Session, user: User, *, query: str = "", max_results: int = 5,
+    topic: str = "general", time_range: str = "",
+) -> dict:
+    """联网检索公开信息（行业动态/竞品/通用知识/公开资料）。
+
+    安全边界：只补充**外部公开信息**；本校的学员/课时/排课/收费/政策一律以内部数据与
+    知识库为准，不得用联网结果回答。未配置 Tavily 时返回明确提示（不报错）。
+    """
+    from app.crud import search_config as _sc
+    from app.services import web_search as _ws
+
+    resolved = _sc.resolve_search(db)
+    if resolved is None:
+        return {
+            "来源": "公网",
+            "错误": "联网搜索未启用（管理员尚未在设置中配置 Tavily），本次只能依据系统内部数据与知识库作答",
+        }
+    return _ws.search_web(
+        resolved,
+        query=query,
+        max_results=max_results,
+        topic=topic or "general",
+        time_range=(time_range or "").strip() or None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 注册表
 # ---------------------------------------------------------------------------
+
+def _parse_run_hint(stderr: str) -> tuple[str, list[str]] | None:
+    """从脚本 stderr 提取 "Run: python3 <脚本> <参数>" 形式的自修复提示。"""
+    import re
+    import shlex
+
+    m = re.search(r"Run:\s*python3\s+(\S+)\s*([^\n]*)", stderr or "")
+    if not m:
+        return None
+    script = m.group(1).strip().strip("\"'")
+    try:
+        rest = shlex.split(m.group(2).strip())
+    except ValueError:
+        rest = m.group(2).split()
+    return script, rest
+
+
+def _locate_script(target, hint_path: str) -> str | None:
+    """把提示里的脚本路径匹配到包内真实路径（前缀可能不同，如 ppt-master-main/）。"""
+    files = [str(f) for f in (target.files or [])]
+    hint = hint_path.replace("\\", "/").lstrip("./")
+    for f in files:
+        if f.endswith(hint) or f.endswith("/" + hint):
+            return f
+    base = hint.rsplit("/", 1)[-1]
+    return next((f for f in files if f.rsplit("/", 1)[-1] == base), None)
+
+
+def _resolve_skill_for_exec(db: Session, user: User, ref: str):
+    """解析可执行的 Skill（含广场收录），并把文件包物化到使用者自己的目录。
+
+    收录场景的关键（见 ADR-0013）：Skill 文件包按「作者 owner_id/skill_id」落盘在**作者目录**，
+    收录者目录里没有这份文件。若按收录者 id 找目录，执行必然找不到脚本——表现就是
+    「收录后看得见 Skill、也能出计划，但一执行就失败、产不出 PPT」。
+    这里统一处理：解析到真实 Skill 行后，把包复制到使用者目录（物化），
+    之后执行/写文件/取产物都在使用者目录完成：
+      - 发布者与所有收录者效果完全一致（同一个 skill，任何人跑出来一样）；
+      - 使用者写入的中间产物不污染作者目录；
+      - 产物下载链接按使用者维度隔离，作者目录保持干净。
+
+    返回 (skill_row, 可用名称列表)；找不到时 skill_row 为 None。
+    """
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    target = _ext.resolve_skill_for_user(db, user_id=user.id, skill_ref=ref)
+    avail = [
+        s.name for s in _ext.list_skills(db, owner_id=user.id)
+        if s.enabled
+    ]
+    if target is None:
+        # 收集失败时仍给出候选名，便于模型自我纠正
+        for s in _ext.list_plaza_skills(db):
+            avail.append(f"{s.name}(广场)")
+        return None, avail
+    if not target.enabled:
+        return None, avail
+    # 权限界定：该 Skill 必须是「当前 Agent 生效绑定」的，否则拒绝（没勾选就不能用）。
+    if not _skill_allowed(target.id):
+        return None, avail
+    if str(target.owner_id) != str(user.id):
+        # 广场收录：物化到使用者目录
+        try:
+            _bundle.materialize_bundle(target.owner_id, target.id, user.id, target.id)
+        except Exception:
+            pass
+    return target, avail
+
+
+def _tool_run_skill_script(db: Session, user: User, *, skill: str = "", path: str = "", args: list | None = None) -> dict:
+    """执行用户 Skill 包内脚本（走用户沙箱配置：本地/百炼；产物自动取回给下载链接）。"""
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+    from app.services import skill_exec as _exec
+
+    ref = (skill or "").strip()
+    rel = (path or "").strip().replace("\\", "/")
+    if not ref or not rel:
+        return {"错误": "需提供 skill（Skill 名或 id）与 path（包内脚本路径）"}
+    target, avail = _resolve_skill_for_exec(db, user, ref)
+    if target is None:
+        return {"错误": f"找不到启用的 Skill：{ref}（可用：{('、'.join(avail[:10])) or '无'}）"}
+    if rel not in list(target.files or []):
+        cands = [f for f in (target.files or []) if str(f).lower().endswith((".py", ".js", ".sh"))]
+        return {"错误": f"{target.name} 包内无此文件：{rel}（可执行：{'、'.join(cands[:10]) or '无'}）"}
+    if pathlib.PurePosixPath(rel).suffix.lower() not in (".py", ".js", ".sh"):
+        return {"错误": f"仅支持运行 .py/.js/.sh 脚本：{rel}"}
+    sb = _ext.get_sandbox_setting(db, owner_id=user.id)
+
+    def _scope_arg(a) -> str:
+        """把参数里指向 projects/ 的路径改写到当前会话子目录（脚本路径本身不在此列）。
+
+        容忍 `./projects/...`、反斜杠、前导斜杠等模型常见写法（否则 build 会跑到未隔离的根目录而失败）。
+        """
+        s = str(a)
+        norm = s.replace("\\", "/").lstrip("/")
+        while norm.startswith("./"):
+            norm = norm[2:]
+        # 仅当整段就是一个 projects/... 路径时才改写（build/edit 的项目参数）
+        if norm == "projects" or norm.startswith("projects/"):
+            return _scope_path(norm)
+        return s
+
+    def _call(r: str, a: list) -> dict:
+        return _exec.dispatch(
+            user.id, target.id, r, [_scope_arg(x) for x in a],
+            provider=sb.provider if sb and sb.enabled else "local",
+            endpoint=sb.endpoint if sb else "", token=sb.token if sb else "",
+            timeout_s=sb.timeout_s if sb else 30,
+            workspace_id=sb.workspace_id if sb else "", region=sb.region if sb else "cn-beijing",
+            template_code=sb.template_code if sb else "",
+        )
+
+    try:
+        result = _call(rel, list(args or [])[:8])
+        fixed: dict | None = None
+        # 自愈：脚本多以 stderr 里 "Run: python3 <脚本> <参数>" 给出前置修复命令
+        # （如 svg_to_pptx 要求先跑质量检查器）。失败时按其提示补跑前置步骤，再重试一次。
+        if not result.get("ok"):
+            hint = _parse_run_hint(str(result.get("stderr") or ""))
+            if hint:
+                hint_rel = _locate_script(target, hint[0])
+                if hint_rel and hint_rel != rel:
+                    fixed = _call(hint_rel, hint[1][:8])
+                    if fixed.get("ok"):
+                        result = _call(rel, list(args or [])[:8])
+    except (ValueError, TimeoutError) as e:
+        return {"错误": str(e)}
+    # 键顺序刻意把「生成文件」放最前：前端摘要/模型观察都会按字符截断，
+    # 下载链接必须在截断线之内，否则模型看不到链接、用户拿不到文件。
+    out: dict = {"skill": target.name, "成功": result.get("ok", False),
+                 "退出码": result.get("code")}
+    fnames = result.get("files") or []
+    if fnames:
+        # 交付件与诊断件分开：质量报告/校验 JSON 属于中间产物，不是用户要下载的成果。
+        # 混进「生成文件」会让前端把 svg_quality_report.json 当成品展示（用户只要 PPTX）。
+        _diag_suffix = (".report.json", "_report.json", "quality_report.json")
+        deliverables = [f for f in fnames
+                        if not str(f.get("name") or "").lower().endswith(_diag_suffix)]
+        diagnostics = [f for f in fnames
+                       if str(f.get("name") or "").lower().endswith(_diag_suffix)]
+        if deliverables:
+            out["生成文件"] = [{"名": f["name"], "下载": f["url"], "字节": f["bytes"]} for f in deliverables]
+            out["提示"] = "生成的文件已有下载链接，请把链接直接给用户，不要只描述内容"
+        if diagnostics:
+            out["诊断文件"] = [{"名": f["name"], "下载": f["url"]} for f in diagnostics]
+            if not deliverables:
+                out["提示"] = ("本次仅产出诊断报告（质量检查未通过或未生成成品）。"
+                               "报告里有 error 时，先按其提示修 SVG，再重新跑 build，"
+                               "不要把报告当成交付文件给用户。")
+    if fixed is not None:
+        out["自动前置"] = {
+            "成功": fixed.get("ok", False),
+            "退出码": fixed.get("code"),
+        }
+    out["脚本"] = rel
+    out["stdout"] = str(result.get("stdout", ""))[:1200]
+    out["stderr"] = str(result.get("stderr", ""))[:1200]
+    # build 回执 [PAGES]：成品包含的全部页（导出顺序）。后端据此刷新工作区大纲，
+    # 保证「调整后」大纲覆盖整份成品（含本次未改的旧页），而不是只剩本次写过的页。
+    try:
+        import re as _re_
+
+        m = _re_.search(r"\[PAGES\]([^\n]+)", str(result.get("stdout") or ""))
+        if m:
+            out["页清单"] = [x.strip() for x in m.group(1).split(",") if x.strip()]
+    except Exception:
+        pass
+    # 页清单 → 每页真实标题（直接从磁盘 svg_output 读字号/位置语义提取）：
+    # 对话正文摘要、工作区大纲、实际页三处用同一份标题，杜绝「标题对不上/01、2000+ 当标题」。
+    try:
+        pages = out.get("页清单")
+        if isinstance(pages, list) and pages:
+            from app.services import skill_bundle as _bundle_pt
+
+            desk_pt = _bundle_pt.skill_dir(user.id, target.id)
+            proj_rel = ""
+            for a in (args or []):
+                norm = str(a).replace("\\", "/").lstrip("/")
+                while norm.startswith("./"):
+                    norm = norm[2:]
+                if norm == "projects" or norm.startswith("projects/"):
+                    proj_rel = _scope_path(norm)
+                    break
+            svg_dir = None
+            if proj_rel:
+                proj_dir = desk_pt / proj_rel
+                cand = proj_dir / "svg_output"
+                svg_dir = cand if cand.is_dir() else (proj_dir if proj_dir.is_dir() else None)
+            infos: list[dict] = []
+            for nm in pages:
+                title = ""
+                url = ""
+                try:
+                    if svg_dir is not None:
+                        fp = svg_dir / nm
+                        if fp.is_file() and fp.stat().st_size <= 4 * 1024 * 1024:
+                            title = svg_page_title(fp.read_text(encoding="utf-8", errors="ignore"))
+                            rel_p = str(fp.relative_to(desk_pt)).replace("\\", "/")
+                            url = f"/uploads/skills/{user.id}/{target.id}/{rel_p}"
+                except OSError:
+                    title = ""
+                infos.append({"名": nm, "标题": title, "url": url})
+            if any(i["标题"] for i in infos):
+                out["页信息"] = infos
+    except Exception:
+        pass
+    if result.get("deps"):
+        out["依赖"] = result["deps"]
+    # PPT 二次编辑支撑：把**当前会话**工作区里现成的 .pptx 源文件告诉模型，
+    # 便于后续「编辑已有 PPT」而非重新生成。绝不能跨会话扫描——否则模型会把
+    # 别的对话里生成的旧 PPT 拿来改，出现「问列表却交运算符课件」的串任务。
+    try:
+        desk = _bundle.skill_dir(user.id, target.id)
+        current_project = ""
+        for a in (args or []):
+            norm = str(a).replace("\\", "/").lstrip("/")
+            while norm.startswith("./"):
+                norm = norm[2:]
+            if norm == "projects" or norm.startswith("projects/"):
+                current_project = _scope_path(norm)
+                break
+        if current_project:
+            root = desk / current_project
+        elif _conv_prefix():
+            root = desk / _conv_prefix() / "projects"
+        else:
+            root = desk / "projects"
+        existing_pptx: list[str] = []
+        if root.is_dir():
+            for p in root.rglob("*.pptx"):
+                rel = str(p.relative_to(desk)).replace("\\", "/")
+                if "_outputs/" in rel:
+                    continue
+                existing_pptx.append(_unscope_path(rel))
+        existing_pptx = sorted(set(existing_pptx))[:6]
+        if existing_pptx:
+            out["已有PPT源文件"] = existing_pptx
+            out["二次编辑提示"] = (
+                "包内已存在 .pptx 源文件（见「已有PPT源文件」，路径相对包根）。"
+                "若用户要「修改/加页/删页/调顺序/换文字」而非整体重做，应走 ppt-master 的"
+                "「Edit Native PPTX」路由：先 pptx_to_svg.py \"<该pptx路径>\" ... --roundtrip 导入为可编辑工作区，"
+                "只改需要改的页，再用 svg_to_pptx.py --roundtrip 导出，保留原设计、只重建改动页。"
+                "不要重新从头生成整份。"
+            )
+    except Exception:
+        pass
+    return out
+
+
+def _tool_write_skill_file(db: Session, user: User, *, skill: str = "", path: str = "", content: str = "") -> dict:
+    """把文本写入 Skill 包内（如手写 SVG/JSON 工程文件），供后续脚本（svg_to_pptx 等）消费。
+
+    用途：ppt-master 这类 Skill 需要 agent 先产出 SVG 源文件，再跑转换脚本；
+    本工具就是"手"——写进包内并登记到 files，之后 run_skill_script 才能读到/执行。
+    """
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    ref = (skill or "").strip()
+    rel = (path or "").strip().replace("\\", "/")
+    if not ref or not rel:
+        return {"错误": "需提供 skill（Skill 名或 id）与 path（包内相对路径）"}
+    pp = pathlib.PurePosixPath(rel)
+    if pp.is_absolute() or ".." in pp.parts:
+        return {"错误": f"非法路径：{rel}"}
+    allow = {".svg", ".json", ".md", ".txt", ".xml", ".html", ".yaml", ".yml", ".csv", ".css"}
+    if pp.suffix.lower() not in allow:
+        return {"错误": f"仅支持写入文本文件（{'、'.join(sorted(allow))}）：{rel}"}
+    body = content if isinstance(content, str) else str(content)
+    if not body:
+        return {"错误": "content 不能为空"}
+    if len(body.encode("utf-8")) > 512 * 1024:
+        return {"错误": "单文件上限 512KB"}
+    target, _avail = _resolve_skill_for_exec(db, user, ref)
+    if target is None:
+        return {"错误": f"找不到 Skill：{ref}"}
+    dest = _bundle.skill_dir(user.id, target.id)
+    scoped = _scope_path(rel)  # projects/ → conversations/conv_xxx/projects/（会话隔离）
+    fp = (dest / scoped).resolve()
+    if dest.resolve() not in fp.parents:
+        return {"错误": f"非法路径：{rel}"}
+    try:
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(body, encoding="utf-8")
+    except OSError as e:
+        return {"错误": f"写入失败：{e}"}
+    files = list(target.files or [])
+    if scoped not in files:
+        files.append(scoped)
+        _ext.update_skill(db, target, files=files)
+    return {"skill": target.name, "已写入": rel, "字节": len(body.encode("utf-8")),
+            "提示": "文件已就位，可继续写其余页面，然后用 run_skill_script 跑该 Skill 的转换脚本生成 PPTX"}
+
+
+def _tool_delete_skill_file(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
+    """删除 Skill 包内文件（典型用途：删页——删除 svg_output 下某一页 SVG）。
+
+    多轮编辑里「删掉第 N 页/移除某页」只能靠这个工具真正落盘；删除后必须重新 build，
+    `_normalize_svg_order` 会把剩余页规范成连续序号。
+    """
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    ref = (skill or "").strip()
+    rel = (path or "").strip().replace("\\", "/")
+    if not ref or not rel:
+        return {"错误": "需提供 skill（Skill 名或 id）与 path（要删除的包内文件路径）"}
+    pp = pathlib.PurePosixPath(rel)
+    if pp.is_absolute() or ".." in pp.parts:
+        return {"错误": f"非法路径：{rel}"}
+    if pp.suffix.lower() not in (".svg", ".json", ".md", ".txt", ".xml", ".css", ".yaml", ".yml", ".csv", ".html"):
+        return {"错误": f"仅支持删除文本/页面文件：{rel}"}
+    target, _avail = _resolve_skill_for_exec(db, user, ref)
+    if target is None:
+        return {"错误": f"找不到 Skill：{ref}"}
+    dest = _bundle.skill_dir(user.id, target.id)
+    scoped = _scope_path(rel)
+    fp = (dest / scoped).resolve()
+    if dest.resolve() not in fp.parents:
+        return {"错误": f"非法路径：{rel}"}
+    if not fp.is_file():
+        return {"错误": f"文件不存在：{rel}"}
+    try:
+        fp.unlink()
+    except OSError as e:
+        return {"错误": f"删除失败：{e}"}
+    files = [f for f in (target.files or []) if f != scoped]
+    if len(files) != len(target.files or []):
+        _ext.update_skill(db, target, files=files)
+    return {"skill": target.name, "已删除": rel,
+            "提示": "删除完成。请继续 run_skill_script 跑 build 出片（页序会自动规范化）。"}
+
+
+def _tool_list_skill_files(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
+    """列出 Skill 包内某个目录下的文件（用于发现已生成的项目、找到正确的脚本/源文件路径）。"""
+    from app.services import skill_bundle as _bundle
+
+    ref = (skill or "").strip()
+    if not ref:
+        return {"错误": "需提供 skill（Skill 名或 id）"}
+    prefix = (path or "").strip().replace("\\", "/").strip("/")
+    target, _avail = _resolve_skill_for_exec(db, user, ref)
+    if target is None:
+        return {"错误": f"找不到 Skill：{ref}"}
+    dest = _bundle.skill_dir(user.id, target.id)
+    # projects/ 走会话隔离；其它目录（scripts/references/templates 等）原样
+    is_projects = prefix == "projects" or prefix.startswith("projects/")
+    scoped_prefix = _scope_path(prefix) if is_projects else prefix
+    base = dest / scoped_prefix if scoped_prefix else dest
+    if not base.exists() or not base.is_dir():
+        if is_projects:
+            # 会话内还没有 projects：返回空，提示可新建（不暴露别的会话项目）
+            return {"skill": target.name, "目录": (prefix + "/") if prefix else "（包根）",
+                    "子目录": [], "文件": [],
+                    "提示": "本会话暂无 projects 项目，可用 write_skill_file 新建（如 projects/xxx/...）"}
+        tops = sorted({str(p.relative_to(dest)).replace("\\", "/").split("/")[0] for p in dest.iterdir()})[:30]
+        return {"错误": f"目录不存在：{prefix or '/'}", "包内顶层": tops}
+    dirs: list[str] = []
+    files: list[str] = []
+    for p in sorted(base.iterdir()):
+        rel = str(p.relative_to(dest)).replace("\\", "/")
+        if is_projects:
+            rel = _unscope_path(rel)  # 回显为 projects/… 形式
+        if p.is_dir():
+            dirs.append(rel + "/")
+        else:
+            files.append(rel)
+    return {"skill": target.name, "目录": (prefix + "/") if prefix else "（包根）",
+            "子目录": dirs[:50], "文件": files[:80],
+            "提示": "用这里列出的真实路径调用 read_skill_file / run_skill_script / write_skill_file"}
+
+
+def _tool_read_skill_file(db: Session, user: User, *, skill: str = "", path: str = "") -> dict:
+    """读用户 Skill 包内文本文件（先读 SKILL.md/入口脚本/参考资料，再决定跑哪个脚本、传什么参）。"""
+    from app.services import skill_bundle as _bundle
+
+    ref = (skill or "").strip()
+    rel = (path or "").strip().replace("\\", "/")
+    if not ref or not rel:
+        return {"错误": "需提供 skill（Skill 名或 id）与 path（包内文件路径）"}
+    target, _avail = _resolve_skill_for_exec(db, user, ref)
+    if target is None:
+        return {"错误": f"找不到 Skill：{ref}"}
+    scoped = _scope_path(rel)  # projects/ 会话隔离
+    if scoped not in list(target.files or []):
+        # 脚本运行后可能新生成页面/中间文件（如 svg_output 下新增的 SVG），
+        # 不一定回写到 AgentSkill.files；只要磁盘上真实存在且路径合法就允许读取，
+        # 否则会出现「文件明明在、却报包内无此文件/该类型不支持预览」的假失败。
+        dest = _bundle.skill_dir(user.id, target.id)
+        candidate = (dest / scoped).resolve()
+        if dest.resolve() not in candidate.parents or not candidate.is_file():
+            base = rel.rsplit("/", 1)[-1].lower()
+            same = [f for f in (target.files or []) if str(f).rsplit("/", 1)[-1].lower() == base][:3]
+            hint = f"（同名文件：{'、'.join(same)}，请用完整包内路径）" if same else ""
+            return {"错误": f"{target.name} 包内无此文件：{rel}{hint}"}
+    try:
+        text = _bundle.read_text_file(user.id, target.id, scoped)
+    except ValueError as e:
+        return {"错误": str(e)}
+    return {"skill": target.name, "文件": rel, "内容": text[:3000]}
+
 
 _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "my_schedule_overview": _tool_my_schedule_overview,
@@ -475,6 +1077,12 @@ _TOOL_FUNCS: dict[str, Callable[..., dict]] = {
     "sql_list_tables": _tool_sql_list_tables,
     "sql_describe_table": _tool_sql_describe_table,
     "sql_query": _tool_sql_query,
+    "web_search": _tool_web_search,
+    "run_skill_script": _tool_run_skill_script,
+    "write_skill_file": _tool_write_skill_file,
+    "read_skill_file": _tool_read_skill_file,
+    "list_skill_files": _tool_list_skill_files,
+    "delete_skill_file": _tool_delete_skill_file,
 }
 
 # OpenAI 兼容 function-calling 的 tools schema
@@ -622,7 +1230,154 @@ TOOLS_SCHEMA: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "联网检索公开信息（Tavily），返回标题/链接/摘要/日期。"
+                "仅用于需要**外部公开事实**的问题：行业动态、竞品/同行做法、公开资料、通用知识、"
+                "最新政策或新闻等。凡涉及本校的学员、课时、排课、收费、退费、请假制度等，"
+                "必须用内部工具或知识库回答，**绝不可用联网结果代替**。"
+                "若已有内部数据或知识库片段能回答，就不要调用本工具。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "检索关键词（用自然语言，中文即可）"},
+                    "max_results": {
+                        "type": "integer",
+                        "description": "返回条数（1-10，默认5）",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "enum": ["general", "news", "finance"],
+                        "description": "检索主题：general=通用、news=新闻资讯、finance=财经",
+                    },
+                    "time_range": {
+                        "type": "string",
+                        "enum": ["day", "week", "month", "year"],
+                        "description": "只看最近一段时间的结果（可选）",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_skill_script",
+            "description": (
+                "执行用户 Skill 包内的 .py/.js/.sh 脚本（走沙箱：本地或阿里云百炼，依赖自动安装）。"
+                "用户要求生成文件/跑脚本/用 Skill 干活时用它：读完 SKILL.md 确认入口后立即执行，"
+                "不要继续读文件浪费次数。执行环境：沙箱工作区根目录即包根，包内相对路径不变，"
+                "args 为命令行参数数组；返回含 stdout/stderr 与生成文件的下载链接，拿到链接后必须直接给用户。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "包内脚本路径，如 skills/ppt-master/scripts/build.py"},
+                    "args": {"type": "array", "items": {"type": "string"}, "description": "命令行参数数组"},
+                },
+                "required": ["skill", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill_file",
+            "description": (
+                "读取用户 Skill 包内的文本文件（SKILL.md、脚本源码、references 参考资料）。"
+                "跑脚本之前先用它读 SKILL.md 确认入口与参数，不要凭文件名猜。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "包内文件路径，如 SKILL.md"},
+                },
+                "required": ["skill", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skill_files",
+            "description": (
+                "列出 Skill 包内某个目录下的子目录与文件。"
+                "当需要找已有项目/源文件、或不确定脚本真实路径时先用它（例如列出 projects/ 看已生成的项目）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "包内目录路径，留空列包根，如 projects"},
+                },
+                "required": ["skill"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_skill_file",
+            "description": (
+                "把文本写入某个 Skill 包内（如手写 SVG/JSON 工程文件）。"
+                "当 Skill 需要 agent 先产出源文件再跑转换脚本时（例如 ppt-master 手写 SVG 后用 svg_to_pptx 导出），"
+                "用它逐页写入；每页一次调用，之后再用 run_skill_script 执行转换脚本。"
+                "插入新页时文件名用「插入位置序号+描述」（如 21x_xinsai.svg），build 会自动规范序号。"
+                "只支持文本文件（.svg/.json/.md/.txt/.xml/.html/.yaml/.yml/.csv/.css），单文件≤512KB。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "包内相对路径，如 projects/demo/svg_output/01_cover.svg"},
+                    "content": {"type": "string", "description": "文件文本内容"},
+                },
+                "required": ["skill", "path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_skill_file",
+            "description": (
+                "删除某个 Skill 包内的文件（典型用途：删页——删除 svg_output 下某一页 SVG）。"
+                "用户要求「删掉第 N 页/移除某页」时必须用它真正删除，再 run_skill_script 重新 build。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "description": "Skill 名（或 id）"},
+                    "path": {"type": "string", "description": "要删除的包内文件路径，如 projects/demo/svg_output/07_class.svg"},
+                },
+                "required": ["skill", "path"],
+            },
+        },
+    },
 ]
+
+# 「系统业务数据」类工具：查班级/学员/排课/考勤/评估/教学统计 + 直连 SQL。
+# 做 PPT/内容创作时这些与正文无关，放进规划器只会诱导模型乱查、拖慢出片、污染内容，
+# 因此在「明确的 Skill 生成任务」下把它们从规划器工具集中剔除（web_search 与文件/脚本工具保留）。
+_BUSINESS_TOOL_NAMES = frozenset({
+    "my_schedule_overview", "my_teaching_stats", "list_my_classes",
+    "find_students", "student_progress", "class_evaluation_overview",
+    "sql_query", "sql_list_tables", "sql_describe_table", "sql_describe",
+})
+
+
+def tool_schema_for(skill_task: bool) -> list[dict]:
+    """按场景裁剪工具集：Skill 生成任务剔除业务数据工具，减少跑偏与拖沓。"""
+    if not skill_task:
+        return TOOLS_SCHEMA
+    return [t for t in TOOLS_SCHEMA if (t.get("function", {}).get("name") not in _BUSINESS_TOOL_NAMES)]
 
 
 def execute_tool(db: Session, user: User, name: str, args: dict) -> dict:
@@ -652,6 +1407,216 @@ def looks_like_business(message: str) -> bool:
     if not t:
         return False
     return any(k in t for k in _BIZ_KEYWORDS)
+
+
+_SKILL_KEYWORDS = (
+    "生成", "创建", "制作", "运行", "执行", "脚本", "PPT", "ppt", "pptx", "下载", "导出",
+    "补齐", "补页", "补全", "缺页", "页数不对",
+)
+
+
+def looks_like_skill_task(message: str) -> bool:
+    """像是在让 Skill 干活（生成文件/跑脚本）：命中动词即放行 Planner，模型再按 Skill 清单决定。"""
+    t = (message or "").strip()
+    if not t:
+        return False
+    return any(k in t for k in _SKILL_KEYWORDS)
+
+
+# 联网搜索触发词：命中性问题让「规划器有机会运行」，是否真搜仍由模型判断。
+# 只覆盖"明显需要外部/时效信息"的信号，避免每句闲聊都触发规划（省一次 LLM 往返）。
+_WEB_SEARCH_KEYWORDS = (
+    "最新", "近期", "最近", "今年", "现在", "当前", "近日", "实时", "新出的", "新版",
+    "新闻", "资讯", "动态", "趋势", "业内", "行业", "同行", "竞品", "别家", "其他机构",
+    "外面", "网上", "联网", "搜一下", "搜索", "查一下网上", "帮我查", "调研",
+    "政策", "规定", "法规", "标准", "指南", "教程", "文档", "官网", "资料",
+    "什么是", "是什么", "什么是", "了解一下", "科普", "原理", "怎么用", "如何用",
+)
+
+
+def looks_like_web_search(message: str) -> bool:
+    """是否可能需要联网检索（仅作规划放行信号；真正的检索决策交给模型）。
+
+    注意：与 looks_like_business 并列——业务问题走内部工具，外部/时效问题才可能联网。
+    本校政策/收费/退费/课时规则等即使命中关键词，也应由内部工具/知识库回答，
+    模型侧由 web_search 工具描述与注入块约束兜底，这里不拦截（否则会误伤通用知识问答）。
+    """
+    t = (message or "").strip()
+    if not t:
+        return False
+    return any(k in t for k in _WEB_SEARCH_KEYWORDS)
+
+
+# PPT 二次编辑意图：命中后应进 Skill 路径（走 ppt-master 的 Edit Native PPTX 路由就地改），
+# 而不是让模型凭空重写整份（那正是之前「越改越乱」的诱因）。
+_PPT_EDIT_KEYWORDS = (
+    "加页", "加一页", "增加页", "新增页", "再加", "插入页", "添加页",
+    "删页", "删掉", "删除页", "去掉页", "移除页", "删一页", "去掉",
+    "改一下", "修改", "调整", "换成", "替换", "改成", "改这页", "改第",
+    "重排", "换顺序", "调顺序", "排序", "移到", "挪到", "顺序",
+    "这页", "第几页", "页码", "封面改", "标题改", "文字改", "字体", "配色", "换个风格",
+    "加一句", "加个", "补充一页", "精简", "删减", "合并页", "拆分页",
+    "补齐", "补页", "补全", "补到", "缺页", "少了几页", "页数不对",
+)
+# 出现这些说明是「从零生成」，不算编辑（避免把「生成一份 PPT」误判成编辑）
+_PPT_GENERATE_HINTS = ("生成", "制作", "做一个", "做个", "新的", "从头", "重新做", "新建")
+
+
+def looks_like_ppt_edit(message: str) -> bool:
+    """是否像是在「二次编辑已有 PPT」（加/删/改页、调顺序、换风格…）而非从零生成。
+
+    仅在会话已具备 Skill 工具时有意义；作为 skill_mode 放行信号，
+    让「加一页」这类短指令也进 Skill 路径，交给模型按 Edit Native PPTX 路由就地修改。
+    """
+    t = (message or "").strip()
+    if not t:
+        return False
+    if any(g in t for g in _PPT_GENERATE_HINTS):
+        # 同时含编辑词时仍视为编辑（如「重新生成时多加一页」偏编辑）；纯生成信号则否
+        has_edit = any(k in t for k in _PPT_EDIT_KEYWORDS)
+        # 「换个风格/重排」这类即使带生成词也按编辑处理
+        return has_edit and any(k in t for k in ("换", "改", "加", "删", "调整", "重排"))
+    return any(k in t for k in _PPT_EDIT_KEYWORDS)
+
+
+# PPT「续作/收尾」意图：用户催「出片/继续/给我下载/文件呢」但没带生成/编辑动词。
+# 这类话若不进 Skill 路径，模型只会空口「马上出片」却从不真正调用 run_skill_script——
+# 正是「说了出片却不出片」的根因。命中即放行 Skill 路径并强制真执行。
+_PPT_CONTINUE_KEYWORDS = (
+    "出片", "出图", "生成好", "好了吗", "好了没", "好了么", "文件呢", "文件在", "在哪下载",
+    "给我下载", "下载呢", "下载啊", "下载", "继续", "接着", "快点", "快点出", "开始做", "开始生成",
+    "转成ppt", "转成 ppt", "转pptx", "转 pptx", "导出",
+)
+
+
+def looks_like_ppt_continue(message: str) -> bool:
+    """是否是在「催出片/收尾/继续」的 PPT 续作意图（非首次生成、非编辑词）。
+
+    仅在会话具备 Skill 工具时作为 skill_mode 放行信号使用；作用是把
+    「出片把」「继续」「给我PPTx下载啊」这类话也拉进 Skill 路径，逼模型真正调用执行，
+    而不是只回一句「我马上出片」。
+    """
+    t = (message or "").strip()
+    if not t or len(t) > 40:  # 太长的一般是完整描述，走正常生成判定
+        return False
+    return any(k in t for k in _PPT_CONTINUE_KEYWORDS)
+
+
+def heuristic_skill_calls(db, user) -> list[dict]:
+    """Skill 兜底：规划器零工具调用时，强制先读第一个可执行 Skill 的 SKILL.md。
+
+    保证执行链路非空（用户能看到读了什么），模型也能拿到入口脚本与参数说明再决策。
+    """
+    try:
+        from app.crud import agent_ext as _ext
+
+        collected = {
+            str(x) for x in _ext.collected_skill_ids(db, user_id=user.id)
+        }
+        rows: list = list(_ext.list_skills(db, owner_id=user.id))
+        if collected:
+            for s in _ext.list_plaza_skills(db):
+                if str(s.id) in collected and all(str(x.id) != str(s.id) for x in rows):
+                    rows.append(s)
+        for s in rows:
+            if not s.enabled:
+                continue
+            if not _skill_allowed(s.id):
+                continue
+            files = [str(f) for f in (s.files or [])]
+            if not any(f.lower().endswith((".py", ".js", ".sh")) for f in files):
+                continue
+            doc = next((f for f in files if f.lower().endswith("skill.md")), None)
+            if doc:
+                return [{"name": "read_skill_file", "arguments": {"skill": s.name, "path": doc}}]
+    except Exception:
+        pass
+    return []
+
+
+def auto_build_ppt(db, user) -> dict | None:
+    """确定性兜底：PPT 任务中模型只空口「马上出片」却没执行脚本时，直接替它跑一次出片。
+
+    条件（全部满足才动手，避免误触发）：
+      - 用户可用 Skill 里存在 ppt-master 适配版（含 scripts/ppt_oneshot.py）；
+      - 该 Skill 包内**当前会话** projects/ 下能找到含 svg_output/*.svg 的项目。
+    动作：优先对当前 PPT 契约绑定的项目跑 `ppt_oneshot.py build <项目>`；没有契约时
+    对本会话最近修改的项目执行。会话隔离已在路径层完成，不能再靠 60 分钟时间窗
+    （否则用户隔一会儿回来点「继续修复」就找不到项目）。
+    """
+    from app.crud import agent_ext as _ext
+    from app.services import skill_bundle as _bundle
+
+    preferred = ""
+    try:
+        cid = _CONV_SCOPE.get()
+        if cid:
+            import uuid as _uuid
+
+            from app.crud import ppt_task as _ppt_crud
+
+            active = _ppt_crud.get_active(db, conversation_id=_uuid.UUID(str(cid)))
+            if active is not None:
+                preferred = str(active.project_key or "").replace("\\", "/").strip("/")
+    except Exception:
+        preferred = ""
+
+    try:
+        collected = {str(x) for x in _ext.collected_skill_ids(db, user_id=user.id)}
+        rows: list = list(_ext.list_skills(db, owner_id=user.id))
+        for s in _ext.list_plaza_skills(db):
+            if str(s.id) in collected and all(str(x.id) != str(s.id) for x in rows):
+                rows.append(s)
+    except Exception:
+        return None
+    for s in rows:
+        if not s.enabled:
+            continue
+        # 权限界定：只对「当前 Agent 生效绑定」的 Skill 做出片兜底
+        if not _skill_allowed(s.id):
+            continue
+        files = [str(f) for f in (s.files or [])]
+        wrapper = next((f for f in files if f.endswith("scripts/ppt_oneshot.py")), None)
+        if not wrapper:
+            continue
+        # 定位当前会话作用域下已有 SVG 页的项目（物化后文件在**使用者本人**目录）
+        try:
+            desk = _bundle.skill_dir(user.id, s.id)
+        except Exception:
+            continue
+        if not desk.exists():
+            continue
+        proj_root = desk / _scope_path("projects")
+        if preferred:
+            cand = desk / _scope_path(preferred)
+            candidates = [cand] if cand.is_dir() else []
+        else:
+            candidates = [p for p in proj_root.glob("*") if p.is_dir()]
+        best = None
+        best_mtime = -1.0
+        for proj in candidates:
+            svg_dir = proj / "svg_output"
+            if not svg_dir.is_dir() or not any(svg_dir.glob("*.svg")):
+                continue
+            try:
+                mt = max(p.stat().st_mtime for p in svg_dir.glob("*.svg"))
+            except OSError:
+                continue
+            if preferred or mt > best_mtime:
+                best_mtime = mt
+                best = proj
+                if preferred:
+                    break
+        if best is None:
+            continue
+        # 还原为模型可见的 projects/… 路径；run_skill_script 会再按会话作用域改写
+        rel_proj = _unscope_path(str(best.relative_to(desk)).replace("\\", "/"))
+        logger.info("自动出片兜底：对 %s 执行 build", rel_proj)
+        return execute_tool(
+            db, user, "run_skill_script",
+            {"skill": s.name, "path": wrapper, "args": ["build", rel_proj]},
+        )
+    return None
 
 
 def _heuristic_calls(message: str) -> list[dict]:
@@ -699,5 +1664,7 @@ def _to_text(obj: Any) -> str:
 
 
 __all__ = [
-    "TOOLS_SCHEMA", "parse_period", "looks_like_business", "execute_tool",
+    "TOOLS_SCHEMA", "tool_schema_for", "parse_period", "looks_like_business", "looks_like_ppt_edit",
+    "looks_like_ppt_continue", "looks_like_skill_task", "looks_like_web_search",
+    "auto_build_ppt", "execute_tool",
 ]

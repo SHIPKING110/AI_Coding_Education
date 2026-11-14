@@ -242,7 +242,7 @@ def test_feedback_role_and_upload(client, admin_token):
 
 
 def test_feedback_ai_enhance_degraded_without_llm(client, admin_token, monkeypatch):
-    """AI 草稿接口：未配置 LLM 时降级——返回当前内容并记录占位 ai_draft（不报错、不真正走网络）。"""
+    """AI 草稿接口：未配置 LLM 时显式 502（不静默返回空内容，避免前端误报成功）。"""
     from app.services import llm
 
     from app.services import llm_context as _llm_ctx
@@ -262,14 +262,13 @@ def test_feedback_ai_enhance_degraded_without_llm(client, admin_token, monkeypat
     )
     fb = client.post("/api/feedbacks", json=_payload(stu, schedule_id), headers=teacher).json()
     r = client.post(f"/api/feedbacks/{fb['id']}/ai-enhance", json={}, headers=teacher)
-    assert r.status_code == 200
-    body = r.json()
-    assert body["topic"] == fb["topic"]
-
-    # 详情中的 ai_draft 记录为降级占位（note 提示未配置）
+    # 未配置 LLM：显式 502（不静默返回空内容，避免前端误报成功）
+    assert r.status_code == 502, r.text
+    # 原反馈内容不被改写
     detail = client.get(f"/api/feedbacks/schedule/{schedule_id}", headers=teacher).json()
     saved = next(f for f in detail if f["id"] == fb["id"])
-    assert "note" in saved.get("ai_draft", {})
+    assert saved["topic"] == fb["topic"]
+    assert not saved.get("ai_draft")
 
 
 def test_feedback_ai_enhance_generates_draft(client, admin_token, monkeypatch):
@@ -681,10 +680,10 @@ def test_prompt_template_crud_isolation_publish(client, admin_token):
     teacher_a = _register(client, "teacher", "tpa")
     teacher_b = _register(client, "teacher", "tpb")
 
-    # 1. 系统默认模板（seed 3 套）对任何用户可见
+    # 1. 系统默认模板（seed 含多套）对任何用户可见
     sys_list = client.get("/api/prompt-templates", headers=teacher_a).json()
     sys_names = {t["name"] for t in sys_list if t["scope"] == "system"}
-    assert len(sys_names) == 3
+    assert len(sys_names) >= 3  # 种子模板随模板体系扩展而增加，测"系统模板可见"而非固定数量
 
     # 2. A 创建个人模板 -> 仅 A 与 admin 可见
     tpl = client.post(

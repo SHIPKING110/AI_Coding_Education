@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = ""
     # RAG 知识库 embedding：留空则沿用各教师自配 embedding；两者都无时 RAG 不可用
     LLM_EMBED_MODEL: str = ""
+    # 知识库增量同步：后台轮询间隔（秒，0=关闭）。检测源文件新增/变更 → 自动重索引；
+    # 未变更文档按内容哈希跳过，不重复消耗 Token。
+    KNOWLEDGE_SYNC_INTERVAL: int = 900
 
     # 智能助手业务工具规划层预算（多轮工具调用的稳定性护栏）
     AGENT_TOOL_MAX_ROUNDS: int = 4       # 最多规划-执行轮数
@@ -45,6 +48,23 @@ class Settings(BaseSettings):
     AGENT_TOOL_TIME_BUDGET_MS: int = 20000  # 规划+执行总时间预算（毫秒）
     AGENT_TOOL_RESULT_CHARS: int = 1200  # 单个工具结果回灌给模型的最大字符数
     AGENT_TOOL_BLOCK_CHARS: int = 5000   # 注入最终回答的业务数据块最大字符数
+
+    # RAG 检索阈值门控（评估暴露：0.15 过松导致低相关过度召回）
+    RAG_MIN_SIMILARITY: float = 0.35  # 向量相似度低于此直接丢弃；可用 env 覆盖
+
+    # Agent 任务观测（run/span）：默认开启，失败不影响主链路
+    AGENT_RUN_TRACE_ENABLED: bool = True
+    AGENT_RUN_TRACE_SAMPLE_RATE: float = 1.0
+    AGENT_RUN_RETENTION_DAYS: int = 30
+
+    # Token 计量与成本记账（用量与成本仪表盘）：默认开启，失败不影响主链路
+    LLM_USAGE_TRACKING_ENABLED: bool = True
+    # 明细保留天数；更早的明细每月汇总进 llm_usage_monthly（永久保留）后清理
+    LLM_USAGE_RETENTION_DAYS: int = 180
+
+    # 意图分类：规则优先；低置信度时才交给轻量 LLM（默认关闭，避免额外 token）
+    AGENT_INTENT_LLM_FALLBACK: bool = False
+    AGENT_INTENT_CONFIDENCE_THRESHOLD: float = 0.55
 
 
 @lru_cache

@@ -47,6 +47,13 @@ def ensure_business_schema(engine: Engine) -> None:
     addcol("finance_settings", "overdraft_max NUMERIC(6,1) DEFAULT 10", "overdraft_max")
     # 欠费消耗标记（计入创收但挂应收）
     addcol("revenue_ledger", "is_overdraft BOOLEAN DEFAULT FALSE", "is_overdraft")
+    # AI 费用预算（用量与成本仪表盘）
+    addcol("system_settings", "llm_monthly_budget DOUBLE PRECISION DEFAULT 0", "llm_monthly_budget")
+    addcol(
+        "system_settings",
+        "llm_budget_alert_ratio DOUBLE PRECISION DEFAULT 0.8",
+        "llm_budget_alert_ratio",
+    )
     # 排课班级可空（体验课可排教师空余时段不绑班级）
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE schedules ALTER COLUMN class_id DROP NOT NULL"))
@@ -95,6 +102,10 @@ def ensure_business_schema(engine: Engine) -> None:
             f"{_nav_col} BOOLEAN NOT NULL DEFAULT TRUE",
             _nav_col,
         )
+    # Agent 扩展表补列（后加字段，存量库幂等补齐）
+    addcol("agent_skills", "files JSON DEFAULT '[]'", "files")
+    addcol("custom_agents", "mcp_ids JSON DEFAULT '[]'", "mcp_ids")
+    addcol("custom_agents", "skill_ids JSON DEFAULT '[]'", "skill_ids")
     # 敏感模块导航（默认关闭，需管理员显式授予）
     for _nav_col in ("nav_finance", "nav_settings"):
         addcol(
@@ -102,6 +113,33 @@ def ensure_business_schema(engine: Engine) -> None:
             f"{_nav_col} BOOLEAN NOT NULL DEFAULT FALSE",
             _nav_col,
         )
+    # 后台管理（RAG）细粒度权限（默认关闭）
+    for _rag_col in (
+        "rag_overview_view", "rag_assets_view", "rag_assets_reindex", "rag_assets_delete",
+        "rag_assets_sweep", "rag_routes_view", "rag_routes_save", "rag_routes_test",
+        "rag_eval_view", "rag_eval_set_create", "rag_eval_case_add", "rag_traces_view",
+        "rag_runs_view", "rag_sessions_view", "rag_parent_sessions_view",
+        "rag_settings_view", "rag_settings_save",
+    ):
+        addcol("teacher_permissions", f"{_rag_col} BOOLEAN NOT NULL DEFAULT FALSE", _rag_col)
+    # 评测运行进度（后加字段，存量库幂等补齐）
+    addcol("rag_eval_runs", "total_cases INTEGER NOT NULL DEFAULT 0", "total_cases")
+    addcol("rag_eval_runs", "processed_cases INTEGER NOT NULL DEFAULT 0", "processed_cases")
+    addcol("rag_eval_runs", "stage VARCHAR(32) NOT NULL DEFAULT 'pending'", "stage")
+    addcol("rag_eval_runs", "progress INTEGER NOT NULL DEFAULT 0", "progress")
+    addcol("rag_eval_runs", "eval_snapshot JSON", "eval_snapshot")
+    addcol("rag_eval_runs", "retrieval_mode VARCHAR(16) NOT NULL DEFAULT 'auto'", "retrieval_mode")
+    addcol("rag_eval_runs", "parent_mode BOOLEAN NOT NULL DEFAULT FALSE", "parent_mode")
+    addcol("rag_eval_cases", "answerability VARCHAR(16) NOT NULL DEFAULT 'unlabeled'", "answerability")
+    addcol("rag_eval_cases", "split VARCHAR(16) NOT NULL DEFAULT 'regression'", "split")
+    addcol("rag_eval_cases", "business_criticality VARCHAR(16) NOT NULL DEFAULT 'normal'", "business_criticality")
+    addcol("rag_eval_results", "human_score INTEGER", "human_score")
+    addcol("rag_eval_results", "human_judge VARCHAR(64)", "human_judge")
+    addcol("rag_eval_results", "human_at TIMESTAMPTZ", "human_at")
+    addcol("rag_eval_results", "human_reason TEXT", "human_reason")
+    # 用量与成本细粒度权限（默认关闭）
+    for _usage_col in ("usage_view", "usage_price_create", "usage_budget_save", "usage_recon_upsert"):
+        addcol("teacher_permissions", f"{_usage_col} BOOLEAN NOT NULL DEFAULT FALSE", _usage_col)
     # 整数余额 → 数值（支持半课时），仅当还是 INTEGER 时执行
     if _col_type(engine, "students", "lesson_balance").startswith("INTEGER"):
         stmts.append(

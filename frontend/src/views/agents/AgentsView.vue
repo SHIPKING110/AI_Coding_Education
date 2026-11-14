@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, onUpdated, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -7,21 +7,23 @@ import {
   buildConversationPpt,
   createConversation,
   deleteConversation,
-  deleteMemory,
   getConversationMaterial,
   getConversationMessages,
   listAgents,
   listConversations,
-  listMemories,
   patchConversation,
   shareConversation,
+  uploadChatAttachment,
   type AgentInfo,
   type AgentPhase,
   type AgentStage,
+  type ChatAttachment,
   type ChatMessage,
   type ChatOption,
   type ConversationOut,
   type MaterialItem,
+  type RagHit,
+  type RetrievalInfo,
 } from '@/api/agent'
 import { listLLMConfigs, type LLMConfigOut } from '@/api/llm'
 import { toastApiError } from '@/stores/toast'
@@ -30,22 +32,60 @@ import { listReports } from '@/api/report'
 import {
   collectDoc,
   deleteDoc,
+  describeKnowledgeDoc,
   listMyDocs,
   listPlaza,
   publishDoc,
   retryDoc,
+  toggleDocParentVisible,
   toggleDocSearch,
   uncollectDoc,
   unpublishDoc,
-  uploadDoc,
+  uploadDocs,
   type KnowledgeDoc,
 } from '@/api/knowledge'
 import { renderMarkdown } from '@/utils/markdown'
+import { observeMermaid, renderMermaidNodes } from '@/utils/mermaid'
+import {
+  createCustomAgent, createMcp, createSkill, deleteCustomAgent, deleteMcp, deleteSkill,
+  collectMcp, collectSkill, uncollectMcp, uncollectSkill, listPlazaMcps, listPlazaSkills, publishMcp, publishSkill, unpublishMcp, unpublishSkill,
+  getAgentGlobal, importSkillBundle, listCustomAgents, listMcps, listSkills, patchCustomAgent, patchMcp, patchSkill,
+  getSandbox, previewSkillFile, putAgentGlobal, putSandbox, runSkillScript, testMcp, testSandbox, type AgentMcp, type AgentSkill, type CustomAgent,
+} from '@/api/agentExt'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { myPermissions } from '@/api/permissions'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 
-const tab = ref<'chat' | 'mine' | 'plaza'>('chat')
+// —— 教师操作权限：导入 ZIP 技能包（管理员/教务全开；教师按权限管理配置，后端 403 兜底） ——
+const myPerms = ref<Record<string, boolean>>({})
+const canImportSkill = computed(() => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value.agent_skill_import !== false
+})
+// 上传并入库（我的知识库）权限：agent_doc_upload
+const canUploadDoc = computed(() => {
+  if (auth.user?.role !== 'teacher') return true
+  return myPerms.value.agent_doc_upload !== false
+})
+const showNoPerm = ref(false)
+const noPermText = ref('')
+function showNoPermDialog(text: string) {
+  noPermText.value = text
+  showNoPerm.value = true
+}
+async function loadPerms() {
+  try {
+    myPerms.value = await myPermissions()
+  } catch {
+    myPerms.value = {}
+  }
+}
+
+const tab = ref<'chat' | 'mine' | 'plaza' | 'mcp' | 'skill'>('chat')
 const sideCollapsed = ref(false)
 const agentDrop = ref(true)
 const histDrop = ref(true)
@@ -61,25 +101,58 @@ const agents = ref<AgentInfo[]>([])
 const conversations = ref<ConversationOut[]>([])
 const selectedAgent = ref('')
 const activeConv = ref<ConversationOut | null>(null)
-const messages = ref<{ role: string; content: string; citations?: Record<string, unknown> | null; options?: ChatOption[] | null; spec?: ChatMessage['spec'] }[]>([])
+const messages = ref<{ role: string; content: string; raw?: string; citations?: Record<string, unknown> | null; options?: ChatOption[] | null; spec?: ChatMessage['spec']; attachments?: ChatAttachment[] }[]>([])
+// 长用户消息折叠：超过阈值默认收起，点「展开全文」查看（避免长需求把上下文挤出屏幕）
+const expandedUserMsgs = ref<Record<number, boolean>>({})
+const USER_MSG_COLLAPSE_CHARS = 180
+function isLongUser(m: { role: string; content: string }): boolean {
+  return m.role === 'user' && (m.content ?? '').length > USER_MSG_COLLAPSE_CHARS
+}
+function userPreview(text: string): string {
+  return (text ?? '').slice(0, USER_MSG_COLLAPSE_CHARS).replace(/\n+$/, '') + ' …'
+}
 const streamBuf = ref('')
+const liveTools = ref<{ seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null; running?: boolean }[]>([])
 const streaming = ref(false)
 const phaseLabel = ref('')
 const input = ref('')
+const inputEl = ref<HTMLTextAreaElement | null>(null)
+const pendingAttachments = ref<ChatAttachment[]>([])
+const uploadingAttachment = ref(false)
+const attachError = ref('')
+const plusOpen = ref(false)
+const fileImgInput = ref<HTMLInputElement | null>(null)
+const fileDocInput = ref<HTMLInputElement | null>(null)
 const useRagOnce = ref(false)
 const error = ref('')
-const memories = ref<{ id: string; key: string; value: string }[]>([])
-const showMemory = ref(false)
 const chatEl = ref<HTMLDivElement | null>(null)
 const myDocs = ref<KnowledgeDoc[]>([])
 const plazaDocs = ref<KnowledgeDoc[]>([])
+const plazaSkills = ref<AgentSkill[]>([])
+const plazaMcps = ref<AgentMcp[]>([])
+const plazaSub = ref<'docs' | 'skills' | 'mcps'>('docs')
 const kbLoading = ref(false)
 const kbError = ref('')
-const upFile = ref<File | null>(null)
-const upTitle = ref('')
-const upDesc = ref('')
+const upItems = ref<{
+  file: File
+  title: string
+  desc: string
+  descLoading?: boolean
+  descError?: string
+  status: 'pending' | 'uploading' | 'ok' | 'error'
+  error?: string
+}[]>([])
+const autoDesc = ref(false)
+const descConfigId = ref('')
+const descGenerating = ref(false)
 const uploading = ref(false)
 const creating = ref(false)
+const kbNotice = ref('')
+const MAX_BATCH_FILES = 10
+const MAX_UPLOAD_MB = 20
+const canGenDesc = computed(
+  () => autoDesc.value && !!descConfigId.value && !descGenerating.value && !uploading.value,
+)
 
 const ICONS: Record<string, string> = {
   assistant: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 12.5h5',
@@ -123,13 +196,18 @@ const readyDocs = computed(() => myDocs.value.filter((d) => d.status === 'ready'
 
 onMounted(async () => {
   document.addEventListener('click', onDocClickForMenu)
+  document.addEventListener('click', onDocClickForPlus)
+  ;(window as unknown as Record<string, unknown>).__codeRun = openCodePreview
   try {
     agents.value = await listAgents()
     conversations.value = await listConversations()
     await loadLLMConfigs()
+    void loadPerms()
   } catch {
     /* 列表失败不阻塞页面 */
   }
+  // 自建 Agent / MCP / Skill 一次载入：确保「自建 Agent」区首次进入即可见（此前需切 tab 才加载）
+  void loadExt()
   const q = route.query as Record<string, string>
   if (q.agent) selectedAgent.value = q.agent
   else if (agents.value[0]) selectedAgent.value = agents.value[0].id
@@ -150,24 +228,14 @@ onMounted(async () => {
     // 清掉 query：否则每次刷新页面都会按残留参数再建一个空白对话
     void router.replace({ name: 'agents' })
   }
-  if (selectedAgent.value) void loadMemories()
 })
 
 onUnmounted(() => {
   stopKbPoll()
   document.removeEventListener('click', onDocClickForMenu)
+  document.removeEventListener('click', onDocClickForPlus)
+  delete (window as unknown as Record<string, unknown>).__codeRun
 })
-
-watch(selectedAgent, () => void loadMemories())
-
-async function loadMemories() {
-  if (!selectedAgent.value) return
-  try {
-    memories.value = await listMemories(selectedAgent.value)
-  } catch {
-    memories.value = []
-  }
-}
 
 let openSeq = 0
 
@@ -179,20 +247,26 @@ async function openConversation(id: string) {
   activeConv.value = conv
   messages.value = []
   outlineDirty.value = false
+  expandedUserMsgs.value = {}
   sectionDirty.value = false
+  // 工作区三块 Tab 的产出必须与「当前会话」严格一致：切会话即清空，避免残留上个任务的大纲/素材/成果。
+  outlineDraft.value = []
   sectionPreview.value = []
   pptResult.value = null
   wsError.value = ''
   pptTitle.value = ''
+  pptTheme.value = 'brand'
   material.value = []
+  expandedPage.value = null
+  svgCodeCache.value = {}
   if (!conv) return
   selectedAgent.value = conv.agent_id
   const res = await getConversationMessages(id)
   if (seq !== openSeq) return // 已切到别的会话：丢弃过期响应，避免串话与错误吸底
   if (res.conversation?.stage) conv.stage = res.conversation.stage
   messages.value = res.items.map((m) => ({
-    role: m.role, content: stripJsonBlocks(m.content), citations: m.citations,
-    options: m.options ?? null, spec: m.spec ?? null,
+    role: m.role, content: stripJsonBlocks(m.content), raw: m.content, citations: m.citations,
+    options: m.options ?? null, spec: m.spec ?? null, attachments: attachmentsOf(m),
   }))
   // 工作区同步：素材 + 大纲草稿（如用户没在编辑则跟随最新规格）
   void loadMaterial()
@@ -211,6 +285,119 @@ const pptTitle = ref('')
 const building = ref(false)
 const pptResult = ref<{ ppt_url: string; download: string; pages: number; theme: string } | null>(null)
 const wsError = ref('')
+const deckPreview = ref(true)
+
+/* —— 幻灯片预览：把当前大纲/文案渲染成可读的 PPT 页（含封面），无需翻历史对话 —— */
+const THEME_TOKENS: Record<string, { primary: string; soft: string; accent: string; deep: string }> = {
+  brand: { primary: '#615FFF', soft: '#EEF2FF', accent: '#00B8DB', deep: '#312E81' },
+  cyan: { primary: '#00B8DB', soft: '#ECFEFF', accent: '#615FFF', deep: '#0E7490' },
+  deep: { primary: '#312E81', soft: '#EEF2FF', accent: '#00B8DB', deep: '#1E1B4B' },
+}
+
+const deckTheme = computed(() => THEME_TOKENS[pptTheme.value] ?? THEME_TOKENS.brand)
+const deckStyle = computed(() => {
+  const t = deckTheme.value
+  return { '--sp': t.primary, '--ss': t.soft, '--sa': t.accent, '--sd': t.deep }
+})
+
+interface DeckSlide {
+  kind: 'cover' | 'content' | 'end'
+  kicker: string
+  title: string
+  bullets: string[]
+  meta?: string
+}
+
+function splitBullets(text: unknown): string[] {
+  return String(text ?? '')
+    .split(/\n|[；;]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+const deckSlides = computed<DeckSlide[]>(() => {
+  const deck: DeckSlide[] = []
+  const items = outlineDraft.value
+  const coverTitle = pptTitle.value.trim() || activeConv.value?.title || '工作汇报'
+  const period = material.value.find((m) => m.period)?.period || ''
+  const firstIsCover = items.length > 0 && (items[0].kind === 'cover' || /封面|cover/i.test(items[0].title || ''))
+  deck.push({
+    kind: 'cover', kicker: 'COVER', title: firstIsCover ? (items[0].title || coverTitle) : coverTitle,
+    bullets: [], meta: period,
+  })
+  const contentItems = firstIsCover ? items.slice(1) : items
+  contentItems.forEach((o, i) => {
+    const sec = sectionPreview.value.find((s) => s.title === o.title) ?? sectionPreview.value[i]
+    let bullets = splitBullets(o.note)
+    if (!bullets.length && sec) bullets = splitBullets(sec.body)
+    deck.push({
+      kind: 'content', kicker: `PART ${String(i + 1).padStart(2, '0')}`,
+      title: o.title || (sec?.title ?? `第 ${i + 1} 页`), bullets,
+    })
+  })
+  deck.push({ kind: 'end', kicker: '', title: coverTitle, bullets: [] })
+  return deck
+})
+
+const todayStr = new Date().toISOString().slice(0, 10)
+
+/* —— 真实生成的 SVG 页：优先用 spec.slides 里「按文件名精确对齐到每页」的 url，
+   这样大纲第 i 页 ↔ 它自己的那页 SVG，不再依赖两个数组的脆弱下标对齐；
+   兜底再扫工具轨迹里的 .svg 产物（跨消息按名去重、以最新为准）。 —— */
+const svgPages = computed<{ name: string; url: string }[]>(() => {
+  // 1) 首选：最新 spec 的 slides/outline 已带 url，按大纲顺序返回
+  const ol = latestSpec.value?.outline ?? []
+  const slides = latestSpec.value?.slides ?? []
+  const fromSpec: { name: string; url: string }[] = []
+  const srcList = ol.length ? ol : slides
+  for (const o of srcList) {
+    const u = String((o as Record<string, unknown>).url ?? '')
+    if (u && u.toLowerCase().includes('.svg')) {
+      const f = String((o as Record<string, unknown>).file ?? u)
+      fromSpec.push({ name: f, url: u })
+    }
+  }
+  if (fromSpec.length) return fromSpec
+  // 2) 兜底：扫工具轨迹产物（旧会话 / 无 spec 时）
+  const byName = new Map<string, string>()
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m.role !== 'assistant') continue
+    for (const t of toolsOf(m)) {
+      for (const f of parseFiles(t)) {
+        const nm = String(f['名'] ?? f.name ?? '')
+        const url = String(f['下载'] ?? f.url ?? '')
+        if (nm.toLowerCase().endsWith('.svg') && url && !byName.has(nm)) {
+          byName.set(nm, url) // 从新到旧：首次出现即最新，后续旧消息同名页不覆盖
+        }
+      }
+    }
+  }
+  if (!byName.size) return []
+  return [...byName.entries()]
+    .map(([name, url]) => ({ name, url }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+})
+
+/* 每页展开态：点击大纲标题展开该页「预览/代码」 */
+const expandedPage = ref<number | null>(null)
+const pageView = ref<'preview' | 'code'>('preview')
+// 缓存已拉取的 svg 源码（按 url）
+const svgCodeCache = ref<Record<string, string>>({})
+async function openPage(i: number) {
+  expandedPage.value = expandedPage.value === i ? null : i
+  pageView.value = 'preview'
+  const p = svgPages.value[i]
+  if (p && !(p.url in svgCodeCache.value)) {
+    try {
+      const r = await fetch(p.url)
+      const txt = await r.text()
+      svgCodeCache.value = { ...svgCodeCache.value, [p.url]: txt }
+    } catch {
+      svgCodeCache.value = { ...svgCodeCache.value, [p.url]: '（无法加载 SVG 源码）' }
+    }
+  }
+}
 
 const latestSpec = computed(() => {
   // 多条消息的规格合并（新者优先）：大纲消息只有 outline，文案消息只有 sections
@@ -228,25 +415,81 @@ const latestSpec = computed(() => {
 })
 
 const usedCitations = computed(() => {
-  const seen = new Map<string, { title: string; text: string; similarity?: number }>()
+  const seen = new Map<string, RagHit>()
   for (const m of messages.value) {
     for (const c of citationsOf(m)) {
       const k = `${c.title}::${c.text.slice(0, 60)}`
       if (!seen.has(k)) seen.set(k, c)
     }
   }
-  return [...seen.values()].slice(0, 20)
+  // 按「有效分」降序：重排分优先，否则向量相似度（修复高分排在下方的错乱）
+  return [...seen.values()].sort((a, b) => hitScore(b) - hitScore(a)).slice(0, 20)
 })
+
+/* —— 对话驱动大纲：从 assistant 消息里的结构化载荷识别 PPT 大纲 —— */
+const ROLE_CN: Record<string, string> = {
+  cover: '封面', content: '内容页', closing: '封底', end: '封底',
+  agenda: '目录', section: '章节', stats: '数据页', table: '表格页', chart: '图表页',
+}
+
+function parseOutlinePayload(raw?: string): { id?: string; title: string; kind?: string; note?: string }[] {
+  if (!raw) return []
+  const blocks = [...raw.matchAll(/```(?:json|jsonc)?\s*([\s\S]*?)```/g)].map((m) => m[1])
+  for (const b of blocks) {
+    let obj: unknown
+    try {
+      obj = JSON.parse(b)
+    } catch {
+      continue
+    }
+    const rec = (obj ?? {}) as Record<string, unknown>
+    const arr = (rec.outline ?? rec.slides ?? rec.pages) as unknown
+    if (!Array.isArray(arr) || !arr.length) continue
+    const items = arr.map((it, i) => {
+      if (typeof it === 'string') return { id: `p${i + 1}`, title: it, note: '' }
+      const o = (it ?? {}) as Record<string, unknown>
+      const role = String(o.role ?? o.kind ?? '').toLowerCase()
+      const rawTitle = o.title ?? o.name ?? o.heading
+      const file = String(o.file ?? '')
+      // 标题优先级：显式标题 > role 中文名 > 文件名 > 占位
+      const title = rawTitle
+        ? String(rawTitle)
+        : role && ROLE_CN[role]
+          ? ROLE_CN[role]
+          : file
+            ? file.split('/').pop()!.replace(/\.[a-z0-9]+$/i, '')
+            : `第 ${i + 1} 页`
+      const note = String(o.note ?? o.summary ?? o.desc ?? o.body ?? o.content ?? o.file ?? '')
+      return { id: String(o.id ?? o.index ?? `p${i + 1}`), title, note }
+    })
+    // 至少要有标题信息才有意义（全空标题视为无效载荷）
+    if (items.some((x) => x.title && !/^第 \d+ 页$/.test(x.title))) return items
+  }
+  return []
+}
+
+function deriveOutlineFromMessages(msgs: { role?: string; raw?: string }[]): { id?: string; title: string; kind?: string; note?: string }[] {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role !== 'assistant') continue
+    const ol = parseOutlinePayload(msgs[i].raw)
+    if (ol.length) return ol
+  }
+  return []
+}
 
 function syncOutlineDraft() {
   if (outlineDirty.value) return
   const ol = latestSpec.value?.outline ?? []
-  // 新规格没有大纲时保留旧草稿（文案/排版阶段只带 sections，不能把工作区清空）
   if (ol.length) {
     outlineDraft.value = ol.map((o, i) => ({
       id: String(o.id ?? `p${i + 1}`), title: String(o.title ?? `第 ${i + 1} 页`),
       kind: String(o.kind ?? 'bullets'), note: String(o.note ?? ''),
     }))
+  } else {
+    // 对话驱动：从最新的 assistant 消息里识别结构化大纲（Skill 生成 PPT 大纲也能实时同步）
+    const derived = deriveOutlineFromMessages(messages.value)
+    // 当前会话没有大纲时**清空**（不保留上个会话残留）：始终以本会话实际内容为准
+    outlineDraft.value = derived
   }
   const secs = latestSpec.value?.sections ?? []
   if (secs.length && !sectionDirty.value) {
@@ -256,6 +499,8 @@ function syncOutlineDraft() {
       body: Array.isArray(s.body) ? (s.body as unknown[]).map((x) => String(x)).join('\n') : String((s.body ?? '') as unknown),
       open: false,
     }))
+  } else if (!secs.length && !sectionDirty.value) {
+    sectionPreview.value = []
   }
   if (!pptTitle.value && activeConv.value) pptTitle.value = activeConv.value.title
   const t = latestSpec.value?.theme
@@ -289,9 +534,10 @@ async function loadMaterial() {
   }
 }
 
-/* —— 工作台内直接选取素材（报告 / 班级），支持筛选 + 多选 —— */
+/* —— 工作台内直接选取素材（报告总结的报告 / 班级评估），支持切换来源 + 筛选 + 多选 —— */
 const matPicking = ref(false)
 const matLoading = ref(false)
+const matSource = ref<'report' | 'class'>('report')
 const reportOptions = ref<{
   id: string; title: string; type: string; period: string; start: string; end: string
 }[]>([])
@@ -299,21 +545,31 @@ const classOptions = ref<{ id: string; name: string }[]>([])
 const pickReportIds = ref<string[]>([])
 const pickClassId = ref('')
 
-/* 筛选：时间范围 + 报告类型 */
+/* 筛选：关键字 + 时间范围 + 报告类型 */
 const matType = ref('')
 const matStart = ref('')
 const matEnd = ref('')
+const matKeyword = ref('')
 const REPORT_TYPES = [
   { value: '', label: '全部类型' },
   { value: 'daily', label: '日报' },
   { value: 'weekly', label: '周报' },
+  { value: 'monthly', label: '月报' },
   { value: 'quarterly', label: '季度总结' },
   { value: 'yearly', label: '年度总结' },
 ]
+const REPORT_TYPE_LABEL: Record<string, string> = {
+  daily: '日报', weekly: '周报', monthly: '月报', quarterly: '季度总结', yearly: '年度总结',
+}
+function reportTypeLabel(t: string): string {
+  return REPORT_TYPE_LABEL[t] ?? (t || '报告')
+}
 
 const filteredReports = computed(() => {
+  const kw = matKeyword.value.trim().toLowerCase()
   return reportOptions.value.filter((r) => {
     if (matType.value && r.type !== matType.value) return false
+    if (kw && !`${r.title} ${reportTypeLabel(r.type)} ${r.period}`.toLowerCase().includes(kw)) return false
     // 期间与筛选窗口有交集即保留（报告 [start,end] 与 [matStart,matEnd] 相交）
     if (matStart.value && r.end && r.end < matStart.value) return false
     if (matEnd.value && r.start && r.start > matEnd.value) return false
@@ -349,6 +605,7 @@ function resetMatFilters() {
   matType.value = ''
   matStart.value = ''
   matEnd.value = ''
+  matKeyword.value = ''
 }
 
 function fmtDate(v: unknown): string {
@@ -362,24 +619,24 @@ async function openMatPicker() {
   matPicking.value = true
   matLoading.value = true
   resetMatFilters()
+  const ref = (activeConv.value.context_ref || {}) as Record<string, unknown>
+  // 预选：已绑定的报告与班级分别回填
+  const curIds = Array.isArray(ref.ids) ? (ref.ids as unknown[]).map((x) => String(x)) : []
+  if (!curIds.length && ref.id && !ref.class_id) curIds.push(String(ref.id))
+  pickReportIds.value = curIds
+  pickClassId.value = String(ref.class_id ?? '')
+  matSource.value = curIds.length ? 'report' : (pickClassId.value ? 'class' : 'report')
   try {
-    if (activeConv.value.agent_id === 'report_ppt') {
-      const res = await listReports({ mine: true, limit: 100 })
-      reportOptions.value = (res.items ?? []).map((r) => ({
-        id: r.id, title: r.title || '未命名报告', type: String(r.type ?? ''),
-        period: `${fmtDate(r.period_start)} ~ ${fmtDate(r.period_end)}`,
-        start: fmtDate(r.period_start), end: fmtDate(r.period_end),
-      }))
-      // 预选当前已绑定的报告
-      const ref = activeConv.value.context_ref as Record<string, unknown>
-      const cur = ref?.ids
-      if (Array.isArray(cur)) pickReportIds.value = cur.map((x) => String(x))
-      else if (ref?.id) pickReportIds.value = [String(ref.id)]
-      else pickReportIds.value = []
-    } else {
-      const res = await listClasses({ limit: 100 })
-      classOptions.value = (res.items ?? []).map((c) => ({ id: c.id, name: c.name }))
-    }
+    const [reports, classes] = await Promise.all([
+      listReports({ mine: true, limit: 100 }),
+      listClasses({ limit: 100 }),
+    ])
+    reportOptions.value = (reports.items ?? []).map((r) => ({
+      id: r.id, title: r.title || '未命名报告', type: String(r.type ?? ''),
+      period: `${fmtDate(r.period_start)} ~ ${fmtDate(r.period_end)}`,
+      start: fmtDate(r.period_start), end: fmtDate(r.period_end),
+    }))
+    classOptions.value = (classes.items ?? []).map((c) => ({ id: c.id, name: c.name }))
   } catch (e: unknown) {
     wsError.value = e instanceof Error ? e.message : '素材列表加载失败'
   } finally {
@@ -390,31 +647,35 @@ async function openMatPicker() {
 async function confirmMatPick() {
   if (!activeConv.value) return
   wsError.value = ''
+  const picked = reportOptions.value.filter((r) => pickReportIds.value.includes(r.id))
+  const cls = classOptions.value.find((x) => x.id === pickClassId.value)
+  if (!picked.length && !cls) return
   try {
-    if (activeConv.value.agent_id === 'report_ppt') {
-      const picked = reportOptions.value.filter((r) => pickReportIds.value.includes(r.id))
-      if (!picked.length) return
-      const ref: Record<string, unknown> = {
-        kind: 'report',
-        ids: picked.map((r) => r.id),
-        id: picked[0].id,
-        title: picked.map((r) => r.title).join('、'),
-        reports: picked.map((r) => ({ id: r.id, title: r.title, type: r.type, period: r.period })),
-      }
-      await patchConversation(activeConv.value.id, { context_ref: ref })
-      activeConv.value.context_ref = ref
-    } else {
-      const c = classOptions.value.find((x) => x.id === pickClassId.value)
-      if (!c) return
-      const ref = { kind: 'class_ppt', class_id: c.id, title: c.name }
-      await patchConversation(activeConv.value.id, { context_ref: ref })
-      activeConv.value.context_ref = ref
+    const ref: Record<string, unknown> = {}
+    if (picked.length) {
+      ref.kind = 'report'
+      ref.ids = picked.map((r) => r.id)
+      ref.id = picked[0].id
+      ref.title = picked.map((r) => r.title).join('、')
+      ref.reports = picked.map((r) => ({ id: r.id, title: r.title, type: r.type, period: r.period }))
     }
+    if (cls) {
+      ref.class_id = cls.id
+      ref.class_title = cls.name
+      if (!picked.length) { ref.kind = 'class_ppt'; ref.title = cls.name }
+    }
+    await patchConversation(activeConv.value.id, { context_ref: ref })
+    activeConv.value.context_ref = ref
     matPicking.value = false
     await loadMaterial()
   } catch (e: unknown) {
     wsError.value = e instanceof Error ? e.message : '素材绑定失败'
   }
+}
+
+function clearMaterialPick() {
+  pickReportIds.value = []
+  pickClassId.value = ''
 }
 
 function outlineMove(i: number, dir: -1 | 1) {
@@ -555,16 +816,42 @@ function openMenuAt(id: string, el: HTMLElement | null) {
 
 /** 鼠标悬停「更多操作」图标即自动展开对应功能栏 */
 function hoverMenu(id: string, e: MouseEvent) {
+  cancelMenuClose()
   if (menuId.value === id) return
   openMenuAt(id, e.currentTarget as HTMLElement)
 }
 
+/** 鼠标移开图标/菜单后自动收起（在两者之间移动时不闪断） */
+let menuTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleMenuClose() {
+  cancelMenuClose()
+  menuTimer = setTimeout(() => {
+    menuId.value = null
+    menuTimer = null
+  }, 250)
+}
+function cancelMenuClose() {
+  if (menuTimer) {
+    clearTimeout(menuTimer)
+    menuTimer = null
+  }
+}
+
 /** 点击其它区域（菜单与触发图标之外）收起功能栏 */
 function onDocClickForMenu(e: MouseEvent) {
-  if (!menuId.value) return
   const t = e.target as HTMLElement
+  if (!t.closest('.agent-menu') && !t.closest('.agent-more')) agentMenuId.value = null
+  if (!menuId.value) return
   if (t.closest('.conv-menu') || t.closest('.conv-more')) return
   menuId.value = null
+}
+
+/** 点击输入框附件区之外收起「+」展开菜单 */
+function onDocClickForPlus(e: MouseEvent) {
+  if (!plusOpen.value) return
+  const t = e.target as HTMLElement
+  if (t.closest('.composer-left')) return
+  plusOpen.value = false
 }
 
 function onConvRowClick(c: ConversationOut, e: MouseEvent) {
@@ -655,11 +942,6 @@ async function batchDelete() {
   }
 }
 
-async function removeMemory(id: string) {
-  await deleteMemory(id)
-  memories.value = memories.value.filter((m) => m.id !== id)
-}
-
 const SPEC_KEYS = ['options', 'outline', 'sections', 'theme', 'slides']
 
 function isAgentPayloadBlock(body: string): boolean {
@@ -739,27 +1021,43 @@ function retryLast() {
 }
 
 async function send(preset?: { text: string; stage?: string }) {
+  // 附件仍在后台上传时禁止发送：否则 pendingAttachments 此刻为空，附件会被静默丢弃，
+  // 用户只看到一句纯文字、Agent 也拿不到图片——这正是「上传了图片却没传进对话」的根源之一。
+  if (uploadingAttachment.value && !preset) {
+    attachError.value = '图片/文档还在上传，请稍候再发送…'
+    return
+  }
   const text = preset?.text ?? input.value.trim()
-  if (!text || !activeConv.value || streaming.value) return
+  const atts = preset ? [] : [...pendingAttachments.value]
+  if ((!text && !atts.length) || !activeConv.value || streaming.value) return
   const targetStage = preset?.stage ?? activeConv.value.stage ?? 'chat'
-  if (!preset) input.value = ''
+  if (!preset) {
+    input.value = ''
+    pendingAttachments.value = []
+    requestAnimationFrame(() => resizeInput())
+  }
   error.value = ''
   // 记录最后一次发送：失败/超时后可一键重试
   lastSend.value = { text, stage: targetStage }
-  messages.value.push({ role: 'user', content: text })
+  messages.value.push({ role: 'user', content: text, attachments: atts.length ? atts : undefined })
   streaming.value = true
   streamBuf.value = ''
   phaseLabel.value = '准备中'
+  liveTools.value = []
   await scrollBottom()
   let full = ''
   let timedOut = false
   let doneOptions: ChatOption[] | undefined
   let doneStage: string | undefined
   let doneHasSpec = false
+  let doneRagAuto = false
   let doneTitle: string | undefined
+  let doneHits: RagHit[] | undefined
+  let doneRetrieval: RetrievalInfo | undefined
   let doneToolTrace: { seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null }[] | undefined
   let doneToolRounds = 0
   let doneToolDegraded = false
+  let doneMcpTrace: { step: string; ok: boolean; ms: number; detail: string }[] | undefined
     if (llmConfigs.value.length === 0) await loadLLMConfigs()
   const once = useRagOnce.value
   useRagOnce.value = false
@@ -769,7 +1067,7 @@ async function send(preset?: { text: string; stage?: string }) {
   try {
     await agentChatStream(
       activeConv.value.id,
-      { stage: targetStage, message: text, state: {}, ...(once ? { use_rag: true } : {}), ...(activeConfigId.value ? { config_id: activeConfigId.value } : {}) },
+      { stage: targetStage, message: text, state: {}, ...(once ? { use_rag: true } : {}), ...(activeConfigId.value ? { config_id: activeConfigId.value } : {}), ...(atts.length ? { attachments: atts } : {}) },
       (d) => {
         full += d
         streamBuf.value = full
@@ -783,15 +1081,38 @@ async function send(preset?: { text: string; stage?: string }) {
         doneOptions = info.options
         doneStage = info.stage
         doneHasSpec = !!info.has_spec
+        doneRagAuto = !!info.rag_auto
         doneTitle = info.title
+        doneHits = info.hits?.length ? info.hits : undefined
+        doneRetrieval = info.retrieval ?? undefined
         doneToolTrace = info.tool_trace
         doneToolRounds = info.tool_rounds ?? 0
         doneToolDegraded = !!info.tool_degraded
+        doneMcpTrace = info.mcp_trace
       },
       {
         idleTimeoutMs: 90000,
         onTimeout: () => {
           timedOut = true
+        },
+        onToolsLive: (steps) => {
+          liveTools.value = steps
+          scrollBottom()
+        },
+        onToolStep: (step) => {
+          const list = liveTools.value.slice()
+          const idx = list.findIndex((t) => t.seq === step.seq)
+          const running = step.phase === 'start'
+          const entry = {
+            seq: step.seq, tool: step.tool, args: step.args,
+            ok: running ? true : step.ok,
+            summary: step.summary, error: running ? null : (step.ok ? null : step.summary),
+            running,
+          }
+          if (idx >= 0) list[idx] = entry
+          else list.push(entry)
+          liveTools.value = list
+          scrollBottom()
         },
       },
     )
@@ -809,23 +1130,37 @@ async function send(preset?: { text: string; stage?: string }) {
     messages.value.push({
       role: 'assistant',
       content: stripJsonBlocks(full),
+      raw: full,
       options: doneOptions ?? null,
       spec: null,
-      citations: doneToolTrace?.length
-        ? { tools: doneToolTrace, rounds: doneToolRounds, degraded: doneToolDegraded }
+      citations: (doneToolTrace?.length || doneMcpTrace?.length || doneRagAuto || doneHits?.length)
+        ? {
+          tools: doneToolTrace, rounds: doneToolRounds, degraded: doneToolDegraded,
+          mcp_trace: doneMcpTrace, ...(doneRagAuto ? { rag_auto: true } : {}),
+          ...(doneHits?.length ? { hits: doneHits } : {}),
+          ...(doneRetrieval ? { retrieval: doneRetrieval } : {}),
+        }
         : undefined,
     })
     if (timedOut) {
       error.value = '连接中断（90 秒无任何响应，含服务端心跳），已保留已生成的内容；可点重试继续'
     }
-    if (doneHasSpec && activeConv.value) {
+    // 本轮真正跑过 Skill（写页/出片）时，成品可能变了（调整页/重新出片）：
+    // 无论后端是否给出新 spec，都回拉一次消息，并以服务端 spec 为准强制同步大纲，
+    // 避免工作区大纲停留在第一版（页数/标题/SVG 不刷新）。
+    const ranSkill = (doneToolTrace ?? []).some(
+      (t) => t.tool === 'write_skill_file' || t.tool === 'run_skill_script',
+    )
+    if ((doneHasSpec || ranSkill) && activeConv.value) {
       // 新规格落库后回填（含 outline/sections），工作区随之更新
       try {
         const res = await getConversationMessages(activeConv.value.id)
         messages.value = res.items.map((m) => ({
-          role: m.role, content: stripJsonBlocks(m.content), citations: m.citations,
-          options: m.options ?? null, spec: m.spec ?? null,
+          role: m.role, content: stripJsonBlocks(m.content), raw: m.content, citations: m.citations,
+          options: m.options ?? null, spec: m.spec ?? null, attachments: attachmentsOf(m),
         }))
+        // Skill 出片后服务端回填的是「最新成品」规格：覆盖用户本地草稿，保证对齐最后一版
+        outlineDirty.value = false
       } catch {
         /* 保持本地消息 */
       }
@@ -836,8 +1171,15 @@ async function send(preset?: { text: string; stage?: string }) {
       // 用户手动暂停：保留已输出的片段，不报错
       if (full.trim()) {
         messages.value.push({
-          role: 'assistant', content: stripJsonBlocks(full), options: doneOptions ?? null,
-          citations: doneToolTrace?.length ? { tools: doneToolTrace, rounds: doneToolRounds } : undefined,
+          role: 'assistant', content: stripJsonBlocks(full), raw: full, options: doneOptions ?? null,
+          citations: (doneToolTrace?.length || doneMcpTrace?.length || doneRagAuto || doneHits?.length)
+            ? {
+              tools: doneToolTrace, rounds: doneToolRounds, mcp_trace: doneMcpTrace,
+              ...(doneRagAuto ? { rag_auto: true } : {}),
+              ...(doneHits?.length ? { hits: doneHits } : {}),
+              ...(doneRetrieval ? { retrieval: doneRetrieval } : {}),
+            }
+            : undefined,
         })
       }
     } else {
@@ -849,6 +1191,7 @@ async function send(preset?: { text: string; stage?: string }) {
     if (abortCtrl.value === ctrl) abortCtrl.value = null
     streaming.value = false
     streamBuf.value = ''
+    liveTools.value = []
     conversations.value = await listConversations()
     await scrollBottom()
   }
@@ -913,6 +1256,8 @@ async function loadKb() {
   try {
     myDocs.value = await listMyDocs()
     plazaDocs.value = await listPlaza()
+    plazaSkills.value = await listPlazaSkills()
+    plazaMcps.value = await listPlazaMcps()
   } catch (e: unknown) {
     kbError.value = e instanceof Error ? e.message : '知识库加载失败'
   } finally {
@@ -947,6 +1292,8 @@ function startKbPoll() {
 }
 
 watch(tab, (t) => {
+  if (t === 'mcp' || t === 'skill') void loadExt()
+  if (t === 'skill') void loadSandbox()
   if (t !== 'chat') {
     void loadKb().then(() => startKbPoll())
   } else {
@@ -976,19 +1323,132 @@ async function doToggleSearch(d: KnowledgeDoc) {
   }
 }
 
-async function doUpload() {
-  if (!upFile.value || !upTitle.value.trim() || !upDesc.value.trim() || uploading.value) return
-  uploading.value = true
+async function doToggleParentVisible(d: KnowledgeDoc) {
   kbError.value = ''
   try {
-    await uploadDoc(upFile.value, upTitle.value.trim(), upDesc.value.trim())
-    upFile.value = null
-    upTitle.value = ''
-    upDesc.value = ''
-    await loadKb()
-    startKbPoll()
+    const updated = await toggleDocParentVisible(d.id)
+    d.visible_to_parents = updated.visible_to_parents
   } catch (e: unknown) {
-    kbError.value = e instanceof Error ? e.message : '上传失败'
+    kbError.value = e instanceof Error ? e.message : '切换失败'
+  }
+}
+
+async function genDesc(item: (typeof upItems.value)[number]) {
+  if (!autoDesc.value) return
+  if (!descConfigId.value) {
+    kbError.value = '请选择用于生成描述的模型'
+    return
+  }
+  item.descLoading = true
+  item.descError = ''
+  try {
+    const r = await describeKnowledgeDoc(item.file, descConfigId.value, item.title)
+    item.desc = r.description
+  } catch (e: unknown) {
+    const status = (e as { response?: { status?: number } })?.response?.status
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    if (status === 403) {
+      showNoPermDialog('暂无「上传知识库文档」权限，请联系管理员在「权限管理」中开通。')
+    }
+    item.descError = detail || (e instanceof Error ? e.message : '生成失败')
+    kbError.value = `「${item.file.name}」描述生成失败：${item.descError}`
+  } finally {
+    item.descLoading = false
+  }
+}
+
+async function genAllDescs() {
+  if (!autoDesc.value || !descConfigId.value || descGenerating.value || uploading.value) return
+  const targets = upItems.value.filter((i) => !i.desc.trim())
+  if (!targets.length) {
+    kbNotice.value = '所有文件都已有描述'
+    return
+  }
+  descGenerating.value = true
+  kbError.value = ''
+  kbNotice.value = ''
+  try {
+    for (const item of targets) await genDesc(item)
+  } finally {
+    descGenerating.value = false
+  }
+}
+
+async function doUpload() {
+  if (!canUploadDoc.value) {
+    showNoPermDialog('暂无「上传知识库文档」权限，请联系管理员在「权限管理」中开通。')
+    return
+  }
+  if (!upItems.value.length || uploading.value) return
+  if (upItems.value.some((i) => !i.title.trim())) {
+    kbError.value = '请为每个文件填写标题'
+    return
+  }
+  uploading.value = true
+  kbError.value = ''
+  kbNotice.value = ''
+  try {
+    if (autoDesc.value) {
+      if (!descConfigId.value) {
+        kbError.value = '请选择用于生成描述的模型，或关闭 AI 自动生成描述'
+        return
+      }
+      const missing = upItems.value.filter((i) => !i.desc.trim())
+      for (const item of missing) {
+        await genDesc(item)
+        if (!item.desc.trim()) {
+          kbError.value = `「${item.file.name}」缺少描述，请重试生成或手动填写`
+          return
+        }
+      }
+    }
+    if (upItems.value.some((i) => !i.desc.trim())) {
+      kbError.value = '请为每个文件填写描述，或开启 AI 自动生成描述'
+      return
+    }
+    upItems.value.forEach((i) => {
+      i.status = 'uploading'
+      i.error = ''
+    })
+    const res = await uploadDocs(
+      upItems.value.map((i) => i.file),
+      '',
+      upItems.value.map((i) => i.title.trim()),
+      upItems.value.map((i) => i.desc.trim()),
+    )
+    const okNames = new Set(res.created.map((d) => d.file_name))
+    const skipNames = new Set(res.skipped.map((s) => s.file))
+    const failMap = new Map(res.failed.map((f) => [f.file, f.error]))
+    for (const item of upItems.value) {
+      const fail = failMap.get(item.file.name)
+      if (fail) {
+        item.status = 'error'
+        item.error = fail
+      } else if (okNames.has(item.file.name) || skipNames.has(item.file.name)) {
+        item.status = 'ok'
+      }
+    }
+    const failed = res.counts.failed
+    const parts = [`成功 ${res.counts.created} 个`]
+    if (res.counts.skipped) parts.push(`跳过重复 ${res.counts.skipped} 个`)
+    if (failed) parts.push(`失败 ${failed} 个`)
+    kbNotice.value = `批量上传完成：${parts.join('，')}`
+    if (failed) {
+      upItems.value = upItems.value.filter((i) => i.status === 'error')
+    } else {
+      upItems.value = []
+    }
+    if (res.counts.created) {
+      await loadKb()
+      startKbPoll()
+    }
+  } catch (e: unknown) {
+    const status = (e as { response?: { status?: number } })?.response?.status
+    if (status === 403) {
+      showNoPermDialog('暂无「上传知识库文档」权限，请联系管理员在「权限管理」中开通。')
+    } else {
+      kbError.value = e instanceof Error ? e.message : '上传失败'
+    }
   } finally {
     uploading.value = false
   }
@@ -1012,17 +1472,198 @@ async function doCollect(d: KnowledgeDoc) {
   await loadKb()
 }
 
-function onFileChange(e: Event) {
-  const t = e.target as HTMLInputElement
-  upFile.value = t.files?.[0] ?? null
-  if (upFile.value && !upTitle.value) {
-    upTitle.value = upFile.value.name.replace(/\.[^.]+$/, '')
+/** 广场 Skill 收录/取消：收录后可在 Agent 表单里按需绑定到 Agent */
+async function doCollectSkill(s: AgentSkill) {
+  if (s.collected) await uncollectSkill(s.id)
+  else await collectSkill(s.id)
+  await Promise.all([loadKb(), loadExt()])
+}
+
+/** 我的 Skill 发布/下架：发布后全校教师可见可收录 */
+async function doPublishSkill(s: AgentSkill) {
+  const updated = await publishSkill(s.id)
+  Object.assign(s, updated)
+  await loadKb()
+}
+async function doUnpublishSkill(s: AgentSkill) {
+  const updated = await unpublishSkill(s.id)
+  Object.assign(s, updated)
+  await loadKb()
+}
+
+/** 广场 MCP 收录/取消 */
+async function doCollectMcp(m: AgentMcp) {
+  if (m.collected) await uncollectMcp(m.id)
+  else await collectMcp(m.id)
+  await Promise.all([loadKb(), loadExt()])
+}
+
+/** 我的 MCP 发布/下架 */
+async function doPublishMcp(m: AgentMcp) {
+  const updated = await publishMcp(m.id)
+  Object.assign(m, updated)
+  await loadKb()
+}
+async function doUnpublishMcp(m: AgentMcp) {
+  const updated = await unpublishMcp(m.id)
+  Object.assign(m, updated)
+  await loadKb()
+}
+
+function addUpFiles(files: FileList | File[]) {
+  const allowed = /\.(txt|md|markdown|pdf|docx)$/i
+  const existing = new Set(upItems.value.map((i) => `${i.file.name}:${i.file.size}`))
+  for (const file of Array.from(files)) {
+    if (upItems.value.length >= MAX_BATCH_FILES) {
+      kbError.value = `单次最多上传 ${MAX_BATCH_FILES} 个文件`
+      break
+    }
+    if (!allowed.test(file.name)) {
+      kbError.value = `暂不支持的文件类型：${file.name}`
+      continue
+    }
+    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      kbError.value = `文件超过 ${MAX_UPLOAD_MB}MB：${file.name}`
+      continue
+    }
+    const key = `${file.name}:${file.size}`
+    if (existing.has(key)) continue
+    existing.add(key)
+    upItems.value.push({
+      file,
+      title: file.name.replace(/\.[^.]+$/, ''),
+      desc: '',
+      status: 'pending',
+    })
   }
 }
 
-function citationsOf(m: { citations?: Record<string, unknown> | null }): { title: string; text: string; similarity?: number }[] {
-  const hits = (m.citations as { hits?: { title: string; text: string; similarity?: number }[] } | null)?.hits
+function onFileChange(e: Event) {
+  const t = e.target as HTMLInputElement
+  addUpFiles(t.files ?? [])
+  t.value = ''
+}
+
+function onDropFiles(e: DragEvent) {
+  const files = e.dataTransfer?.files
+  if (files?.length) addUpFiles(files)
+}
+
+function removeUpItem(index: number) {
+  upItems.value.splice(index, 1)
+}
+
+function clearUpItems() {
+  upItems.value = []
+  kbNotice.value = ''
+  kbError.value = ''
+}
+
+function formatFileSize(size: number) {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+function citationsOf(m: { citations?: Record<string, unknown> | null }): RagHit[] {
+  const hits = (m.citations as { hits?: RagHit[] } | null)?.hits
   return Array.isArray(hits) ? hits : []
+}
+
+/** 命中片段的展示/排序分：重排分优先，否则向量相似度。 */
+function hitScore(c: RagHit): number {
+  if (typeof c.rerank_score === 'number') return c.rerank_score
+  return typeof c.similarity === 'number' ? c.similarity : 0
+}
+
+/** 命中的分数标为主分：有重排分时标注为「重排」，否则为「相似度」。 */
+function hitScoreLabel(c: RagHit): string {
+  return typeof c.rerank_score === 'number' ? '重排' : '相似度'
+}
+
+/** 本次检索诊断（向量/关键词/重排是否生效）。 */
+function retrievalOf(m: { citations?: Record<string, unknown> | null }): RetrievalInfo | null {
+  const r = (m.citations as { retrieval?: RetrievalInfo } | null)?.retrieval
+  return r && typeof r === 'object' ? r : null
+}
+
+/** 按有效分降序返回命中（兼容历史消息：旧数据未排序也能正确展示）。 */
+function sortedCitationsOf(m: { citations?: Record<string, unknown> | null }): RagHit[] {
+  return [...citationsOf(m)].sort((a, b) => hitScore(b) - hitScore(a))
+}
+
+/* —— 对话附件（图片/文档）：读取、上传、移除、自动撑高 —— */
+function attachmentsOf(m: { citations?: Record<string, unknown> | null }): ChatAttachment[] {
+  const arr = (m.citations as { attachments?: unknown } | null)?.attachments
+  return Array.isArray(arr) ? (arr as ChatAttachment[]) : []
+}
+
+/** 消息附件：优先取 message.attachments（本地刚发送），回退 citations.attachments（历史重载），去重合并。 */
+function msgAtts(m: { attachments?: ChatAttachment[]; citations?: Record<string, unknown> | null }): ChatAttachment[] {
+  const local = Array.isArray(m.attachments) ? m.attachments : []
+  const fromCit = attachmentsOf(m)
+  if (!local.length) return fromCit
+  if (!fromCit.length) return local
+  const seen = new Set(local.map((a) => a.id))
+  return [...local, ...fromCit.filter((a) => !seen.has(a.id))]
+}
+
+function isImgAtt(a: ChatAttachment): boolean {
+  return a.kind === 'image'
+}
+
+function triggerImgPick() {
+  plusOpen.value = false
+  fileImgInput.value?.click()
+}
+function triggerDocPick() {
+  plusOpen.value = false
+  fileDocInput.value?.click()
+}
+
+async function onAttachPicked(e: Event, expect: 'image' | 'doc') {
+  const t = e.target as HTMLInputElement
+  const file = t.files?.[0]
+  t.value = ''
+  if (!file || !activeConv.value) return
+  attachError.value = ''
+  uploadingAttachment.value = true
+  try {
+    const att = await uploadChatAttachment(activeConv.value.id, file)
+    if (att.kind !== expect && expect === 'image') {
+      // 用户选错类型（图片入口选了文档）也允许，提示即可
+    }
+    pendingAttachments.value = [...pendingAttachments.value, att]
+  } catch (err: unknown) {
+    const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+    attachError.value = (typeof detail === 'string' && detail) || (err instanceof Error ? err.message : '附件上传失败')
+  } finally {
+    uploadingAttachment.value = false
+  }
+}
+
+function removeAttachment(id: string) {
+  pendingAttachments.value = pendingAttachments.value.filter((a) => a.id !== id)
+}
+
+function resizeInput() {
+  const el = inputEl.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+}
+
+function onInputKey(e: KeyboardEvent) {
+  // Enter 发送，Shift+Enter 换行（发送后重置高度）
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    void send().then(() => resizeInput())
+  }
+}
+
+/* —— 本条是否触发了"自动引用知识库"（开关关闭时按需检索了一次） —— */
+function ragAutoOf(m: { citations?: Record<string, unknown> | null }): boolean {
+  return (m.citations as { rag_auto?: boolean } | null)?.rag_auto === true
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -1036,15 +1677,26 @@ const TOOL_LABELS: Record<string, string> = {
   sql_list_tables: '数据库·表清单',
   sql_describe_table: '数据库·表结构',
   sql_query: '数据库查询',
+  web_search: '联网搜索',
+  run_skill_script: 'Skill脚本执行',
+  write_skill_file: 'Skill文件写入',
+  read_skill_file: 'Skill文件读取',
 }
 
 function toolsOf(m: { citations?: Record<string, unknown> | null }): {
-  seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null;
+  seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string;
+  files?: { 名?: string; name?: string; 下载?: string; url?: string }[]; error?: string | null;
 }[] {
   const arr = (m.citations as { tools?: unknown } | null)?.tools
   return Array.isArray(arr) ? (arr as {
-    seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string; error?: string | null;
+    seq: number; tool: string; args: Record<string, unknown>; ok: boolean; summary: string;
+    files?: { 名?: string; name?: string; 下载?: string; url?: string }[]; error?: string | null;
   }[]) : []
+}
+/* —— MCP 调用链路（citations.mcp_trace）：规划→握手→调用→结果，每步 ok/ms/detail —— */
+function mcpTraceOf(m: { citations?: Record<string, unknown> | null }): { step: string; ok: boolean; ms: number; detail: string }[] {
+  const arr = (m.citations as { mcp_trace?: unknown } | null)?.mcp_trace
+  return Array.isArray(arr) ? (arr as { step: string; ok: boolean; ms: number; detail: string }[]) : []
 }
 
 function toolArgsText(args: Record<string, unknown>): string {
@@ -1057,9 +1709,109 @@ function toolArgsText(args: Record<string, unknown>): string {
       }
       return `周期=${labels[String(v)] ?? String(v)}`
     }
+    if (k === 'skill') return `Skill=${String(v)}`
+    if (k === 'path') return `${String(v).split('/').pop()}`
+    if (k === 'args' && Array.isArray(v)) return v.length ? `参数=${v.join(' ')}` : '无参数'
     return `${k}=${String(v)}`
   })
   return parts.length ? parts.join('，') : '默认参数'
+}
+
+/* —— 工具结果里的生成文件（run_skill_script 回传的下载链接）渲染为可点按钮 —— */
+function parseFiles(step: {
+  files?: { 名?: string; name?: string; 下载?: string; url?: string }[]; summary?: string
+}): { 名?: string; name?: string; 下载?: string; url?: string; 字节?: number }[] {
+  // 优先用结构化 files 字段（后端已单独下发，不受摘要截断影响）
+  if (Array.isArray(step?.files) && step.files.length) return step.files
+  // 兜底：从 summary 里解析（摘要可能被追加“…（已截断）”，故用非严格提取）
+  const s = step?.summary || ''
+  const m = s.match(/"生成文件"\s*:\s*(\[[\s\S]*?\])/)
+  if (!m) return []
+  try {
+    const arr = JSON.parse(m[1])
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
+}
+
+/* —— 单条消息里所有工具产出的文件（去重）：顶部醒目下载区用 —— */
+function msgFiles(m: { citations?: Record<string, unknown> | null }): {
+  名?: string; name?: string; 下载?: string; url?: string; 字节?: number
+}[] {
+  const seen = new Set<string>()
+  const out: { 名?: string; name?: string; 下载?: string; url?: string; 字节?: number }[] = []
+  for (const t of toolsOf(m)) {
+    for (const f of parseFiles(t)) {
+      const url = f['下载'] ?? f.url ?? ''
+      if (!url || seen.has(url)) continue
+      seen.add(url)
+      out.push(f)
+    }
+  }
+  return out
+}
+
+/* —— 整个会话的全部产出文件（成果 tab 用）：按时间倒序、跨消息去重 —— */
+function convFiles(messages: { citations?: Record<string, unknown> | null }[]): {
+  名?: string; name?: string; 下载?: string; url?: string; 字节?: number
+}[] {
+  const seen = new Set<string>()
+  const out: { 名?: string; name?: string; 下载?: string; url?: string; 字节?: number }[] = []
+  for (const m of messages) {
+    for (const f of msgFiles(m)) {
+      const url = f['下载'] ?? f.url ?? ''
+      if (!url || seen.has(url)) continue
+      seen.add(url)
+      out.push(f)
+    }
+  }
+  return out.reverse()
+}
+
+function fmtBytes(n?: number): string {
+  if (!n || n < 0) return ''
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+function fileIcon(name?: string): string {
+  const ext = String(name ?? '').split('.').pop()?.toLowerCase() ?? ''
+  if (ext === 'pptx' || ext === 'ppt') return 'ppt'
+  if (ext === 'pdf') return 'pdf'
+  if (ext === 'docx' || ext === 'doc') return 'doc'
+  if (ext === 'xlsx' || ext === 'xls' || ext === 'csv') return 'xls'
+  if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'svg') return 'img'
+  if (ext === 'json') return 'json'
+  return 'file'
+}
+
+function extLabel(name?: string): string {
+  return (String(name ?? '').split('.').pop() ?? '?').toUpperCase().slice(0, 4)
+}
+
+/* —— 代码块「运行」预览：iframe 内联渲染 svg/html/xml —— */
+const preview = ref<{ code: string; lang: string } | null>(null)
+function openCodePreview(code: string, lang: string) {
+  preview.value = { code, lang }
+}
+function openTabPreview() {
+  if (!preview.value) return
+  const w = window.open('', '_blank')
+  if (w) {
+    w.document.write(previewSrc())
+    w.document.close()
+  }
+}
+function previewSrc(): string {
+  if (!preview.value) return ''
+  const { code, lang } = preview.value
+  const l = (lang || '').toLowerCase()
+  if (['svg', 'xml'].includes(l) || /^\s*<svg[\s>]/i.test(code)) {
+    return `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;height:100%;display:flex;align-items:center;justify-content:center;background:#0b1220}svg{max-width:96%;max-height:96%;height:auto;box-shadow:0 8px 40px rgba(0,0,0,.5);border-radius:8px;background:#fff}</style></head><body>${code}</body></html>`
+  }
+  return code
 }
 
 function statusText(d: KnowledgeDoc): string {
@@ -1082,9 +1834,378 @@ function progressLabel(p?: { stage: string; percent: number; detail: string } | 
   return `${name} ${p.percent}%`
 }
 
+/* —— Agent 扩展：自定义 Agent / MCP / Skill / 全局设置 —— */
+const customAgents = ref<CustomAgent[]>([])
+const agentMenuId = ref<string | null>(null)
+function customOf(a: AgentInfo): CustomAgent | undefined {
+  return customAgents.value.find((c) => c.agent_id === a.id)
+}
+const mcps = ref<AgentMcp[]>([])
+const privateMcps = computed(() => mcps.value.filter((m) => !m.collected_from_plaza))
+const adoptedMcps = computed(() => mcps.value.filter((m) => m.collected_from_plaza))
+const mcpSub = ref<'private' | 'collected'>('private')
+const skillSub = ref<'private' | 'collected'>('private')
+const skills = ref<AgentSkill[]>([])
+const collectedPlazaSkills = computed(() => plazaSkills.value.filter((s) => s.collected && !s.mine))
+const globMcp = ref<string[]>([])
+const globSkill = ref<string[]>([])
+const extLoading = ref(false)
+const extError = ref('')
+const showAgentForm = ref(false)
+const editingAgent = ref<CustomAgent | null>(null)
+const agentForm = ref({ name: '', description: '', system_prompt: '', supports_rag: true, icon: 'assistant', mcp_ids: [] as string[], skill_ids: [] as string[] })
+const showMcpForm = ref(false)
+const editingMcp = ref<AgentMcp | null>(null)
+const mcpForm = ref({ name: '', kind: 'streamable_http', endpoint: '', description: '', enabled: true })
+const showSkillForm = ref(false)
+const editingSkill = ref<AgentSkill | null>(null)
+const skillForm = ref({ name: '', description: '', content: '', enabled: true })
+
+async function loadExt() {
+  extLoading.value = true
+  extError.value = ''
+  try {
+    const [ca, m, s, g] = await Promise.all([listCustomAgents(), listMcps(), listSkills(), getAgentGlobal()])
+    customAgents.value = ca
+    mcps.value = m
+    skills.value = s
+    globMcp.value = g.default_mcp_ids || []
+    globSkill.value = g.default_skill_ids || []
+    // 自定义 Agent 并入左侧可选列表（custom 标记避免与内置混淆）
+    for (const c of ca) {
+      if (!agents.value.some((a) => a.id === c.agent_id)) {
+        agents.value.push({ id: c.agent_id, name: c.name, description: c.description, context_types: [], supports_rag: c.supports_rag, icon: c.icon, stages: c.stages } as AgentInfo)
+      }
+    }
+  } catch (e: unknown) {
+    extError.value = e instanceof Error ? e.message : '扩展配置加载失败'
+  } finally {
+    extLoading.value = false
+  }
+}
+
+function openAgentCreate() {
+  editingAgent.value = null
+  agentForm.value = { name: '', description: '', system_prompt: '', supports_rag: true, icon: 'assistant', mcp_ids: [], skill_ids: [] }
+  showAgentForm.value = true
+  void loadKb()
+}
+function openAgentEdit(c: CustomAgent) {
+  editingAgent.value = c
+  agentForm.value = { name: c.name, description: c.description, system_prompt: c.system_prompt, supports_rag: c.supports_rag, icon: c.icon, mcp_ids: [...(c.mcp_ids || [])], skill_ids: [...(c.skill_ids || [])] }
+  showAgentForm.value = true
+  void loadKb()
+}
+async function saveAgent() {
+  if (!agentForm.value.name.trim()) { extError.value = '请填写 Agent 名称'; return }
+  const payload = { ...agentForm.value, name: agentForm.value.name.trim(), stages: [{ key: 'chat', label: '智能问答', desc: '直接提问', prompt_stage: 'chat' }] }
+  if (editingAgent.value) {
+    const updated = await patchCustomAgent(editingAgent.value.agent_id, payload)
+    Object.assign(editingAgent.value, updated)
+    const hit = agents.value.find((a) => a.id === updated.agent_id)
+    if (hit) { hit.name = updated.name; hit.description = updated.description }
+  } else {
+    const created = await createCustomAgent(payload)
+    customAgents.value.unshift(created)
+    agents.value.push({ id: created.agent_id, name: created.name, description: created.description, context_types: [], supports_rag: created.supports_rag, icon: created.icon, stages: created.stages } as AgentInfo)
+  }
+  showAgentForm.value = false
+  void loadExt()
+}
+async function removeAgent(c: CustomAgent) {
+  await deleteCustomAgent(c.agent_id)
+  customAgents.value = customAgents.value.filter((x) => x.agent_id !== c.agent_id)
+  agents.value = agents.value.filter((a) => a.id !== c.agent_id)
+  if (selectedAgent.value === c.agent_id) selectedAgent.value = agents.value[0]?.id ?? ''
+}
+
+function openMcpCreate() {
+  editingMcp.value = null
+  mcpForm.value = { name: '', kind: 'streamable_http', endpoint: '', description: '', enabled: true }
+  showMcpForm.value = true
+}
+function openMcpEdit(m: AgentMcp) {
+  editingMcp.value = m
+  mcpForm.value = { name: m.name, kind: m.kind || 'streamable_http', endpoint: m.endpoint, description: m.description, enabled: m.enabled }
+  showMcpForm.value = true
+}
+async function saveMcp() {
+  if (!mcpForm.value.name.trim()) { extError.value = '请填写 MCP 名称'; return }
+  const payload = { ...mcpForm.value, name: mcpForm.value.name.trim(), config: editingMcp.value ? editingMcp.value.config ?? {} : {} }
+  if (editingMcp.value) {
+    const updated = await patchMcp(editingMcp.value.id, payload)
+    Object.assign(editingMcp.value, updated)
+  } else {
+    mcps.value.unshift(await createMcp(payload))
+  }
+  showMcpForm.value = false
+}
+async function removeMcp(m: AgentMcp) {
+  if (!confirm(`删除 MCP「${m.name}」？已绑定的 Agent/全局配置将自动失效该项。`)) return
+  await deleteMcp(m.id)
+  mcps.value = mcps.value.filter((x) => x.id !== m.id)
+}
+async function toggleMcp(m: AgentMcp) {
+  const updated = await patchMcp(m.id, { name: m.name, kind: m.kind, endpoint: m.endpoint, description: m.description, config: m.config, enabled: !m.enabled })
+  m.enabled = updated.enabled
+}
+
+/* —— MCP 测试连接：握手 + tools/list，结果弹窗展示工具清单与 trace —— */
+const showMcpTest = ref(false)
+const mcpTestTarget = ref<AgentMcp | null>(null)
+const mcpTestLoading = ref(false)
+const mcpTestResult = ref<{ ok: boolean; tools: { name: string; description: string }[]; trace: { step: string; ok: boolean; ms: number; detail: string }[] } | null>(null)
+async function openMcpTest(m: AgentMcp) {
+  mcpTestTarget.value = m
+  mcpTestResult.value = null
+  mcpTestLoading.value = true
+  showMcpTest.value = true
+  try {
+    mcpTestResult.value = await testMcp(m.id)
+  } catch (e: unknown) {
+    mcpTestResult.value = { ok: false, tools: [], trace: [{ step: 'test', ok: false, ms: 0, detail: e instanceof Error ? e.message : '测试失败' }] }
+  } finally {
+    mcpTestLoading.value = false
+  }
+}
+
+function openSkillCreate() {
+  editingSkill.value = null
+  skillForm.value = { name: '', description: '', content: '', enabled: true }
+  showSkillForm.value = true
+}
+function openSkillEdit(s: AgentSkill) {
+  editingSkill.value = s
+  skillForm.value = { name: s.name, description: s.description, content: s.content, enabled: s.enabled }
+  showSkillForm.value = true
+}
+async function saveSkill() {
+  if (!skillForm.value.name.trim()) { extError.value = '请填写 Skill 名称'; return }
+  if (!skillForm.value.content.trim() && !(editingSkill.value?.files?.length)) { extError.value = '请填写 Skill 指令内容，或上传含 SKILL.md 的文件包（自动回填）'; return }
+  const payload = { ...skillForm.value, name: skillForm.value.name.trim() }
+  if (editingSkill.value) {
+    const updated = await patchSkill(editingSkill.value.id, payload)
+    Object.assign(editingSkill.value, updated)
+  } else {
+    skills.value.unshift(await createSkill(payload))
+  }
+  showSkillForm.value = false
+}
+/* —— Skill 直接导入（zip 免新建）+ 文件预览 + 受控运行 —— */
+const skillUploading = ref(false)
+const skillZipInput = ref<HTMLInputElement | null>(null)
+/** 导入 ZIP：先过权限开关（管理员可在「权限管理」里对教师关闭），无权则弹提示 */
+function pickSkillZip() {
+  if (!canImportSkill.value) {
+    showNoPermDialog('暂无「导入 ZIP 技能包」权限，请联系管理员在「权限管理」中开通。')
+    return
+  }
+  skillZipInput.value?.click()
+}
+const skillPreview = ref<{ path: string; text: string } | null>(null)
+const skillRunOut = ref<{ skillId: string; path: string; ok: boolean; stdout: string; stderr: string; provider?: string; deps?: string; sandbox_id?: string; phases?: string[]; deps_log?: string } | null>(null)
+async function openSkillPreview(s: AgentSkill, path: string) {
+  try {
+    skillPreview.value = await previewSkillFile(s.id, path)
+  } catch (err: unknown) {
+    extError.value = err instanceof Error ? err.message : '预览失败'
+  }
+}
+async function onSkillImport(e: Event) {
+  const input = e.target as HTMLInputElement
+  const f = input.files?.[0]
+  input.value = ''
+  if (!f) return
+  if (f.size > 100 * 1024 * 1024) {
+    extError.value = `“${f.name}”(${(f.size / 1048576).toFixed(1)}MB)超过 100MB 上限，请精简后重试（解压后总量 ≤80MB、单文件 ≤10MB）`
+    return
+  }
+  skillUploading.value = true
+  try {
+    const created = await importSkillBundle(f)
+    skills.value.unshift(created)
+  } catch (err: unknown) {
+    const status = (err as { response?: { status?: number; data?: { detail?: unknown } } })?.response?.status
+    const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+    if (status === 403) {
+      showNoPermDialog('暂无「导入 ZIP 技能包」权限，请联系管理员在「权限管理」中开通。')
+    } else {
+      extError.value = status === 413
+        ? `上传被网关拒绝（413）：包超过大小上限。请压缩到 100MB 以内（解压后 ≤80MB）再试。${typeof detail === 'string' ? `（${detail}）` : ''}`
+        : (typeof detail === 'string' && detail) || (err instanceof Error ? err.message : '导入失败')
+    }
+  } finally {
+    skillUploading.value = false
+  }
+}
+/* —— 沙箱设置（本地受控 / 阿里云函数计算远程） —— */
+const sandbox = ref({ provider: 'local', endpoint: '', token: '', timeout_s: 30, enabled: true, workspace_id: '', region: 'cn-beijing', template_code: '' })
+const sbHasToken = ref(false)
+const sbOpen = ref(false)
+const sbLoading = ref(false)
+const sbTesting = ref(false)
+const sbMsg = ref('')
+async function loadSandbox() {
+  try {
+    const r = await getSandbox()
+    sandbox.value = { provider: r.provider, endpoint: r.endpoint, token: '', timeout_s: r.timeout_s, enabled: r.enabled, workspace_id: r.workspace_id, region: r.region, template_code: r.template_code }
+    sbHasToken.value = r.has_token
+  } catch { /* 保持默认 */ }
+}
+async function saveSandbox() {
+  sbLoading.value = true
+  sbMsg.value = ''
+  try {
+    const r = await putSandbox({ ...sandbox.value, token: sandbox.value.token || undefined } as { provider: string; endpoint: string; token?: string; timeout_s: number; enabled: boolean; workspace_id: string; region: string; template_code: string })
+    sandbox.value.token = ''
+    sbHasToken.value = r.has_token
+    sbMsg.value = '沙箱配置已保存'
+  } catch (err: unknown) {
+    sbMsg.value = err instanceof Error ? err.message : '保存失败'
+  } finally {
+    sbLoading.value = false
+  }
+}
+async function testSandboxConn() {
+  sbTesting.value = true
+  sbMsg.value = ''
+  try {
+    const r = await testSandbox({ provider: sandbox.value.provider, endpoint: sandbox.value.endpoint, token: sandbox.value.token || undefined, timeout_s: sandbox.value.timeout_s, workspace_id: sandbox.value.workspace_id, region: sandbox.value.region, template_code: sandbox.value.template_code })
+    sbMsg.value = r.ok ? `✓ ${r.detail}` : `✕ ${r.detail}`
+  } catch (err: unknown) {
+    sbMsg.value = `✕ ${err instanceof Error ? err.message : '测试失败'}`
+  } finally {
+    sbTesting.value = false
+  }
+}
+
+/* —— 脚本运行弹窗（含参数输入） —— */
+const runTarget = ref<{ s: AgentSkill; path: string } | null>(null)
+const runArgs = ref('')
+const runLoading = ref(false)
+function openRunModal(s: AgentSkill, path: string) {
+  runTarget.value = { s, path }
+  runArgs.value = ''
+  runLoading.value = false
+}
+async function confirmRun() {
+  const t = runTarget.value
+  if (!t || runLoading.value) return
+  runLoading.value = true
+  try {
+    skillRunOut.value = null
+    const args = runArgs.value.trim() ? runArgs.value.trim().split(/\s+/) : []
+    const r = await runSkillScript(t.s.id, t.path, args)
+    skillRunOut.value = { skillId: t.s.id, path: t.path, ok: r.ok, stdout: r.stdout, stderr: r.stderr, provider: r.provider, deps: (r as { deps?: string }).deps, sandbox_id: (r as { sandbox_id?: string }).sandbox_id, phases: (r as { phases?: string[] }).phases, deps_log: (r as { deps_log?: string }).deps_log }
+  } catch (err: unknown) {
+    extError.value = err instanceof Error ? err.message : '运行失败'
+  } finally {
+    runLoading.value = false
+  }
+}
+async function runSkillFile(s: AgentSkill, path: string) {
+  openRunModal(s, path)
+}
+async function removeSkill() {
+  const s = deletingSkill.value
+  if (!s) return
+  deletingSkill.value = null
+  await deleteSkill(s.id)
+  skills.value = skills.value.filter((x) => x.id !== s.id)
+}
+const deletingSkill = ref<AgentSkill | null>(null)
+function askRemoveSkill(s: AgentSkill) {
+  deletingSkill.value = s
+}
+
+/* —— 自建 Agent 删除确认（确认弹窗，非原生 confirm） —— */
+const deletingAgent = ref<CustomAgent | null>(null)
+function askRemoveAgent(c: CustomAgent) {
+  deletingAgent.value = c
+  agentMenuId.value = null
+}
+async function confirmRemoveAgent() {
+  const c = deletingAgent.value
+  if (!c) return
+  deletingAgent.value = null
+  await removeAgent(c)
+}
+
+/* —— Skill 专业结构：SKILL.md / scripts / references / assets，按顶层目录分组展示 —— */
+function skillGroups(s: AgentSkill): { dir: string; items: string[] }[] {
+  const map = new Map<string, string[]>()
+  for (const f of s.files ?? []) {
+    const parts = String(f).split('/')
+    const dir = parts.length > 1 ? parts.slice(0, -1).join('/') + '/' : '根目录 /'
+    if (!map.has(dir)) map.set(dir, [])
+    map.get(dir)!.push(String(f))
+  }
+  const order = (d: string) => d === '根目录 /' ? 0 : d.startsWith('scripts') ? 1 : d.startsWith('references') ? 2 : d.startsWith('assets') ? 3 : 4
+  return [...map.entries()]
+    .sort((a, b) => order(a[0]) - order(b[0]) || (a[0] < b[0] ? -1 : 1))
+    .map(([dir, items]) => ({ dir: `${dir}（${items.length}）`, items: items.slice(0, 100) }))
+}
+function shortName(f: string): string {
+  const base = String(f).split('/').pop() ?? String(f)
+  return base.length > 28 ? '…' + base.slice(-27) : base
+}
+function hasSkillMd(s: AgentSkill): boolean {
+  return (s.files ?? []).some((f) => String(f).toLowerCase().endsWith('skill.md'))
+}
+function countRole(s: AgentSkill, role: 'scripts' | 'refs' | 'assets'): number {
+  const files = s.files ?? []
+  if (role === 'scripts') return files.filter((f) => /\.(py|js|sh)$/i.test(String(f))).length
+  if (role === 'refs') {
+    return files.filter((f) => {
+      const l = String(f).toLowerCase()
+      return !l.endsWith('skill.md') && (l.includes('/references/') || /\.(md|txt)$/.test(l)) && !/\.(py|js|sh)$/.test(l)
+    }).length
+  }
+  return files.filter((f) => {
+    const l = String(f).toLowerCase()
+    return !l.endsWith('skill.md') && !/\.(py|js|sh|md|txt)$/.test(l) && !l.includes('/references/')
+  }).length
+}
+async function toggleSkill(s: AgentSkill) {
+  const updated = await patchSkill(s.id, { name: s.name, description: s.description, content: s.content, enabled: !s.enabled })
+  s.enabled = updated.enabled
+}
+
+function toggleGlobMcp(id: string) {
+  const s = new Set(globMcp.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  globMcp.value = [...s]
+  void putAgentGlobal({ default_mcp_ids: globMcp.value, default_skill_ids: globSkill.value })
+}
+function toggleGlobSkill(id: string) {
+  const s = new Set(globSkill.value)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  globSkill.value = [...s]
+  void putAgentGlobal({ default_mcp_ids: globMcp.value, default_skill_ids: globSkill.value })
+}
+function toggleAgentPick(arr: string[], id: string): string[] {
+  const s = new Set(arr)
+  if (s.has(id)) s.delete(id)
+  else s.add(id)
+  return [...s]
+}
+
 function back() {
   router.back()
 }
+
+/* —— Mermaid 渲染：本地打包懒加载（见 utils/mermaid）；MutationObserver 兜底一切 DOM 时序 —— */
+watch(
+  [messages, streamBuf],
+  () =>
+    void nextTick().then(() => {
+      observeMermaid(chatEl.value)
+      void renderMermaidNodes(chatEl.value)
+    }),
+  { deep: true },
+)
 </script>
 
 <template>
@@ -1099,18 +2220,16 @@ function back() {
       <h2>Agent 工作台</h2>
       <span class="hero-stats inline">
         <span class="stat-i"><b>{{ conversations.length }}</b>会话</span>
-        <span class="stat-i"><b>{{ memories.length }}</b>记忆</span>
         <span class="stat-i"><b>{{ readyDocs }}</b>文档</span>
       </span>
       <span class="hero-spacer" />
-      <button class="pill-btn sm" :class="{ on: showMemory }" @click="showMemory = !showMemory">长期记忆</button>
     </header>
 
     <div class="agents-layout">
       <aside class="agents-side" :class="{ rail: sideCollapsed }">
         <div v-if="!sideCollapsed" class="side-full">
         <div class="side-head">
-          <div class="side-label">工作台</div>
+          <div class="side-label">Agent</div>
           <button class="icon-btn" title="收起侧栏" @click="sideCollapsed = true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
           </button>
@@ -1137,10 +2256,28 @@ function back() {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path :d="iconOf(a)" /></svg>
               </span>
               <span class="agent-text">
-                <b>{{ a.name }}</b>
+                <b>{{ a.name }}<em v-if="customOf(a)" class="custom-tag">自建</em></b>
                 <span>{{ a.description }}</span>
               </span>
               <svg v-if="a.supports_rag" class="agent-rag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" title="支持知识库引用"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
+              <span
+                v-if="customOf(a)"
+                class="agent-more"
+                title="管理"
+                @click.stop="agentMenuId = agentMenuId === a.id ? null : a.id"
+                @mouseenter.stop="agentMenuId = a.id"
+              >
+                <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" /></svg>
+              </span>
+              <span
+                v-if="customOf(a) && agentMenuId === a.id"
+                class="agent-menu"
+                @click.stop
+                @mouseleave="agentMenuId = null"
+              >
+                <button @click="openAgentEdit(customOf(a)!); agentMenuId = null">查看</button>
+                <button class="danger" @click="askRemoveAgent(customOf(a)!)">删除</button>
+              </span>
             </button>
             <p v-if="!agents.length" class="empty">暂无可用 Agent</p>
           </div>
@@ -1148,6 +2285,7 @@ function back() {
         </div>
         </div>
 
+        <button class="mini-btn manage-agent" @click="openAgentCreate()">＋ 新建自建 Agent</button>
         <button class="new-conv" :disabled="!selectedAgent || creating" @click="newConversation">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14" /></svg>
           {{ creating ? '创建中…' : '新建对话' }}
@@ -1207,6 +2345,7 @@ function back() {
                   title="更多操作"
                   @click.stop="toggleMenu(c.id, $event)"
                   @mouseenter="hoverMenu(c.id, $event)"
+                  @mouseleave="scheduleMenuClose()"
                 >
                   <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" /></svg>
                 </span>
@@ -1216,6 +2355,8 @@ function back() {
                     class="conv-menu"
                     :style="menuStyle"
                     @click.stop
+                    @mouseenter="cancelMenuClose()"
+                    @mouseleave="scheduleMenuClose()"
                   >
                     <button @click="startRename(c)">重命名</button>
                     <button @click="togglePin(c)">{{ c.pinned ? '取消置顶' : '置顶' }}</button>
@@ -1263,24 +2404,18 @@ function back() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
             我的知识库
           </button>
+          <button :class="{ on: tab === 'mcp' }" @click="tab = 'mcp'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+            MCP
+          </button>
+          <button :class="{ on: tab === 'skill' }" @click="tab = 'skill'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" /></svg>
+            Skill
+          </button>
           <button :class="{ on: tab === 'plaza' }" @click="tab = 'plaza'">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M9 12h.01M9 15h.01M15 9h.01M15 12h.01M15 15h.01" /></svg>
             广场
           </button>
-        </div>
-
-        <div v-if="showMemory && tab === 'chat'" class="memory-panel">
-          <div class="memory-head">
-            <span>长期记忆 · {{ currentAgent?.name }}</span>
-            <span class="memory-hint">默认按 Agent 隔离，仅你可见</span>
-          </div>
-          <ul v-if="memories.length">
-            <li v-for="m in memories" :key="m.id">
-              <b>{{ m.key }}</b><span>{{ m.value }}</span>
-              <button class="chip-del" @click="removeMemory(m.id)">×</button>
-            </li>
-          </ul>
-          <p v-else class="empty">暂无长期记忆，对话结束后会自动提炼偏好与事实</p>
         </div>
 
         <!-- 对话 -->
@@ -1345,7 +2480,55 @@ function back() {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" /></svg>
                 </div>
                 <div class="bubble">
-                  <div v-html="renderMarkdown(m.content)" />
+                  <div v-html="renderMarkdown(m.role === 'user' && isLongUser(m) && !expandedUserMsgs[i] ? userPreview(m.content) : m.content)" />
+                  <button
+                    v-if="m.role === 'user' && isLongUser(m)"
+                    class="msg-expand"
+                    @click="expandedUserMsgs[i] = !expandedUserMsgs[i]"
+                  >{{ expandedUserMsgs[i] ? '收起' : `展开全文（${m.content.length} 字）` }}</button>
+                  <div v-if="msgAtts(m).length" class="msg-atts">
+                    <a
+                      v-for="a in msgAtts(m)"
+                      :key="a.id"
+                      class="att-chip sent"
+                      :href="a.url"
+                      target="_blank"
+                      rel="noopener"
+                      :title="a.name"
+                    >
+                      <img v-if="isImgAtt(a)" :src="a.url" class="att-thumb" alt="" />
+                      <span v-else class="att-doc">📄</span>
+                      <span class="att-name">{{ a.name }}</span>
+                    </a>
+                  </div>
+                  <div v-if="msgFiles(m).length" class="dl-banner">
+                    <div class="dl-banner-title">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
+                      本次生成 {{ msgFiles(m).length }} 个文件
+                    </div>
+                    <div class="dl-banner-list">
+                      <a
+                        v-for="(f, fi) in msgFiles(m)"
+                        :key="fi"
+                        class="dl-card"
+                        :href="f['下载'] ?? f.url"
+                        download
+                        target="_blank"
+                        rel="noopener"
+                      >
+                        <span class="dl-ext" :data-ext="fileIcon(f['名'] ?? f.name)">{{ extLabel(f['名'] ?? f.name) }}</span>
+                        <span class="dl-meta">
+                          <b>{{ f['名'] ?? f.name }}</b>
+                          <span v-if="fmtBytes(f.字节)">{{ fmtBytes(f.字节) }}</span>
+                        </span>
+                        <span class="dl-go">下载</span>
+                      </a>
+                    </div>
+                  </div>
+                  <p v-if="ragAutoOf(m)" class="rag-auto-note">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
+                    本次已自动引用知识库（开关仍为关闭，下次可手动开启）
+                  </p>
                   <div v-if="(m.options ?? []).length" class="opt-row">
                     <button
                       v-for="o in (m.options ?? [])"
@@ -1363,10 +2546,19 @@ function back() {
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" /></svg>
                       引用来源（{{ citationsOf(m).length }}）
                     </summary>
-                    <div v-for="(c, j) in citationsOf(m)" :key="j" class="cite">
+                    <p v-if="retrievalOf(m)" class="retrieval-line">
+                      检索：{{ retrievalOf(m)?.summary }}
+                      <RouterLink
+                        v-if="retrievalOf(m)?.trace_id"
+                        class="trace-link"
+                        :to="{ path: '/rag/traces', query: { trace_id: retrievalOf(m)?.trace_id } }"
+                        target="_blank"
+                      >查看链路</RouterLink>
+                    </p>
+                    <div v-for="(c, j) in sortedCitationsOf(m)" :key="j" class="cite">
                       <div class="cite-head">
                         《{{ c.title }}》
-                        <span v-if="c.similarity != null" class="sim">{{ c.similarity }}</span>
+                        <span class="sim">{{ hitScore(c).toFixed(4) }}<em>{{ hitScoreLabel(c) }}</em></span>
                       </div>
                       <p>{{ c.text.slice(0, 160) }}</p>
                     </div>
@@ -1374,7 +2566,7 @@ function back() {
                   <details v-if="toolsOf(m).length" class="cite-drop tool-drop">
                     <summary>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
-                      业务工具调用（{{ toolsOf(m).length }}）
+                      执行链路（{{ toolsOf(m).length }}）：读文件 / 跑脚本 / 查数据
                       <span v-if="(m.citations as Record<string, unknown>)?.degraded" class="tool-flag">启发式</span>
                     </summary>
                     <p v-if="(m.citations as Record<string, unknown>)?.rounds" class="tool-meta">
@@ -1388,7 +2580,21 @@ function back() {
                         <span class="tool-args">{{ toolArgsText(t.args) }}</span>
                       </div>
                       <p v-if="t.ok" class="tool-summary">{{ t.summary }}</p>
-                      <p v-else class="tool-error">查询失败：{{ t.error }}（已跳过该项，其余数据不受影响）</p>
+                      <div v-if="t.ok && parseFiles(t).length" class="tool-files">
+                        <a v-for="(f, fi) in parseFiles(t)" :key="fi" class="file-dl" :href="f['下载'] ?? f.url" download target="_blank" rel="noopener">⬇ {{ f['名'] ?? f.name }}</a>
+                      </div>
+                      <p v-if="!t.ok" class="tool-error">查询失败：{{ t.error }}（已跳过该项，其余数据不受影响）</p>
+                    </div>
+                  </details>
+                  <details v-if="mcpTraceOf(m).length" class="cite-drop tool-drop">
+                    <summary>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                      MCP 调用链路（{{ mcpTraceOf(m).length }} 步）
+                    </summary>
+                    <div v-for="(s, k) in mcpTraceOf(m)" :key="k" class="trace-row" :class="s.ok ? 'ok' : 'fail'">
+                      <span class="trace-step">{{ s.step }}</span>
+                      <span class="trace-detail">{{ s.detail }}</span>
+                      <span class="trace-ms">{{ s.ms }}ms</span>
                     </div>
                   </details>
                 </div>
@@ -1401,6 +2607,17 @@ function back() {
                     <button class="pause-btn" @click="pauseStream">暂停</button>
                   </div>
                   <div v-if="stripPartialJson(streamBuf)" v-html="renderMarkdown(stripPartialJson(streamBuf))" />
+                  <div v-if="liveTools.length" class="live-tools">
+                    <div class="live-tools-title">执行中（{{ liveTools.length }} 步，完成后可在回答下方展开全链路）</div>
+                    <div v-for="t in liveTools" :key="t.seq" class="tool-step" :class="{ fail: !t.running && !t.ok, running: t.running }">
+                      <div class="tool-step-head">
+                        <span v-if="t.running" class="tool-dot spinning">…</span>
+                        <span v-else class="tool-dot" :class="{ ok: t.ok, fail: !t.ok }">{{ t.ok ? '✓' : '✕' }}</span>
+                        <b>{{ t.seq }}. {{ TOOL_LABELS[t.tool] ?? t.tool }}</b>
+                        <span class="tool-args">{{ toolArgsText(t.args) }}</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1411,13 +2628,50 @@ function back() {
                 重试
               </button>
             </p>
-            <div class="input-row">
-              <textarea v-model="input" rows="1" placeholder="输入你的想法，Enter 发送…" @keydown.enter.exact.prevent="send()" />
+            <div v-if="pendingAttachments.length || attachError" class="att-row">
+              <span v-for="a in pendingAttachments" :key="a.id" class="att-chip" :title="a.name">
+                <img v-if="isImgAtt(a)" :src="a.url" class="att-thumb" alt="" />
+                <span v-else class="att-doc">📄</span>
+                <span class="att-name">{{ a.name }}</span>
+                <button class="att-x" title="移除" @click="removeAttachment(a.id)">×</button>
+              </span>
+              <span v-if="uploadingAttachment" class="att-loading">上传中…</span>
+              <span v-if="attachError" class="att-err">{{ attachError }}</span>
+            </div>
+            <div class="composer">
+              <div class="composer-left" @mouseenter="plusOpen = true" @mouseleave="plusOpen = false">
+                <button
+                  class="plus-btn" :class="{ on: plusOpen }" title="上传图片 / 文档"
+                  @click.stop="triggerImgPick"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+                </button>
+                <div v-if="plusOpen" class="plus-menu" @click.stop>
+                  <button class="plus-item" :disabled="!activeConv" @click="triggerImgPick">
+                    <span class="plus-ico">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3" /><circle cx="9" cy="9" r="1.6" /><path d="M21 15l-4.5-4.5L6 21" /></svg>
+                    </span>
+                    <span><b>上传图片</b><i>png / jpg / webp，随消息发给 Agent 看</i></span>
+                  </button>
+                  <button class="plus-item" :disabled="!activeConv" @click="triggerDocPick">
+                    <span class="plus-ico">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M9 13h6M9 17h6" /></svg>
+                    </span>
+                    <span><b>上传文档</b><i>txt / md / pdf / docx，正文自动注入对话</i></span>
+                  </button>
+                </div>
+                <input ref="fileImgInput" type="file" accept="image/*" hidden @change="(e) => onAttachPicked(e, 'image')" />
+                <input ref="fileDocInput" type="file" accept=".txt,.md,.markdown,.pdf,.docx" hidden @change="(e) => onAttachPicked(e, 'doc')" />
+              </div>
+              <textarea
+                ref="inputEl" v-model="input" rows="1" placeholder="输入你的想法，Enter 发送，Shift+Enter 换行…"
+                @input="resizeInput" @keydown="onInputKey"
+              />
               <button v-if="streaming" class="pause-big" @click="pauseStream">
                 <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
                 停止
               </button>
-              <button v-else class="send-btn" :disabled="!input.trim()" @click="send()">
+              <button v-else class="send-btn" :disabled="(!input.trim() && !pendingAttachments.length) || !activeConv" @click="send()">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z" /></svg>
               </button>
             </div>
@@ -1427,25 +2681,84 @@ function back() {
         <!-- 我的知识库 -->
         <template v-else-if="tab === 'mine'">
           <div class="kb-scroll">
-          <div class="kb-upload">
+          <div class="kb-upload" @dragover.prevent @drop.prevent="onDropFiles">
             <div class="kb-upload-head">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
-              上传文档
-              <span>支持 txt / md / pdf / docx</span>
+              批量上传文档
+              <span>支持 txt / md / pdf / docx · 单次最多 {{ MAX_BATCH_FILES }} 个 · 单文件 ≤ {{ MAX_UPLOAD_MB }}MB</span>
             </div>
             <div class="kb-form">
-              <label class="file-drop">
-                <input type="file" accept=".txt,.md,.markdown,.pdf,.docx" @change="onFileChange" />
-                <span v-if="!upFile">点击选择文件</span>
-                <span v-else class="picked">{{ upFile.name }}</span>
+              <label class="file-drop" :class="{ 'has-files': upItems.length }">
+                <input type="file" multiple accept=".txt,.md,.markdown,.pdf,.docx" @change="onFileChange" />
+                <span v-if="!upItems.length">点击选择文件（可按住 Ctrl/Shift 多选），或拖拽到此处</span>
+                <span v-else class="picked">已选择 {{ upItems.length }} 个文件，可继续添加</span>
               </label>
-              <input v-model="upTitle" class="kb-input" placeholder="标题（必填）" maxlength="160" />
-              <input v-model="upDesc" class="kb-input" placeholder="描述（必填，广场展示用）" />
-              <button class="btn primary" :disabled="uploading || !upFile || !upTitle.trim() || !upDesc.trim()" @click="doUpload">
-                {{ uploading ? '上传中…' : '上传并入库' }}
-              </button>
+              <div v-if="upItems.length" class="up-list">
+                <div v-for="(item, idx) in upItems" :key="`${item.file.name}-${item.file.size}`" class="up-item" :class="item.status">
+                  <div class="up-item-main">
+                    <span class="up-name" :title="item.file.name">{{ item.file.name }}</span>
+                    <span class="up-size">{{ formatFileSize(item.file.size) }}</span>
+                    <span v-if="item.status === 'error'" class="up-err">{{ item.error }}</span>
+                  </div>
+                  <input v-model="item.title" class="kb-input up-title" placeholder="标题（必填）" maxlength="160" :disabled="uploading" />
+                  <button class="mini-btn danger up-remove" :disabled="uploading" @click="removeUpItem(idx)">移除</button>
+                  <div class="up-desc-row">
+                    <textarea
+                      v-model="item.desc"
+                      class="kb-input up-desc"
+                      rows="2"
+                      maxlength="500"
+                      placeholder="描述（必填，广场展示用；可手动填写或 AI 生成）"
+                      :disabled="uploading || item.descLoading"
+                    />
+                    <button
+                      class="mini-btn up-gen"
+                      :disabled="!canGenDesc || item.descLoading"
+                      @click="genDesc(item)"
+                    >
+                      {{ item.descLoading ? '生成中…' : 'AI 生成' }}
+                    </button>
+                  </div>
+                  <p v-if="item.descError" class="up-err">{{ item.descError }}</p>
+                </div>
+              </div>
+              <div class="up-auto-desc">
+                <label class="check">
+                  <input v-model="autoDesc" type="checkbox" :disabled="uploading || descGenerating" />
+                  用 AI 自动生成描述
+                </label>
+                <select
+                  v-model="descConfigId"
+                  class="kb-input up-model"
+                  :disabled="!autoDesc || uploading || descGenerating"
+                >
+                  <option value="">选择已配置模型</option>
+                  <option v-for="c in llmConfigs" :key="c.id" :value="c.id">{{ c.name }}（{{ c.model }}）</option>
+                </select>
+                <button class="mini-btn" :disabled="!canGenDesc" @click="genAllDescs">
+                  {{ descGenerating ? '生成中…' : '生成空描述' }}
+                </button>
+              </div>
+              <p v-if="autoDesc && !llmConfigs.length" class="pick-hint">
+                还没有已配置的模型，请先到 设置 → 模型配置 添加；也可以关闭 AI 自动生成后手动填写描述。
+              </p>
+              <p v-else-if="autoDesc && !descConfigId" class="pick-hint">
+                请选择用于生成描述的模型，生成结果会写入每条文档，并计入「用量与成本」。
+              </p>
+              <div class="up-actions">
+                <button
+                  class="btn primary"
+                  :disabled="uploading || descGenerating || !upItems.length || upItems.some((i) => !i.title.trim() || (!i.desc.trim() && !autoDesc)) || (autoDesc && !descConfigId)"
+                  @click="doUpload"
+                >
+                  {{ uploading ? '处理中…' : `上传并入库（${upItems.length}）` }}
+                </button>
+                <button v-if="upItems.length" class="mini-btn" :disabled="uploading || descGenerating" @click="clearUpItems">清空</button>
+              </div>
+              <p v-if="!canUploadDoc" class="pick-hint">当前账号暂无「上传知识库文档」权限，点击上传会提示并需管理员开通。</p>
             </div>
           </div>
+          <p v-if="kbNotice" class="ok-note">{{ kbNotice }}</p>
           <p v-if="kbError" class="error">{{ kbError }}</p>
           <p v-if="kbLoading" class="empty">加载中…</p>
           <div class="kb-grid">
@@ -1475,6 +2788,15 @@ function back() {
                 >
                   <span class="switch-dot" />{{ d.enabled === false ? '检索关' : '检索开' }}
                 </button>
+                <button
+                  v-if="d.status === 'ready'"
+                  class="mini-btn switch"
+                  :class="{ off: d.visible_to_parents !== true }"
+                  :title="d.visible_to_parents === true ? '家长端可见，点击对家长隐藏' : '家长端隐藏，点击开放给家长'"
+                  @click="doToggleParentVisible(d)"
+                >
+                  <span class="switch-dot" />{{ d.visible_to_parents === true ? '家长可见' : '家长隐藏' }}
+                </button>
                 <button v-if="d.visibility === 'private' && d.status === 'ready'" class="mini-btn" @click="doPublish(d.id)">发布到广场</button>
                 <button v-if="d.visibility === 'plaza'" class="mini-btn" @click="doUnpublish(d.id)">下架</button>
                 <button class="mini-btn danger" @click="doDeleteDoc(d.id)">删除</button>
@@ -1485,11 +2807,18 @@ function back() {
           </div>
         </template>
 
-        <!-- 广场 -->
-        <template v-else>
+        <!-- 广场：知识库 / Skill 分区 -->
+        <template v-else-if="tab === 'plaza'">
           <p v-if="kbError" class="error">{{ kbError }}</p>
+          <div class="plaza-seg">
+            <button :class="{ on: plazaSub === 'docs' }" @click="plazaSub = 'docs'">知识库{{ plazaDocs.length ? `（${plazaDocs.length}）` : '' }}</button>
+            <button :class="{ on: plazaSub === 'skills' }" @click="plazaSub = 'skills'">Skill{{ plazaSkills.length ? `（${plazaSkills.length}）` : '' }}</button>
+            <button :class="{ on: plazaSub === 'mcps' }" @click="plazaSub = 'mcps'">MCP{{ plazaMcps.length ? `（${plazaMcps.length}）` : '' }}</button>
+          </div>
           <p v-if="kbLoading" class="empty">加载中…</p>
-          <div class="kb-scroll">
+          <div v-else class="kb-scroll">
+          <template v-if="plazaSub === 'docs'">
+          <p class="plaza-hint">全校教师发布的知识库文档：收录后在对话中可引用其内容。</p>
           <div class="kb-grid">
             <div v-for="d in plazaDocs" :key="d.id" class="kb-card">
               <div class="kb-card-top">
@@ -1506,7 +2835,262 @@ function back() {
               </div>
             </div>
           </div>
-          <p v-if="!kbLoading && !plazaDocs.length" class="empty">广场暂无公开文档</p>
+          <p v-if="!plazaDocs.length" class="empty">广场暂无公开文档</p>
+          </template>
+          <template v-else-if="plazaSub === 'skills'">
+          <p class="plaza-hint">全校教师发布的 Skill：收录后可在 Agent 表单里按需绑定，让 Agent 按该 Skill 的指令与脚本干活。</p>
+          <div class="kb-grid">
+            <div v-for="s in plazaSkills" :key="s.id" class="kb-card ext-card">
+              <div class="kb-card-top">
+                <span class="kb-badge ready">{{ (s.files ?? []).length ? `${(s.files ?? []).length} 个文件` : '指令型' }}</span>
+                <span v-if="s.mine" class="kb-vis mine">我的</span>
+              </div>
+              <b class="kb-title">{{ s.name }}</b>
+              <p class="kb-desc">{{ s.description || '暂无描述' }}</p>
+              <div class="kb-ops">
+                <button v-if="!s.mine" class="mini-btn" :class="{ on: s.collected }" @click="doCollectSkill(s)">
+                  {{ s.collected ? '已收录 · 取消' : '收录引用' }}
+                </button>
+                <label v-if="!s.mine && s.collected" class="glob-check" title="全局默认：作用于全部 Agent">
+                  <input type="checkbox" :checked="globSkill.includes(s.id)" @change="toggleGlobSkill(s.id)" /> 全局
+                </label>
+                <span v-else-if="s.mine" class="kb-file">你发布的 Skill</span>
+              </div>
+            </div>
+          </div>
+          <p v-if="!plazaSkills.length" class="empty">广场暂无公开 Skill，可在 Skill 页发布</p>
+          </template>
+          <template v-else>
+          <p class="plaza-hint">全校教师发布的 MCP（仅模板：名称/说明/类型）：收录后会复制成你名下的私有 MCP，<strong>接入地址与密钥由你自己填写</strong>，发布者的凭据不会共享。</p>
+          <div class="kb-grid">
+            <div v-for="m in plazaMcps" :key="m.id" class="kb-card ext-card">
+              <div class="kb-card-top">
+                <span class="kb-badge ready">{{ m.kind === 'http' ? '普通 HTTP' : 'StreamableHTTP' }}</span>
+                <span v-if="m.mine" class="kb-vis mine">我的</span>
+              </div>
+              <b class="kb-title">{{ m.name }}</b>
+              <p class="kb-desc">{{ m.description || '暂无描述' }}</p>
+              <div class="kb-file">{{ m.endpoint_hidden ? '🔒 接入地址已隐藏（由收录者自行配置）' : (m.endpoint || '待收录者自行配置') }}</div>
+              <div class="kb-ops">
+                <button v-if="!m.mine" class="mini-btn" :class="{ on: m.collected }" @click="doCollectMcp(m)">
+                  {{ m.collected ? '已收录 · 取消' : '收录（复制模板）' }}
+                </button>
+                <span v-else class="kb-file">你发布的 MCP</span>
+              </div>
+            </div>
+          </div>
+          <p v-if="!plazaMcps.length" class="empty">广场暂无公开 MCP，可在 MCP 页发布</p>
+          </template>
+          </div>
+        </template>
+
+        <!-- MCP：外部工具接入 + 全局默认 -->
+        <template v-if="tab === 'mcp'">
+          <div class="kb-scroll">
+            <div class="ext-hero">
+              <div>
+                <b>MCP 工具</b>
+                <p>接入外部 HTTP 工具（MCP）。勾选「全局默认」即作用于当前账户全部 Agent；也可在 Agent 表单里单独绑定某个 Agent。</p>
+              </div>
+              <button class="btn primary" @click="openMcpCreate()">＋ 新建 MCP</button>
+            </div>
+            <p v-if="extError" class="error">{{ extError }}</p>
+            <div class="plaza-seg">
+              <button :class="{ on: mcpSub === 'private' }" @click="mcpSub = 'private'">私有{{ privateMcps.length ? `（${privateMcps.length}）` : '' }}</button>
+              <button :class="{ on: mcpSub === 'collected' }" @click="mcpSub = 'collected'">收录{{ adoptedMcps.length ? `（${adoptedMcps.length}）` : '' }}</button>
+            </div>
+            <p v-if="extLoading" class="empty">加载中…</p>
+            <p v-if="!extLoading && mcpSub === 'private' && !privateMcps.length" class="empty">还没有 MCP，先新建一个吧</p>
+            <p v-if="!extLoading && mcpSub === 'collected'" class="plaza-hint">收录的广场 MCP 已复制为你名下的私有副本，请点「配置」填入<strong>你自己的 Endpoint / API</strong>（发布者的接入地址与密钥不会共享）。</p>
+            <div v-if="mcpSub === 'private'" class="kb-grid">
+              <div v-for="m in privateMcps" :key="m.id" class="kb-card ext-card">
+                <div class="kb-card-top">
+                  <span class="kb-badge" :class="m.enabled ? 'ready' : ''">{{ m.enabled ? '启用中' : '已停用' }}</span>
+                  <span class="kb-ops-right">
+                    <span v-if="m.visibility === 'plaza'" class="kb-vis plaza">广场</span>
+                    <label class="glob-check" title="全局默认：作用于全部 Agent">
+                      <input type="checkbox" :checked="globMcp.includes(m.id)" @change="toggleGlobMcp(m.id)" /> 全局
+                    </label>
+                  </span>
+                </div>
+                <b class="kb-title">{{ m.name }}</b>
+                <p class="kb-desc">{{ m.description || '暂无描述' }}</p>
+                <div class="kb-file">{{ m.endpoint || '未填 endpoint' }}</div>
+                <div class="kb-kind">{{ m.kind === 'http' ? '普通 HTTP' : 'MCP StreamableHTTP' }}</div>
+                <div class="kb-ops">
+                  <button class="mini-btn switch" :class="{ off: !m.enabled }" @click="toggleMcp(m)">
+                    <span class="switch-dot" />{{ m.enabled ? '启用' : '停用' }}
+                  </button>
+                  <button class="mini-btn accent" @click="openMcpTest(m)">测试</button>
+                  <button class="mini-btn" @click="openMcpEdit(m)">配置</button>
+                  <button v-if="m.visibility === 'plaza'" class="mini-btn accent" @click="doUnpublishMcp(m)">下架</button>
+                  <button v-else class="mini-btn" @click="doPublishMcp(m)">发布到广场</button>
+                  <button class="mini-btn danger" @click="removeMcp(m)">删除</button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="kb-grid">
+              <div v-for="m in adoptedMcps" :key="m.id" class="kb-card ext-card">
+                <div class="kb-card-top">
+                  <span class="kb-badge" :class="m.enabled ? 'ready' : ''">{{ m.enabled ? '启用中' : '已停用' }}</span>
+                  <span class="kb-ops-right">
+                    <span class="kb-vis plaza">收录</span>
+                    <label class="glob-check" title="全局默认：作用于全部 Agent">
+                      <input type="checkbox" :checked="globMcp.includes(m.id)" @change="toggleGlobMcp(m.id)" /> 全局
+                    </label>
+                  </span>
+                </div>
+                <b class="kb-title">{{ m.name }}</b>
+                <p class="kb-desc">{{ m.description || '暂无描述' }}</p>
+                <div class="kb-file" :class="{ warn: !m.endpoint }">{{ m.endpoint || '⚠ 请填入你自己的 Endpoint / API 后才能使用' }}</div>
+                <div class="kb-kind">{{ m.kind === 'http' ? '普通 HTTP' : 'MCP StreamableHTTP' }}</div>
+                <div class="kb-ops">
+                  <button class="mini-btn switch" :class="{ off: !m.enabled }" @click="toggleMcp(m)">
+                    <span class="switch-dot" />{{ m.enabled ? '启用' : '停用' }}
+                  </button>
+                  <button class="mini-btn accent" @click="openMcpTest(m)">测试</button>
+                  <button class="mini-btn accent" @click="openMcpEdit(m)">配置</button>
+                  <button class="mini-btn danger" @click="removeMcp(m)">取消收录</button>
+                </div>
+              </div>
+            </div>
+            <p v-if="!extLoading && mcpSub === 'collected' && !adoptedMcps.length" class="empty">还没有收录广场 MCP，可去「广场」tab 收录</p>
+          </div>
+        </template>
+
+        <!-- Skill：本地技能指令 + 全局默认 -->
+        <template v-if="tab === 'skill'">
+          <div class="kb-scroll">
+            <div class="ext-hero">
+              <div>
+                <b>Skill 技能</b>
+                <p>本地技能 = 追加进系统提示的专属指令。勾选「全局默认」即作用于全部 Agent；也可在 Agent 表单里单独绑定。</p>
+              </div>
+              <button class="btn primary" @click="openSkillCreate()">＋ 新建 Skill</button>
+              <button class="btn ghost" title="上传 zip 包直接创建 Skill，无需先新建" :disabled="skillUploading" @click="pickSkillZip">
+                {{ skillUploading ? '导入中…' : '导入 ZIP' }}
+              </button>
+              <input ref="skillZipInput" type="file" accept=".zip" hidden @change="onSkillImport" />
+            </div>
+            <div class="sandbox-card">
+              <button class="sandbox-head" @click="sbOpen = !sbOpen">
+                <b>脚本沙箱：{{ sandbox.provider === 'bailian' ? '阿里云百炼' : '本地受控执行' }}</b>
+                <span>{{ sbOpen ? '收起' : '配置' }}</span>
+              </button>
+              <div v-if="sbOpen" class="sandbox-body">
+                <p class="sandbox-desc">本地沙箱无第三方依赖/无网络，仅冒烟测试。切到阿里云百炼后，脚本在云端沙箱跑（可装依赖）。工作空间ID点控制台右上角「默认业务空间」查看；模板 code 填 Sandbox→我的模板里的 templateCode。</p>
+                <div class="sandbox-row">
+                  <label>提供商
+                    <select v-model="sandbox.provider" class="kb-input">
+                      <option value="local">本地受控执行（默认）</option>
+                      <option value="bailian">阿里云百炼 Sandbox</option>
+                    </select>
+                  </label>
+                  <label>超时（秒）
+                    <input v-model.number="sandbox.timeout_s" type="number" min="10" max="120" class="kb-input" />
+                  </label>
+                </div>
+                <template v-if="sandbox.provider === 'bailian'">
+                  <div class="sandbox-row">
+                    <label>工作空间ID
+                      <input v-model="sandbox.workspace_id" class="kb-input" placeholder="点控制台右上角「默认业务空间」查看" />
+                    </label>
+                    <label>地域
+                      <select v-model="sandbox.region" class="kb-input">
+                        <option value="cn-beijing">华北2北京（当前仅支持）</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label>API Key（sk-…，不填则保留已存）
+                    <input v-model="sandbox.token" type="password" class="kb-input" :placeholder="sbHasToken ? '已保存（留空不改）' : 'sk- 开头，Sandbox 页左下角创建'" />
+                  </label>
+                  <label>模板 code
+                    <input v-model="sandbox.template_code" class="kb-input" placeholder="Sandbox → 我的模板 → templateCode" />
+                  </label>
+                </template>
+                <div class="sandbox-ops">
+                  <button class="mini-btn" :disabled="sbTesting" @click="testSandboxConn()">{{ sbTesting ? '测试中…' : '测试连通' }}</button>
+                  <button class="mini-btn accent" :disabled="sbLoading" @click="saveSandbox()">{{ sbLoading ? '保存中…' : '保存配置' }}</button>
+                  <span v-if="sbMsg" class="sandbox-msg">{{ sbMsg }}</span>
+                </div>
+              </div>
+            </div>
+            <p v-if="extError" class="error">{{ extError }}</p>
+            <div class="plaza-seg">
+              <button :class="{ on: skillSub === 'private' }" @click="skillSub = 'private'">私有{{ skills.length ? `（${skills.length}）` : '' }}</button>
+              <button :class="{ on: skillSub === 'collected' }" @click="skillSub = 'collected'">收录{{ collectedPlazaSkills.length ? `（${collectedPlazaSkills.length}）` : '' }}</button>
+            </div>
+            <p v-if="extLoading" class="empty">加载中…</p>
+            <div v-if="skillSub === 'private'" class="kb-grid">
+              <div v-for="s in skills" :key="s.id" class="kb-card ext-card">
+                <div class="kb-card-top">
+                  <span class="kb-badge" :class="s.enabled ? 'ready' : ''">{{ s.enabled ? '启用中' : '已停用' }}</span>
+                  <span class="kb-ops-right">
+                    <span v-if="s.visibility === 'plaza'" class="kb-vis plaza">广场</span>
+                    <label class="glob-check" title="全局默认：作用于全部 Agent">
+                      <input type="checkbox" :checked="globSkill.includes(s.id)" @change="toggleGlobSkill(s.id)" /> 全局
+                    </label>
+                  </span>
+                </div>
+                <b class="kb-title">{{ s.name }}</b>
+                <p class="kb-desc">{{ s.description || '暂无描述' }}</p>
+                <div class="kb-file">{{ (s.content || '').slice(0, 80) }}</div>
+                <details v-if="s.files?.length" class="skill-files">
+                  <summary>文件结构（{{ s.files.length }}）· 点击展开</summary>
+                  <div class="skill-layout">
+                    <span class="layout-chip" :class="hasSkillMd(s) ? 'ok' : 'miss'">SKILL.md{{ hasSkillMd(s) ? '' : ' 缺失' }}</span>
+                    <span class="layout-chip" :class="countRole(s, 'scripts') ? 'ok' : ''">scripts {{ countRole(s, 'scripts') }}</span>
+                    <span class="layout-chip" :class="countRole(s, 'refs') ? 'ok' : ''">references {{ countRole(s, 'refs') }}</span>
+                    <span class="layout-chip" :class="countRole(s, 'assets') ? 'ok' : ''">assets {{ countRole(s, 'assets') }}</span>
+                  </div>
+                  <div class="skill-file-list">
+                    <div v-for="g in skillGroups(s)" :key="g.dir" class="skill-dir">
+                      <div class="skill-dir-name">{{ g.dir }}</div>
+                      <span v-for="f in g.items" :key="f" class="file-chip-wrap" :title="f">
+                        <button class="file-chip" @click="openSkillPreview(s, f)" :title="`预览 ${f}`">{{ shortName(f) }}</button>
+                        <button v-if="/\.(py|js|sh)$/i.test(f)" class="file-run" title="沙箱试运行（无第三方依赖/无网络，仅冒烟测试，失败多为缺依赖）" @click="runSkillFile(s, f)">▶</button>
+                      </span>
+                    </div>
+                  </div>
+                </details>
+                <div v-if="skillRunOut && skillRunOut.skillId === s.id" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
+                  <b>{{ skillRunOut.path }} · {{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
+                  <span class="runout-tag" :class="skillRunOut.provider === 'bailian' ? 'remote' : 'local'">{{ skillRunOut.provider === 'bailian' ? '百炼沙箱' : '本地沙箱' }}</span>
+                  <span class="runout-tip">本地沙箱无第三方依赖/无网络，仅冒烟测试；缺参报错时点 ▶ 重新运行并填写参数</span>
+                  <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
+                  <pre v-if="skillRunOut.stderr" class="err">{{ skillRunOut.stderr }}</pre>
+                </div>
+                <div class="kb-ops">
+                  <button class="mini-btn switch" :class="{ off: !s.enabled }" @click="toggleSkill(s)">
+                    <span class="switch-dot" />{{ s.enabled ? '启用' : '停用' }}
+                  </button>
+                  <button class="mini-btn" @click="openSkillEdit(s)">配置</button>
+                  <button v-if="s.visibility === 'plaza'" class="mini-btn accent" @click="doUnpublishSkill(s)">下架</button>
+                  <button v-else class="mini-btn" @click="doPublishSkill(s)">发布到广场</button>
+                  <button class="mini-btn danger" @click="askRemoveSkill(s)">删除</button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="kb-grid">
+              <div v-for="s in collectedPlazaSkills" :key="s.id" class="kb-card ext-card">
+                <div class="kb-card-top">
+                  <span class="kb-badge ready">他人发布</span>
+                  <span class="kb-ops-right">
+                    <label class="glob-check" title="全局默认：作用于全部 Agent">
+                      <input type="checkbox" :checked="globSkill.includes(s.id)" @change="toggleGlobSkill(s.id)" /> 全局
+                    </label>
+                  </span>
+                </div>
+                <b class="kb-title">{{ s.name }}</b>
+                <p class="kb-desc">{{ s.description || '暂无描述' }}</p>
+                <div class="kb-file">{{ (s.content || '').slice(0, 80) }}</div>
+                <div class="kb-ops">
+                  <button class="mini-btn danger" @click="doCollectSkill(s)">取消收录</button>
+                </div>
+              </div>
+            </div>
+            <p v-if="!extLoading && skillSub === 'private' && !skills.length" class="empty">还没有 Skill，先新建一个吧</p>
+            <p v-if="!extLoading && skillSub === 'collected' && !collectedPlazaSkills.length" class="empty">还没有收录广场 Skill，可去「广场」tab 收录他人的 Skill</p>
           </div>
         </template>
       </section>
@@ -1532,37 +3116,50 @@ function back() {
 
         <div v-if="wsTab === 'outline'" class="ws-body">
           <p v-if="!outlineDraft.length" class="empty">暂无大纲：先在对话里走完大纲阶段，规格会自动同步到这里审核编辑。</p>
-          <div v-else class="ol-list">
-            <div v-for="(o, i) in outlineDraft" :key="o.id ?? i" class="ol-item">
-              <span class="ol-no">{{ i + 1 }}</span>
-              <div class="ol-fields">
-                <input v-model="o.title" class="ol-title" maxlength="80" @input="outlineDirty = true" />
-                <input v-model="o.note" class="ol-note" placeholder="备注（讲什么/用什么图，可空）" @input="outlineDirty = true" />
-              </div>
-              <div class="ol-ops">
-                <button title="上移" @click="outlineMove(i, -1)">↑</button>
-                <button title="下移" @click="outlineMove(i, 1)">↓</button>
-                <button title="删除" class="danger" @click="outlineDraft.splice(i, 1); outlineDirty = true">×</button>
+          <template v-else>
+            <div class="ws-label-row">
+              <span class="ws-label">大纲 · 点标题展开「真实预览 / SVG 代码」（共 {{ outlineDraft.length }} 页{{ svgPages.length ? `，已生成 ${svgPages.length} 页 SVG` : '' }}）</span>
+            </div>
+            <div class="ol-list">
+              <div v-for="(o, i) in outlineDraft" :key="o.id ?? i" class="ol-item ol-item--merge" :class="{ open: expandedPage === i }">
+                <div class="ol-head-row">
+                  <span class="ol-no">{{ i + 1 }}</span>
+                  <button class="ol-title-btn" :title="svgPages[i] ? '点击查看 SVG 预览 / 代码' : '（本页暂无 SVG，可编辑标题与备注）'" @click="openPage(i)">
+                    {{ o.title || `第 ${i + 1} 页` }}
+                    <span class="ol-chev">{{ expandedPage === i ? '▾' : '▸' }}</span>
+                  </button>
+                  <div class="ol-ops">
+                    <button title="上移" @click="outlineMove(i, -1)">↑</button>
+                    <button title="下移" @click="outlineMove(i, 1)">↓</button>
+                    <button title="删除" class="danger" @click="outlineDraft.splice(i, 1); outlineDirty = true">×</button>
+                  </div>
+                </div>
+                <div class="ol-fields">
+                  <input v-model="o.title" class="ol-title" maxlength="80" placeholder="标题" @input="outlineDirty = true" />
+                  <input v-model="o.note" class="ol-note" placeholder="备注（讲什么/用什么图，可空）" @input="outlineDirty = true" />
+                </div>
+                <div v-if="expandedPage === i" class="ol-expand">
+                  <div class="ol-expand-tabs">
+                    <button :class="{ on: pageView === 'preview' }" @click="pageView = 'preview'">预览</button>
+                    <button :class="{ on: pageView === 'code' }" :disabled="!svgPages[i]" @click="pageView = 'code'">SVG 代码</button>
+                  </div>
+                  <template v-if="svgPages[i]">
+                    <div v-if="pageView === 'preview'" class="ol-svg-preview">
+                      <img :src="svgPages[i].url" :alt="svgPages[i].name" />
+                    </div>
+                    <pre v-else class="ol-svg-code">{{ svgCodeCache[svgPages[i].url] || '加载中…' }}</pre>
+                  </template>
+                  <div v-else class="ol-expand-empty">
+                    本页还没有对应的 SVG 文件。请在对话里让 Agent「出片」，生成后这里会显示该页的真实预览与代码。
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-          <div v-if="sectionPreview.length" class="ws-label">已生成文案（{{ sectionPreview.length }}），可展开查看、直接改</div>
-          <div v-if="sectionPreview.length" class="sec-edit-list">
-            <div v-for="(s, i) in sectionPreview" :key="s.id ?? i" class="sec-edit-card">
-              <button class="sec-edit-head" @click="s.open = !s.open">
-                <b>{{ i + 1 }}. {{ s.title || '未命名页面' }}</b><span>{{ s.open ? '收起' : '展开' }}</span>
-              </button>
-              <div v-if="s.open" class="sec-edit-body">
-                <input v-model="s.title" class="kb-input" placeholder="页面标题" maxlength="80" @input="markSectionDirty" />
-                <textarea v-model="s.body" rows="4" class="kb-input" placeholder="本页文案要点" @input="markSectionDirty" />
-              </div>
-            </div>
-            <button class="btn primary sm" :disabled="streaming" @click="sendSectionsToAgent">文案发给 Agent 确认</button>
-          </div>
           <div v-if="outlineDraft.length" class="ws-foot">
             <button class="mini-btn" @click="outlineAdd">+ 加一页</button>
             <button class="btn primary sm" :disabled="streaming" @click="sendOutlineToAgent">发送给 Agent 确认</button>
           </div>
+          </template>
         </div>
 
         <div v-if="wsTab === 'material'" class="ws-body">
@@ -1574,96 +3171,321 @@ function back() {
           </div>
           <div v-if="matPicking" class="mat-picker">
             <p v-if="matLoading" class="empty">加载中…</p>
-            <template v-else-if="activeConv?.agent_id === 'report_ppt'">
-              <div class="mat-filters">
-                <select v-model="matType" class="kb-input">
-                  <option v-for="t in REPORT_TYPES" :key="t.value" :value="t.value">{{ t.label }}</option>
-                </select>
-                <div class="mat-dates">
-                  <input v-model="matStart" type="date" class="kb-input" title="起始日期" />
-                  <span>~</span>
-                  <input v-model="matEnd" type="date" class="kb-input" title="结束日期" />
-                </div>
-              </div>
-              <div class="mat-select-head">
-                <button class="mini-btn" @click="toggleSelectAllFiltered">
-                  {{ allFilteredSelected ? '取消全选' : '全选当前筛选' }}
-                </button>
-                <span class="mat-count">已选 {{ pickReportIds.length }} 份（可多选）</span>
-              </div>
-              <div class="mat-options">
-                <label
-                  v-for="r in filteredReports"
-                  :key="r.id"
-                  class="mat-option"
-                  :class="{ on: pickReportIds.includes(r.id) }"
-                >
-                  <input
-                    type="checkbox"
-                    :checked="pickReportIds.includes(r.id)"
-                    @change="toggleReportPick(r.id)"
-                  />
-                  <span class="mat-option-text">
-                    <b>{{ r.title }}</b>
-                    <span>{{ r.type }} · {{ r.period }}</span>
-                  </span>
-                </label>
-              </div>
-              <p v-if="!reportOptions.length" class="empty">暂无我的报告，先去「报告总结」创建</p>
-              <p v-else-if="!filteredReports.length" class="empty">当前筛选无匹配报告，换个条件试试</p>
-            </template>
             <template v-else>
-              <select v-model="pickClassId" class="kb-input">
-                <option value="" disabled>选择一个班级</option>
-                <option v-for="c in classOptions" :key="c.id" :value="c.id">{{ c.name }}</option>
-              </select>
-              <p v-if="!classOptions.length" class="empty">暂无班级，先去「班级管理」创建</p>
+              <div class="mat-src-seg">
+                <button :class="{ on: matSource === 'report' }" @click="matSource = 'report'">报告总结</button>
+                <button :class="{ on: matSource === 'class' }" @click="matSource = 'class'">班级评估</button>
+              </div>
+              <template v-if="matSource === 'report'">
+                <div class="mat-filters">
+                  <input v-model="matKeyword" class="kb-input" placeholder="🔍 搜索标题 / 类型 / 期间…" maxlength="60" />
+                  <select v-model="matType" class="kb-input">
+                    <option v-for="t in REPORT_TYPES" :key="t.value" :value="t.value">{{ t.label }}</option>
+                  </select>
+                  <div class="mat-dates">
+                    <input v-model="matStart" type="date" class="kb-input" title="起始日期" />
+                    <span>~</span>
+                    <input v-model="matEnd" type="date" class="kb-input" title="结束日期" />
+                  </div>
+                </div>
+                <div class="mat-select-head">
+                  <button class="mini-btn" @click="toggleSelectAllFiltered">
+                    {{ allFilteredSelected ? '取消全选' : '全选当前筛选' }}
+                  </button>
+                  <span class="mat-count">已选 {{ pickReportIds.length }} 份（可多选）</span>
+                  <button v-if="matType || matStart || matEnd || matKeyword" class="mini-btn" @click="resetMatFilters">清空筛选</button>
+                </div>
+                <div class="mat-options">
+                  <label
+                    v-for="r in filteredReports"
+                    :key="r.id"
+                    class="mat-option"
+                    :class="{ on: pickReportIds.includes(r.id) }"
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="pickReportIds.includes(r.id)"
+                      @change="toggleReportPick(r.id)"
+                    />
+                    <span class="mat-type-chip">{{ reportTypeLabel(r.type) }}</span>
+                    <span class="mat-option-text">
+                      <b>{{ r.title }}</b>
+                      <span>{{ r.period || '未设期间' }}</span>
+                    </span>
+                  </label>
+                </div>
+                <p v-if="!reportOptions.length" class="empty">暂无我的报告，先去「报告总结」创建</p>
+                <p v-else-if="!filteredReports.length" class="empty">当前筛选无匹配报告，换个条件试试</p>
+              </template>
+              <template v-else>
+                <select v-model="pickClassId" class="kb-input">
+                  <option value="" disabled>选择一个班级</option>
+                  <option v-for="c in classOptions" :key="c.id" :value="c.id">{{ c.name }}</option>
+                </select>
+                <p v-if="!classOptions.length" class="empty">暂无班级，先去「班级管理」创建</p>
+                <p v-else class="mat-auto">绑定后该班学员最新评估摘要自动带入对话</p>
+              </template>
             </template>
-            <button
-              class="btn primary sm"
-              :disabled="activeConv?.agent_id === 'report_ppt' ? !pickReportIds.length : !pickClassId"
-              @click="confirmMatPick"
-            >
-              绑定到本会话
-            </button>
+            <div class="mat-pick-foot">
+              <button class="mini-btn" @click="clearMaterialPick">清空已选</button>
+              <button
+                class="btn primary sm"
+                :disabled="matSource === 'report' ? !pickReportIds.length : !pickClassId"
+                @click="confirmMatPick"
+              >
+                绑定到本会话
+              </button>
+            </div>
           </div>
           <p v-if="!material.length && !matPicking" class="empty">当前会话未绑定业务数据，可直接在上方选择，无需跳转模块。</p>
           <div v-for="m in material" :key="m.kind + m.id" class="mat-card">
             <b>{{ m.title }}</b>
             <span>{{ m.kind === 'report' ? '报告' : m.kind === 'class' ? '班级' : '上下文' }}{{ m.type ? ` · ${m.type}` : '' }}{{ m.period ? ` · ${m.period}` : '' }}</span>
             <span v-if="m.stat_count" class="kb-file">统计指标 {{ m.stat_count }} 项</span>
+            <span v-if="m.kind === 'class' && m.student_count != null" class="kb-file">
+              {{ m.student_count }} 人 · 评估已完成 {{ m.eval_done ?? 0 }} 人
+            </span>
+            <span v-if="m.kind === 'class' && m.students?.length" class="mat-students">{{ m.students.join('、') }}</span>
+            <span v-if="m.kind === 'class'" class="mat-auto">✓ 学员评估正文已自动带入对话，无需再报名字</span>
           </div>
           <div class="ws-label">对话中引用的知识库片段（{{ usedCitations.length }}）</div>
           <p v-if="!usedCitations.length" class="empty">暂无引用。打开「引用知识库」后再提问会自动检索。</p>
           <div v-for="(c, i) in usedCitations" :key="i" class="cite">
-            <div class="cite-head">《{{ c.title }}》<span v-if="c.similarity != null" class="sim">{{ c.similarity }}</span></div>
+            <div class="cite-head">《{{ c.title }}》<span class="sim">{{ hitScore(c).toFixed(4) }}<em>{{ hitScoreLabel(c) }}</em></span></div>
             <p>{{ c.text.slice(0, 120) }}</p>
           </div>
         </div>
 
         <div v-if="wsTab === 'result'" class="ws-body">
-          <div class="ws-label">人工审核后生成（可反复修改大纲再生成）</div>
-          <input v-model="pptTitle" class="kb-input" placeholder="PPT 标题" maxlength="80" />
-          <div class="theme-row">
-            <button
-              v-for="t in [{ id: 'brand', label: '品牌紫' }, { id: 'cyan', label: '天青' }, { id: 'deep', label: '深邃' }]"
-              :key="t.id"
-              class="mini-btn"
-              :class="{ on: pptTheme === t.id }"
-              @click="pptTheme = t.id"
-            >{{ t.label }}</button>
+          <div class="ws-label-row">
+            <span class="ws-label">本次会话产出文件</span>
+            <span class="mat-count">{{ convFiles(messages).length }} 个</span>
           </div>
-          <button class="btn primary" :disabled="building || !outlineDraft.length" @click="doBuildPpt()">
-            {{ building ? '生成中…' : `生成 PPT${outlineDraft.length ? `（${outlineDraft.length} 页）` : ''}` }}
-          </button>
-          <p v-if="wsError" class="error">{{ wsError }}</p>
-          <div v-if="pptResult" class="ppt-done">
-            <b>已生成 · 共 {{ pptResult.pages }} 页（含封面结尾）</b>
-            <a class="result-download" :href="pptResult.download" target="_blank" download>下载 .pptx</a>
-          </div>
-          <p v-if="!outlineDraft.length" class="empty">还没有可用大纲，无法生成。</p>
+          <p v-if="!convFiles(messages).length" class="empty">
+            还没有产出文件。让 Agent 用 Skill 生成内容（如 PPT）后，产物会自动汇总到这里，可直接下载。
+          </p>
+          <a
+            v-for="(f, i) in convFiles(messages)"
+            :key="i"
+            class="dl-card"
+            :href="f['下载'] ?? f.url"
+            download
+            target="_blank"
+            rel="noopener"
+          >
+            <span class="dl-ext" :data-ext="fileIcon(f['名'] ?? f.name)">{{ extLabel(f['名'] ?? f.name) }}</span>
+            <span class="dl-meta">
+              <b>{{ f['名'] ?? f.name }}</b>
+              <span v-if="fmtBytes(f.字节)">{{ fmtBytes(f.字节) }}</span>
+            </span>
+            <span class="dl-go">下载</span>
+          </a>
         </div>
       </aside>
+    </div>
+
+    <!-- 代码运行预览（svg/html 内联渲染） -->
+    <div v-if="preview" class="overlay code-preview" @click.self="preview = null">
+      <div class="cp-panel">
+        <div class="cp-head">
+          <b>运行预览 · {{ (preview.lang || 'code').toUpperCase() }}</b>
+          <div class="cp-head-ops">
+            <button class="mini-btn" @click="openTabPreview">在新窗口打开</button>
+            <button class="icon-btn" title="关闭" @click="preview = null">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+            </button>
+          </div>
+        </div>
+        <iframe class="cp-frame" :srcdoc="previewSrc()" sandbox="allow-scripts allow-popups" />
+      </div>
+    </div>
+
+    <!-- 自定义 Agent 表单 -->
+    <div v-if="showAgentForm" class="overlay" @click.self="showAgentForm = false">
+      <div class="modal wide">
+        <h2>{{ editingAgent ? '编辑 Agent' : '新建 Agent' }}</h2>
+        <label>名称<input v-model="agentForm.name" class="kb-input" maxlength="64" placeholder="如：续费跟进助手" /></label>
+        <label>描述<input v-model="agentForm.description" class="kb-input" maxlength="256" placeholder="一句话说明用途" /></label>
+        <label>系统提示词<textarea v-model="agentForm.system_prompt" rows="4" class="kb-input" placeholder="这个 Agent 的角色、语气、回答要求…" /></label>
+        <label class="check-line"><input v-model="agentForm.supports_rag" type="checkbox" /> 支持引用知识库（RAG）</label>
+        <div class="pick-group">
+          <b>绑定 MCP（我的，单独作用于此 Agent，全局默认会自动叠加）</b>
+          <div class="pick-list">
+            <label v-for="m in mcps" :key="m.id" class="pick-item">
+              <input type="checkbox" :checked="agentForm.mcp_ids.includes(m.id)" @change="agentForm.mcp_ids = toggleAgentPick(agentForm.mcp_ids, m.id)" />
+              {{ m.name }}<em v-if="m.collected_from_plaza" class="custom-tag">收录</em>
+            </label>
+            <span v-if="!mcps.length" class="empty">暂无 MCP，先去 MCP 页新建</span>
+          </div>
+        </div>
+        <div class="pick-group">
+          <b>绑定 Skill（我的）</b>
+          <div class="pick-list">
+            <label v-for="s in skills" :key="s.id" class="pick-item">
+              <input type="checkbox" :checked="agentForm.skill_ids.includes(s.id)" @change="agentForm.skill_ids = toggleAgentPick(agentForm.skill_ids, s.id)" />
+              {{ s.name }}
+            </label>
+            <span v-if="!skills.length" class="empty">暂无 Skill，先去 Skill 页新建</span>
+          </div>
+        </div>
+        <div v-if="collectedPlazaSkills.length" class="pick-group">
+          <b>绑定 Skill（广场收录 · 他人发布）</b>
+          <div class="pick-list">
+            <label v-for="s in collectedPlazaSkills" :key="s.id" class="pick-item plaza">
+              <input type="checkbox" :checked="agentForm.skill_ids.includes(s.id)" @change="agentForm.skill_ids = toggleAgentPick(agentForm.skill_ids, s.id)" />
+              {{ s.name }}
+            </label>
+          </div>
+          <p class="pick-hint">仅收录且仍在上架的 Skill 可勾选；对方下架后自动失效，无需手动解绑。</p>
+        </div>
+        <p v-if="extError" class="error">{{ extError }}</p>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showAgentForm = false">取消</button>
+          <button class="btn primary" @click="saveAgent()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MCP 表单 -->
+    <div v-if="showMcpForm" class="overlay" @click.self="showMcpForm = false">
+      <div class="modal">
+        <h2>{{ editingMcp ? '配置 MCP' : '新建 MCP' }}</h2>
+        <label>名称<input v-model="mcpForm.name" class="kb-input" maxlength="64" /></label>
+        <label>类型
+          <select v-model="mcpForm.kind" class="kb-input">
+            <option value="streamable_http">MCP StreamableHTTP（高德/标准 MCP 服务）</option>
+            <option value="http">普通 HTTP（POST webhook）</option>
+          </select>
+        </label>
+        <label>Endpoint<input v-model="mcpForm.endpoint" class="kb-input" placeholder="https://…（对话中按需 POST 调用）" /></label>
+        <label>描述<input v-model="mcpForm.description" class="kb-input" maxlength="256" placeholder="这个工具能做什么" /></label>
+        <label class="check-line"><input v-model="mcpForm.enabled" type="checkbox" /> 启用</label>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showMcpForm = false">取消</button>
+          <button class="btn primary" @click="saveMcp()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MCP 测试结果 -->
+    <div v-if="showMcpTest" class="overlay" @click.self="showMcpTest = false">
+      <div class="modal wide">
+        <h2>测试连接：{{ mcpTestTarget?.name }}</h2>
+        <p v-if="mcpTestLoading" class="empty">握手 + 获取工具清单中…</p>
+        <template v-else-if="mcpTestResult">
+          <div class="test-status" :class="mcpTestResult.ok ? 'ok' : 'fail'">
+            {{ mcpTestResult.ok ? '✓ 连接成功' : '✕ 连接失败' }}
+          </div>
+          <div v-if="mcpTestResult.tools.length" class="pick-group">
+            <b>可用工具（{{ mcpTestResult.tools.length }}）</b>
+            <div v-for="t in mcpTestResult.tools" :key="t.name" class="tool-row">
+              <b>{{ t.name }}</b><span>{{ t.description }}</span>
+            </div>
+          </div>
+          <div class="pick-group">
+            <b>调用链路</b>
+            <div v-for="(s, i) in mcpTestResult.trace" :key="i" class="trace-row" :class="s.ok ? 'ok' : 'fail'">
+              <span class="trace-step">{{ s.step }}</span>
+              <span class="trace-detail">{{ s.detail }}</span>
+              <span class="trace-ms">{{ s.ms }}ms</span>
+            </div>
+          </div>
+        </template>
+        <div class="modal-actions">
+          <button class="btn primary" @click="showMcpTest = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skill 表单 -->
+    <div v-if="showSkillForm" class="overlay" @click.self="showSkillForm = false">
+      <div class="modal">
+        <h2>{{ editingSkill ? '配置 Skill' : '新建 Skill' }}</h2>
+        <label>名称<input v-model="skillForm.name" class="kb-input" maxlength="64" /></label>
+        <label>描述<input v-model="skillForm.description" class="kb-input" maxlength="256" /></label>
+        <label>指令内容<textarea v-model="skillForm.content" rows="5" class="kb-input" placeholder="追加进系统提示的指令，如：回答先给结论再列依据…" /></label>
+        <label class="check-line"><input v-model="skillForm.enabled" type="checkbox" /> 启用</label>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="showSkillForm = false">取消</button>
+          <button class="btn primary" @click="saveSkill()">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 自建 Agent 删除确认（ConfirmDialog 统一风格） -->
+    <ConfirmDialog
+      :visible="!!deletingAgent"
+      title="删除 Agent"
+      :message="deletingAgent
+        ? `确认删除「${deletingAgent.name}」？该 Agent 的历史会话将保留，但删除后不可再新建该 Agent 的对话。此操作不可恢复。`
+        : ''"
+      confirm-text="确认删除"
+      danger
+      @confirm="confirmRemoveAgent"
+      @cancel="deletingAgent = null"
+    />
+    <!-- 无权限提示（如导入 ZIP 被管理员关闭） -->
+    <ConfirmDialog
+      :visible="showNoPerm"
+      title="暂无操作权限"
+      :message="noPermText"
+      confirm-text="知道了"
+      @confirm="showNoPerm = false"
+      @cancel="showNoPerm = false"
+    />
+
+    <!-- Skill 删除确认 -->
+    <div v-if="deletingSkill" class="overlay" @click.self="deletingSkill = null">
+      <div class="modal danger-modal">
+        <div class="danger-ico">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
+        </div>
+        <h2>删除 Skill？</h2>
+        <p class="danger-text">将删除「<b>{{ deletingSkill.name }}</b>」及其全部 {{ (deletingSkill.files ?? []).length }} 个配套文件，已绑定该 Skill 的 Agent 与全局配置将自动失效该项。此操作不可恢复。</p>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="deletingSkill = null">取消</button>
+          <button class="btn danger-solid" @click="removeSkill()">确认删除</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 脚本运行弹窗（含参数） -->
+    <div v-if="runTarget" class="overlay" @click.self="runTarget = null">
+      <div class="modal">
+        <h2>运行脚本</h2>
+        <div class="run-path">{{ runTarget.path }}</div>
+        <label>运行参数（空格分隔，如 <code>docs/README.md --fix</code>；不需要可留空）
+          <input v-model="runArgs" class="kb-input" placeholder="check_annotations.py 需要 path 参数，如 docs/README.md" @keydown.enter="confirmRun()" />
+        </label>
+        <p class="run-provider">经由：{{ sandbox.provider === 'bailian' ? '百炼沙箱' : '本地沙箱' }}（Skill 页沙箱配置区可切换）</p>
+        <p v-if="runTarget && (runTarget.s.files ?? []).some((f) => String(f).split('/').pop()?.toLowerCase().startsWith('requirements'))" class="run-provider">检测到 requirements.txt：百炼沙箱会先自动 pip 安装依赖再运行（模板网络白名单需放行 pypi）</p>
+        <div v-if="skillRunOut && skillRunOut.skillId === runTarget.s.id" class="skill-runout" :class="{ fail: !skillRunOut.ok }">
+          <b>{{ skillRunOut.ok ? '运行成功' : '运行失败' }}</b>
+          <span v-if="skillRunOut.deps" class="runout-tip">✓ {{ skillRunOut.deps }}</span>
+          <details v-if="skillRunOut.phases?.length" class="runout-steps">
+            <summary>执行过程（{{ skillRunOut.phases.length }} 步）· 含 sandboxID 与依赖日志</summary>
+            <div v-for="(p, i) in skillRunOut.phases" :key="i" class="runout-step">{{ p }}</div>
+            <pre v-if="skillRunOut.deps_log">{{ skillRunOut.deps_log }}</pre>
+          </details>
+          <pre v-if="skillRunOut.stdout">{{ skillRunOut.stdout }}</pre>
+          <pre v-if="skillRunOut.stderr" class="err">{{ skillRunOut.stderr }}</pre>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" @click="runTarget = null">关闭</button>
+          <button class="btn primary" :disabled="runLoading" @click="confirmRun()">{{ runLoading ? '运行中…' : '运行' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skill 文件预览 -->
+    <div v-if="skillPreview" class="overlay" @click.self="skillPreview = null">
+      <div class="modal wide">
+        <h2>{{ skillPreview.path }}</h2>
+        <pre class="file-preview">{{ skillPreview.text }}</pre>
+        <div class="modal-actions">
+          <button class="btn primary" @click="skillPreview = null">关闭</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -1860,16 +3682,14 @@ function back() {
 }
 .seg button svg { width: 15px; height: 15px; }
 .seg button.on { background: var(--surface); color: var(--brand-strong); box-shadow: var(--shadow-xs); }
-
-.memory-panel { border: 1px solid var(--brand); background: var(--brand-soft); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; font-size: 13px; }
-.memory-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-weight: 700; color: var(--brand-strong); }
-.memory-hint { font-size: 11px; font-weight: 500; color: var(--ink-3); }
-.memory-panel ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
-.memory-panel li { display: flex; align-items: baseline; gap: 8px; background: var(--surface); border-radius: var(--radius-sm); padding: 6px 10px; }
-.memory-panel li b { color: var(--ink); flex-shrink: 0; }
-.memory-panel li span { color: var(--ink-2); flex: 1; }
+.mat-students { font-size: 11.5px; color: var(--ink-2); line-height: 1.6; }
+.mat-auto { font-size: 11.5px; color: var(--brand-strong); }
 .chip-del { border: none; background: transparent; color: var(--ink-light); cursor: pointer; font-size: 15px; }
 .chip-del:hover { color: var(--danger); }
+
+/* —— 自动引用知识库提示 —— */
+.rag-auto-note { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--brand-strong); background: var(--brand-soft); border-radius: 7px; padding: 4px 9px; margin: 6px 0 2px; }
+.rag-auto-note svg { width: 13px; height: 13px; flex-shrink: 0; }
 
 .empty, .empty-hero { color: var(--ink-3); font-size: 13px; }
 .empty { text-align: center; padding: 8px 0; }
@@ -1942,6 +3762,9 @@ function back() {
 .avatar.ai { color: #fff; background: var(--brand-gradient); }
 .avatar.ai svg { width: 15px; height: 15px; }
 .bubble { max-width: 78%; min-width: 0; padding: 10px 14px; border-radius: 14px; font-size: 13.5px; line-height: 1.68; overflow-wrap: anywhere; word-break: break-word; }
+.msg-expand { margin-top: 6px; border: none; background: transparent; color: rgba(255, 255, 255, 0.85); font-size: 12px; cursor: pointer; padding: 2px 0; text-decoration: underline; }
+.msg-expand:hover { color: #fff; }
+.msg.assistant .msg-expand { color: var(--brand-strong); }
 .bubble :deep(pre) { overflow-x: auto; max-width: 100%; }
 .bubble :deep(table) { display: block; overflow-x: auto; max-width: 100%; }
 .bubble :deep(img) { max-width: 100%; height: auto; }
@@ -1968,6 +3791,8 @@ function back() {
 .pause-btn { margin-left: auto; border: 1px solid var(--brand); background: var(--surface); color: var(--brand-strong); border-radius: var(--radius-pill); padding: 2px 10px; font-size: 11.5px; cursor: pointer; }
 .pause-btn:hover { background: var(--brand-soft); }
 .spinner { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--brand-glow); border-top-color: var(--brand-strong); animation: spin .8s linear infinite; display: inline-block; }
+.live-tools { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.live-tools-title { font-size: 11.5px; font-weight: 700; color: var(--brand-strong); }
 @keyframes spin { to { transform: rotate(360deg); } }
 .cite-drop { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 6px; }
 .cite-drop summary {
@@ -1982,6 +3807,9 @@ function back() {
 .cite-head { display: flex; align-items: center; gap: 5px; font-weight: 700; color: var(--brand-strong); }
 .cite-head svg { width: 13px; height: 13px; }
 .sim { margin-left: auto; font-size: 10.5px; font-weight: 600; color: var(--ink-3); background: var(--bg-soft); padding: 1px 6px; border-radius: 4px; }
+.sim em { font-style: normal; margin-left: 4px; opacity: .65; font-weight: 500; }
+.retrieval-line { margin: 5px 0 2px; font-size: 11px; color: var(--ink-3); }
+.trace-link { margin-left: 8px; color: var(--brand-strong); text-decoration: none; font-weight: 600; }
 .cite p { margin: 3px 0 0; color: var(--ink-2); line-height: 1.55; }
 /* 业务工具调用轨迹：默认收起，点击展开 */
 .tool-drop summary { color: var(--ink-2); }
@@ -1990,13 +3818,19 @@ function back() {
 .tool-meta { font-size: 11.5px; color: var(--ink-3); margin: 6px 0 0; }
 .tool-step { margin-top: 6px; font-size: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 7px 9px; }
 .tool-step.fail { border-color: #fca5a5; background: #fef2f2; }
+.tool-step.running { border-color: var(--brand-strong); box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-strong) 20%, transparent); }
 .tool-step-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .tool-dot { width: 16px; height: 16px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #fff; }
 .tool-dot.ok { background: #10b981; }
 .tool-dot.fail { background: #ef4444; }
+.tool-dot.spinning { background: #f59e0b; animation: tool-pulse 1.1s ease-in-out infinite; }
+@keyframes tool-pulse { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
 .tool-step-head b { color: var(--ink-1); }
 .tool-args { font-size: 11px; color: var(--ink-3); background: var(--bg-soft); padding: 1px 7px; border-radius: 4px; }
 .tool-summary { margin: 5px 0 0; color: var(--ink-2); line-height: 1.55; word-break: break-all; }
+.tool-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.file-dl { font-size: 11.5px; font-weight: 700; color: #fff; background: var(--brand); border-radius: 999px; padding: 3px 12px; text-decoration: none; }
+.file-dl:hover { filter: brightness(1.1); color: #fff; }
 .tool-error { margin: 5px 0 0; color: #b91c1c; line-height: 1.55; }
 
 .error { color: var(--danger); font-size: 12.5px; padding: 4px 0; }
@@ -2058,6 +3892,26 @@ function back() {
 .kb-input { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 9px 12px; font-size: 13px; font-family: inherit; }
 .kb-input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-glow); }
 .kb-form .btn { grid-column: 1 / -1; justify-self: start; }
+.kb-form > .kb-input { grid-column: 1 / -1; }
+.file-drop.has-files { padding: 10px; }
+.up-list { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow: auto; }
+.up-item { display: grid; grid-template-columns: minmax(0, 1fr) 220px auto; gap: 8px; align-items: start; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface); }
+.up-item.error { border-color: #fecaca; background: #fffafa; }
+.up-item-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding-top: 6px; }
+.up-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.up-size { font-size: 11px; color: var(--ink-3); }
+.up-err { grid-column: 1 / -1; font-size: 11px; color: #b91c1c; margin: 0; }
+.up-title { padding: 6px 9px; font-size: 12px; }
+.up-remove { margin-top: 2px; }
+.up-desc-row { grid-column: 1 / -1; display: flex; gap: 8px; align-items: flex-start; }
+.up-desc { flex: 1; min-height: 54px; resize: vertical; padding: 7px 9px; font-size: 12px; line-height: 1.5; }
+.up-gen { white-space: nowrap; margin-top: 4px; }
+.up-auto-desc { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 10px; background: var(--surface); }
+.up-auto-desc .check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+.up-model { min-width: 220px; padding: 6px 9px; font-size: 12px; }
+.up-actions { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+.up-actions .btn { justify-self: auto; }
+.ok-note { color: #047857; background: var(--success-soft, #ecfdf5); padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; font-size: 12.5px; }
 
 .kb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
 .kb-card { display: flex; flex-direction: column; gap: 6px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); transition: all .18s; }
@@ -2109,16 +3963,30 @@ function back() {
 .ws-foot { display: flex; gap: 8px; align-items: center; margin-top: auto; padding-top: 8px; position: sticky; bottom: 0; background: var(--surface); }
 .btn.sm { padding: 7px 14px; font-size: 12.5px; }
 .ol-list { display: flex; flex-direction: column; gap: 6px; }
-.ol-item { display: flex; gap: 8px; align-items: flex-start; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 7px 8px; }
+.ol-item { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 7px 8px; }
+.ol-item--merge.open { border-color: var(--brand); box-shadow: 0 2px 10px -4px rgba(97,95,255,.3); }
+.ol-head-row { display: flex; align-items: center; gap: 8px; }
+.ol-title-btn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; justify-content: space-between; text-align: left; border: none; background: transparent; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-1); padding: 2px 4px; border-radius: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ol-title-btn:hover { background: var(--bg-soft); color: var(--brand-strong); }
+.ol-chev { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
+.ol-expand { margin-top: 2px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.ol-expand-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.ol-expand-tabs button { border: 1px solid var(--line); background: var(--bg-soft); border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer; color: var(--ink-2); }
+.ol-expand-tabs button.on { background: var(--brand); color: #fff; border-color: var(--brand); }
+.ol-expand-tabs button:disabled { opacity: .45; cursor: not-allowed; }
+.ol-svg-preview { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
+.ol-svg-preview img { display: block; width: 100%; height: auto; }
+.ol-svg-code { max-height: 300px; overflow: auto; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 10px; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.ol-expand-empty { font-size: 12px; color: var(--ink-3); background: var(--bg-soft); border-radius: 8px; padding: 10px; }
 .ol-no { width: 20px; height: 20px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--brand-soft); color: var(--brand-strong); font-size: 11px; font-weight: 700; }
-.ol-fields { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.ol-fields { display: flex; flex-direction: column; gap: 4px; }
 .ol-title { border: 1px solid transparent; border-radius: 6px; padding: 3px 6px; font-size: 12.5px; font-weight: 600; width: 100%; }
 .ol-title:hover, .ol-title:focus { border-color: var(--line); outline: none; }
 .ol-title:focus { border-color: var(--brand); }
 .ol-note { border: 1px solid transparent; border-radius: 6px; padding: 3px 6px; font-size: 11.5px; color: var(--ink-2); width: 100%; }
 .ol-note:hover, .ol-note:focus { border-color: var(--line); outline: none; }
 .ol-note:focus { border-color: var(--brand); }
-.ol-ops { display: flex; flex-direction: column; gap: 2px; }
+.ol-ops { display: flex; flex-direction: row; gap: 2px; flex-shrink: 0; }
 .ol-ops button { border: none; background: transparent; color: var(--ink-3); cursor: pointer; font-size: 12px; line-height: 1.2; padding: 1px 4px; border-radius: 4px; }
 .ol-ops button:hover { background: var(--bg-soft); color: var(--brand-strong); }
 .ol-ops button.danger:hover { color: var(--danger); background: var(--danger-soft); }
@@ -2151,9 +4019,270 @@ function back() {
 .result-download { display: inline-flex; align-items: center; justify-content: center; padding: 8px 14px; border-radius: var(--radius-sm); background: var(--brand-gradient); color: #fff; font-size: 13px; font-weight: 700; text-decoration: none; }
 .result-download:hover { filter: brightness(1.05); }
 
+.ext-hero {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 16px 18px; margin-bottom: 14px; border-radius: var(--radius);
+  background: linear-gradient(135deg, #eef2ff, #f5f3ff, #ecfeff); border: 1px solid #e0e7ff;
+}
+.ext-hero b { font-size: 16px; }
+.ext-hero p { margin: 4px 0 0; font-size: 12.5px; color: var(--ink-2); max-width: 560px; line-height: 1.6; }
+.ext-card { position: relative; }
+.glob-check { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 700; color: var(--brand-strong); cursor: pointer; }
+.glob-check input { accent-color: var(--brand); }
+/* —— 广场：知识库 / Skill 分区 —— */
+.plaza-seg { display: inline-flex; gap: 4px; padding: 4px; background: var(--bg-soft); border-radius: var(--radius-pill); margin-bottom: 12px; flex-shrink: 0; }
+.plaza-seg button { border: none; background: transparent; cursor: pointer; padding: 7px 20px; border-radius: var(--radius-pill); font-size: 13px; font-weight: 600; color: var(--ink-3); transition: all .15s; }
+.plaza-seg button.on { background: var(--surface); color: var(--brand-strong); box-shadow: var(--shadow-xs); }
+.plaza-hint { font-size: 12px; color: var(--ink-3); margin: 0 0 12px; line-height: 1.6; }
+.kb-ops-right { display: inline-flex; align-items: center; gap: 8px; }
+.pick-item.plaza { border-color: var(--accent); background: var(--accent-soft); }
+.pick-hint { font-size: 11px; color: var(--ink-3); margin: 6px 0 0; line-height: 1.5; }
+.custom-tag { font-style: normal; font-size: 10px; font-weight: 700; color: var(--brand-strong); background: var(--brand-soft); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
+.manage-agent { align-self: flex-start; margin-bottom: 8px; }
+.custom-manage { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); flex-shrink: 0; overflow: visible; }
+.custom-manage-title { font-size: 12px; font-weight: 700; color: var(--ink-3); flex-shrink: 0; white-space: nowrap; }
+.custom-chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.custom-chips.col { flex-direction: column; align-items: stretch; }
+.custom-row { display: flex; align-items: center; gap: 8px; width: 100%; background: var(--brand-soft); border-radius: 10px; padding: 6px 8px 6px 12px; min-width: 0; }
+.custom-row-ops { margin-left: auto; display: inline-flex; gap: 6px; flex-shrink: 0; }
+.custom-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12.5px; font-weight: 600; background: var(--brand-soft); color: var(--brand-strong); border-radius: 999px; padding: 4px 6px 4px 12px; white-space: nowrap; }
+.custom-chip-name { overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+.custom-chip-btn { flex-shrink: 0; border: none; background: var(--surface); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer; color: var(--brand-strong); white-space: nowrap; }
+.custom-chip-btn.danger { color: var(--danger); }
+.file-chip-wrap { display: inline-flex; align-items: center; gap: 2px; }
+.file-run { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; font-size: 10px; cursor: pointer; padding: 2px 6px; color: var(--success, #047857); }
+.skill-runout { margin-top: 6px; font-size: 11.5px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: #f8fafc; }
+.skill-runout.fail { border-color: #fca5a5; background: #fef2f2; }
+.skill-runout pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
+.skill-runout pre.err { color: var(--danger); }
+.runout-tip { display: block; font-size: 10.5px; font-weight: 500; color: var(--ink-3); margin-top: 2px; }
+.runout-tag { display: inline-block; font-size: 10px; font-weight: 800; border-radius: 999px; padding: 1px 8px; margin-left: 6px; background: var(--bg-soft); color: var(--ink-3); }
+.runout-tag.remote { background: var(--accent-soft); color: var(--accent-strong); }
+.runout-tag.local { background: var(--brand-soft); color: var(--brand-strong); }
+.runout-steps { margin-top: 6px; border: 1px dashed var(--line); border-radius: 8px; padding: 4px 8px 8px; }
+.runout-steps summary { cursor: pointer; font-size: 11.5px; font-weight: 700; color: var(--brand-strong); }
+.runout-step { font-size: 11.5px; color: var(--ink-2); padding: 2px 0; word-break: break-all; }
+.run-path { font-size: 12px; color: var(--brand-strong); background: var(--brand-soft); border-radius: 8px; padding: 6px 10px; word-break: break-all; }
+.run-provider { font-size: 12px; color: var(--ink-3); margin: 0; }
+.sandbox-card { border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 14px; background: var(--surface-alt); }
+.sandbox-head { width: 100%; display: flex; align-items: center; justify-content: space-between; border: none; background: transparent; cursor: pointer; padding: 10px 14px; font-size: 13px; color: var(--ink-1); }
+.sandbox-head span { font-size: 12px; color: var(--brand-strong); font-weight: 700; }
+.sandbox-body { display: flex; flex-direction: column; gap: 8px; padding: 0 14px 14px; }
+.sandbox-desc { font-size: 12px; color: var(--ink-2); line-height: 1.7; margin: 0; }
+.sandbox-desc code { background: rgba(99,102,241,.12); padding: 1px 5px; border-radius: 4px; }
+.sandbox-row { display: grid; grid-template-columns: 1fr 160px; gap: 8px; }
+.sandbox-body label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.sandbox-ops { display: flex; align-items: center; gap: 8px; }
+.sandbox-msg { font-size: 12px; font-weight: 600; color: var(--brand-strong); }
+/* —— 通用渲染格式补齐：徽章/标签/折叠/进度/图表/时间轴/告警/终端 —— */
+.bubble :deep(.md-badge) { display: inline-block; font-size: 11px; font-weight: 800; color: #fff; background: var(--brand-gradient); border-radius: 999px; padding: 1px 9px; margin: 0 2px; }
+.bubble :deep(.md-tag) { display: inline-block; font-size: 11px; color: var(--brand-strong); background: var(--brand-soft); border-radius: 6px; padding: 1px 8px; margin: 0 2px; }
+.bubble :deep(.md-hr) { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
+.bubble :deep(.md-math) { font-family: Consolas, monospace; background: rgba(99,102,241,.08); padding: 1px 6px; border-radius: 4px; }
+.bubble :deep(.md-math.block) { display: block; text-align: center; padding: 8px; margin: 8px 0; }
+.bubble :deep(.md-fold) { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; background: var(--surface); }
+.bubble :deep(.md-fold summary) { cursor: pointer; padding: 7px 11px; font-size: 12.5px; font-weight: 700; color: var(--brand-strong); }
+.bubble :deep(.md-fold > div), .bubble :deep(.md-fold > pre) { margin: 0 11px 11px; }
+.bubble :deep(.md-copy) { float: right; font-size: 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; padding: 1px 8px; }
+.bubble :deep(.md-kv-row) { display: flex; gap: 10px; font-size: 12.5px; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.bubble :deep(.md-kv-row b) { min-width: 90px; color: var(--ink-1); }
+.bubble :deep(.md-tree) { background: #0f172a; color: #a5f3fc; border-radius: 8px; padding: 10px 12px; font-size: 12px; overflow-x: auto; }
+.bubble :deep(.md-terminal) { background: #0f172a; color: #86efac; border-radius: 8px; padding: 10px 12px; font-size: 12px; overflow-x: auto; }
+.bubble :deep(.md-alert) { border-radius: 8px; padding: 8px 12px; font-size: 12.5px; margin: 8px 0; }
+.bubble :deep(.md-alert.info) { background: #eff6ff; border-left: 3px solid #3b82f6; }
+.bubble :deep(.md-alert.warn) { background: #fffbeb; border-left: 3px solid #f59e0b; }
+.bubble :deep(.md-alert.error) { background: #fef2f2; border-left: 3px solid #ef4444; }
+.bubble :deep(.md-alert.success) { background: #ecfdf5; border-left: 3px solid #10b981; }
+.bubble :deep(.md-progress) { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 12px; }
+.bubble :deep(.md-progress-track) { flex: 1; height: 8px; background: var(--bg-soft); border-radius: 999px; overflow: hidden; }
+.bubble :deep(.md-progress-fill) { height: 100%; background: var(--brand-gradient); border-radius: 999px; }
+.bubble :deep(.md-chart-row) { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 4px 0; }
+.bubble :deep(.md-chart-lb) { width: 90px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bubble :deep(.md-chart-track) { flex: 1; height: 10px; background: var(--bg-soft); border-radius: 999px; overflow: hidden; }
+.bubble :deep(.md-chart-fill) { display: block; height: 100%; background: var(--brand-gradient); }
+.bubble :deep(.md-timeline) { border-left: 2px solid var(--brand); margin: 8px 0 8px 6px; padding-left: 12px; display: flex; flex-direction: column; gap: 6px; }
+.bubble :deep(.md-tl-item) { display: flex; gap: 8px; font-size: 12.5px; }
+.bubble :deep(.md-tl-dot) { width: 8px; height: 8px; border-radius: 50%; background: var(--brand-strong); margin-top: 5px; flex-shrink: 0; }
+.bubble :deep(.md-mermaid-head) { font-size: 12px; font-weight: 700; color: var(--brand-strong); margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+.bubble :deep(.md-mermaid pre) { background: #f8fafc; border: 1px dashed var(--brand); border-radius: 8px; padding: 10px; font-size: 11.5px; overflow-x: auto; }
+.bubble :deep(.md-mermaid.rendered pre.mermaid-src) { display: none; }
+.bubble :deep(.mermaid-render) { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow-x: auto; }
+.bubble :deep(.mermaid-render:empty) { display: none; }
+.bubble :deep(.mermaid-render svg) { max-width: 100%; height: auto; }
+.bubble :deep(.md-mermaid-error) { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #a03028; }
+.bubble :deep(.md-mermaid-retry) { padding: 3px 10px; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; font-size: 11.5px; cursor: pointer; }
+.bubble :deep(.md-code-wrap) { margin: 8px 0; border-radius: var(--radius-sm); overflow: hidden; border: 1px solid #1e293b; }
+.bubble :deep(.md-code-head) { display: flex; align-items: center; justify-content: space-between; background: #1e293b; color: #94a3b8; font-size: 11px; padding: 4px 10px; }
+.bubble :deep(.md-code-head .md-copy) { float: none; background: transparent; color: #e2e8f0; border-color: #475569; }
+.bubble :deep(.md-code-wrap .md-code) { margin: 0; border-radius: 0; }
+.bubble :deep(.md-code.yaml-hl) { color: #bae6fd; }
+.bubble :deep(.md-tasks) { list-style: none; padding-left: 4px; }
+.bubble :deep(.md-footnotes) { font-size: 11.5px; color: var(--ink-3); border-top: 1px solid var(--line); margin-top: 8px; }
+
+/* —— 消息级下载区：一眼可见，无需展开执行链路 —— */
+.dl-banner { margin: 10px 0 4px; border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(180deg, var(--brand-soft), transparent); padding: 10px 12px; }
+.dl-banner-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--brand-strong); margin-bottom: 8px; }
+.dl-banner-title svg { width: 15px; height: 15px; }
+.dl-banner-list { display: flex; flex-direction: column; gap: 6px; }
+.dl-card { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); text-decoration: none; color: var(--ink-1); transition: transform .15s, box-shadow .15s, border-color .15s; }
+.dl-card:hover { border-color: var(--brand); box-shadow: 0 2px 12px rgba(99, 102, 241, .14); transform: translateY(-1px); }
+.dl-ext { flex-shrink: 0; width: 38px; height: 38px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; color: #fff; letter-spacing: .5px; background: var(--brand-gradient); }
+.dl-ext[data-ext="ppt"] { background: linear-gradient(135deg, #f97316, #ea580c); }
+.dl-ext[data-ext="pdf"] { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+.dl-ext[data-ext="doc"] { background: linear-gradient(135deg, #3b82f6, #1d4ed8); }
+.dl-ext[data-ext="xls"] { background: linear-gradient(135deg, #10b981, #047857); }
+.dl-ext[data-ext="img"] { background: linear-gradient(135deg, #a855f7, #7c3aed); }
+.dl-ext[data-ext="json"] { background: linear-gradient(135deg, #64748b, #334155); }
+.dl-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dl-meta b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-meta span { font-size: 11px; color: var(--ink-3); }
+.dl-go { flex-shrink: 0; font-size: 12px; font-weight: 700; color: var(--brand-strong); border: 1px solid var(--brand); border-radius: 7px; padding: 4px 12px; }
+
+/* —— 代码块 复制 / 下载 / 运行 —— */
+.bubble :deep(.md-code-ops) { display: inline-flex; gap: 6px; }
+.bubble :deep(.md-dl), .bubble :deep(.md-run) { font-size: 11px; border: 1px solid #475569; border-radius: 6px; background: transparent; color: #e2e8f0; cursor: pointer; padding: 1px 8px; }
+.bubble :deep(.md-run) { color: #86efac; border-color: #166534; }
+.bubble :deep(.md-dl:hover) { border-color: #94a3b8; }
+.bubble :deep(.md-run:hover) { border-color: #22c55e; }
+
+/* —— 代码运行预览弹窗 —— */
+.overlay.code-preview { z-index: 60; }
+.cp-panel { width: min(1100px, 94vw); height: min(760px, 90vh); display: flex; flex-direction: column; background: var(--surface); border-radius: 14px; overflow: hidden; box-shadow: 0 20px 60px rgba(0, 0, 0, .4); }
+.cp-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.cp-head b { font-size: 13px; color: var(--brand-strong); }
+.cp-head-ops { display: flex; align-items: center; gap: 8px; }
+.cp-frame { flex: 1; width: 100%; border: 0; background: #0b1220; }
+.overlay { position: fixed; inset: 0; background: rgba(15,23,42,.5); display: flex; align-items: center; justify-content: center; z-index: 200; }
+.modal { width: 440px; max-width: calc(100vw - 40px); max-height: 86vh; overflow: auto; background: var(--surface); border-radius: 16px; padding: 24px; display: flex; flex-direction: column; gap: 10px; }
+.modal.wide { width: 560px; }
+.modal h2 { margin: 0 0 6px; font-size: 16px; }
+.modal label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.check-line { flex-direction: row !important; align-items: center; gap: 6px !important; }
+.pick-group b { font-size: 12.5px; }
+.pick-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.pick-item { flex-direction: row !important; align-items: center; gap: 5px !important; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; font-weight: 500 !important; cursor: pointer; }
+.pick-item input { accent-color: var(--brand); }
+.mini-btn.accent { border-color: var(--brand); color: var(--brand-strong); background: var(--brand-soft); }
+.kb-kind { font-size: 11px; font-weight: 700; color: var(--ink-3); background: #f1f5f9; border-radius: 6px; padding: 2px 8px; display: inline-block; margin-top: 6px; }
+.test-status { font-size: 14px; font-weight: 800; border-radius: 10px; padding: 10px 14px; margin-bottom: 10px; }
+.test-status.ok { background: #ecfdf5; color: #047857; }
+.test-status.fail { background: var(--danger-soft); color: var(--danger); }
+.tool-row { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+.tool-row b { color: var(--brand-strong); white-space: nowrap; }
+.tool-row span { color: var(--ink-3); }
+.trace-row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 6px 8px; border-radius: 8px; margin: 4px 0; background: #f8fafc; }
+.trace-row.ok { border-left: 3px solid var(--success); }
+.trace-row.fail { border-left: 3px solid var(--danger); }
+.trace-step { font-weight: 800; white-space: nowrap; color: var(--ink); }
+.trace-row.fail .trace-step { color: var(--danger); }
+.trace-detail { flex: 1; color: var(--ink-2); word-break: break-all; line-height: 1.5; }
+.trace-ms { color: var(--ink-3); white-space: nowrap; font-size: 11px; }
+.skill-files { margin-top: 6px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; }
+.skill-files summary { cursor: pointer; padding: 6px 10px; font-size: 11.5px; font-weight: 700; color: var(--brand-strong); user-select: none; }
+.skill-file-list { display: flex; flex-direction: column; gap: 8px; max-height: 180px; overflow-y: auto; padding: 0 8px 8px; }
+.skill-dir { display: block; }
+.skill-dir-name { font-size: 11px; font-weight: 800; color: var(--ink-3); padding-top: 4px; margin-bottom: 4px; }
+.skill-dir .file-chip-wrap { margin-right: 2px; }
+.skill-layout { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px 2px; }
+.layout-chip { font-size: 10.5px; font-weight: 700; padding: 2px 9px; border-radius: 999px; background: var(--bg-soft); color: var(--ink-3); }
+.layout-chip.ok { background: var(--success-soft); color: #047857; }
+.layout-chip.miss { background: var(--danger-soft); color: var(--danger); }
+.danger-modal { align-items: center; text-align: center; }
+.danger-ico { width: 48px; height: 48px; margin: 0 auto; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--danger-soft); color: var(--danger); }
+.danger-ico svg { width: 24px; height: 24px; }
+.danger-text { font-size: 13px; color: var(--ink-2); line-height: 1.7; margin: 0; }
+.danger-text b { color: var(--danger); }
+.btn.danger-solid { border: none; background: var(--danger); color: #fff; }
+.btn.danger-solid:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+.file-chip { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; font-size: 11px; padding: 2px 8px; cursor: pointer; color: var(--brand-strong); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip:hover { border-color: var(--brand); }
+.file-preview { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.6; background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 14px; max-height: 50vh; overflow: auto; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.btn.ghost { background: var(--surface); border: 1px solid var(--line); }
+
+/* —— 自建 Agent：挂在卡片图标上，hover 展开查看/删除 —— */
+.custom-tag { font-style: normal; font-size: 10px; font-weight: 700; color: var(--brand-strong); background: var(--brand-soft); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
+.agent-card { position: relative; }
+.agent-more {
+  display: none; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 24px; height: 24px; border-radius: 6px; color: var(--ink-3); cursor: pointer;
+}
+.agent-more:hover { background: var(--brand-soft); color: var(--brand-strong); }
+.agent-card:hover .agent-more { display: inline-flex; }
+.agent-more svg { width: 15px; height: 15px; }
+.agent-menu {
+  position: absolute; right: 6px; bottom: 6px; z-index: 60; display: flex; gap: 2px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 9px;
+  box-shadow: var(--shadow); padding: 3px;
+}
+.agent-menu button {
+  border: none; background: transparent; cursor: pointer; white-space: nowrap;
+  padding: 5px 10px; font-size: 12px; font-weight: 700; color: var(--brand-strong); border-radius: 6px;
+}
+.agent-menu button:hover { background: var(--brand-soft); }
+.agent-menu button.danger { color: var(--danger); }
+.agent-menu button.danger:hover { background: var(--danger-soft); }
+.manage-agent { align-self: flex-start; margin-bottom: 8px; }
+.att-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+.att-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 240px; border: 1px solid var(--line); background: var(--bg-soft); border-radius: 9px; padding: 3px 6px 3px 3px; font-size: 11.5px; }
+.att-thumb { width: 30px; height: 30px; object-fit: cover; border-radius: 6px; }
+.att-doc { font-size: 16px; }
+.att-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-x { border: none; background: transparent; cursor: pointer; color: var(--ink-3); font-size: 14px; }
+.att-x:hover { color: var(--danger); }
+.att-loading, .att-err { font-size: 11.5px; color: var(--ink-3); }
+.att-err { color: var(--danger); }
+.composer { display: flex; gap: 8px; align-items: flex-end; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); padding: 8px; box-shadow: var(--shadow-sm); transition: border-color .15s, box-shadow .15s; }
+.composer:focus-within { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-glow); }
+.composer textarea { flex: 1; resize: none; border: none; background: transparent; padding: 8px 6px; font-size: 13.5px; font-family: inherit; line-height: 1.6; max-height: 200px; color: var(--ink-1); }
+.composer textarea:focus { outline: none; }
+.composer-left { position: relative; flex-shrink: 0; }
+.plus-btn { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); background: var(--bg-soft); border-radius: 50%; color: var(--ink-2); cursor: pointer; transition: all .15s; }
+.plus-btn:hover, .plus-btn.on { border-color: var(--brand); color: var(--brand-strong); transform: rotate(45deg); }
+.plus-btn svg { width: 17px; height: 17px; }
+.plus-menu { position: absolute; left: 0; bottom: 42px; z-index: 120; display: flex; flex-direction: column; gap: 4px; width: 250px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 6px; }
+/* 悬停桥：补上按钮与菜单之间的 8px 空隙，鼠标移向菜单项时不会误触 mouseleave 而收起（不影响点击） */
+.plus-menu::after { content: ""; position: absolute; left: 0; right: 0; bottom: -10px; height: 12px; }
+/* 已发送消息里的附件徽标 */
+.msg-atts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.att-chip.sent { text-decoration: none; cursor: pointer; }
+.att-chip.sent:hover { border-color: var(--brand); }
+.plus-item { display: flex; gap: 10px; align-items: center; border: none; background: transparent; text-align: left; cursor: pointer; padding: 8px 10px; border-radius: 9px; }
+.plus-item:hover:not(:disabled) { background: var(--bg-soft); }
+.plus-item:disabled { opacity: .5; cursor: not-allowed; }
+.plus-item span:last-child { display: flex; flex-direction: column; gap: 1px; }
+.plus-item b { font-size: 13px; color: var(--ink-1); }
+.plus-item i { font-style: normal; font-size: 11px; color: var(--ink-3); }
+.plus-ico { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex-shrink: 0; border-radius: 8px; background: var(--brand-soft); color: var(--brand-strong); }
+.plus-ico svg { width: 17px; height: 17px; }
+
+/* —— 大纲幻灯片预览（封面 + 内容 + 尾页，主题跟随） —— */
+.deck { display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow-y: auto; }
+.deck-slide { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #fff; }
+.deck-cover { position: relative; padding: 26px 16px 20px; background: linear-gradient(135deg, var(--sp), var(--sa)); color: #fff; display: flex; flex-direction: column; gap: 6px; }
+.deck-kicker { font-size: 10px; font-weight: 800; letter-spacing: .2em; opacity: .8; }
+.deck-title { font-size: 17px; line-height: 1.4; }
+.deck-title.sm { font-size: 13.5px; color: var(--sd); }
+.deck-period, .deck-date { font-size: 11.5px; opacity: .9; }
+.deck-num { position: absolute; right: 10px; bottom: 8px; font-size: 10px; opacity: .75; }
+.deck-end { padding: 24px 16px; text-align: center; background: var(--ss); color: var(--sd); display: flex; flex-direction: column; gap: 4px; position: relative; }
+.deck-end b { font-size: 16px; }
+.deck-content { padding: 12px 14px; position: relative; border-top: 3px solid var(--sp); }
+.deck-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.deck-top .deck-kicker { color: var(--sp); opacity: 1; }
+.deck-top .deck-num { position: static; color: var(--ink-3); opacity: 1; }
+.deck-bullets { margin: 6px 0 0; padding-left: 16px; font-size: 12px; color: var(--ink-2); line-height: 1.6; }
+.deck-empty-note { font-size: 11px; color: var(--ink-3); }
+
+/* —— 素材选择器：来源切换 + 类型徽标 —— */
+.mat-src-seg { display: flex; gap: 4px; padding: 3px; background: var(--surface); border-radius: 999px; }
+.mat-src-seg button { flex: 1; border: none; background: transparent; cursor: pointer; padding: 7px 4px; border-radius: 999px; font-size: 12.5px; font-weight: 700; color: var(--ink-3); }
+.mat-src-seg button.on { background: var(--brand-gradient); color: #fff; }
+.mat-type-chip { flex-shrink: 0; font-size: 10.5px; font-weight: 800; color: var(--brand-strong); background: var(--brand-soft); border-radius: 6px; padding: 2px 7px; }
+.mat-pick-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
 @media (max-width: 900px) {
-  .agents-layout, .agents-layout:has(.ws-side), .agents-layout:has(.ws-rail) { grid-template-columns: 1fr; }
-  .agents-side, .agents-side.rail { width: 100%; height: auto; min-height: 0; }
+  .agents-layout, .agents-layout:has(.ws-side), .agents-layout:has(.ws-rail) { grid-template-columns: 1fr; }  .agents-side, .agents-side.rail { width: 100%; height: auto; min-height: 0; }
   .side-rail { flex-direction: row; }
   .agents-main, .ws-side, .ws-rail { height: auto; min-height: 0; max-height: none; }
 }

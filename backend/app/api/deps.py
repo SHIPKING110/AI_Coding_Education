@@ -54,7 +54,11 @@ def require_roles(*roles: Role):
 
 def require_teacher_permission(key: str, *, staff_allowed: bool = True):
     """教师操作权限校验：管理员直接放行；教务默认放行（staff_allowed=False 时除外）；
-    教师按权限配置逐项校验。"""
+    教师按权限配置逐项校验。
+
+    家长/学员等其他角色一律拒绝：这些接口是教师工作台能力，家长端有独立路由，
+    早期实现的兜底分支会把 parent/student 一并放行（越权），此处显式收口。
+    """
 
     def dependency(
         current_user: User = Depends(get_current_user),
@@ -72,8 +76,8 @@ def require_teacher_permission(key: str, *, staff_allowed: bool = True):
             if not check(db, current_user, key):
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="暂无该操作权限，请联系管理员开通")
             return current_user
-        if not staff_allowed:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-        return current_user
+        if current_user.role == Role.STAFF.value and staff_allowed:
+            return current_user
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
     return dependency

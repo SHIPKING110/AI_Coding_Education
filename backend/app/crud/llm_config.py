@@ -7,7 +7,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.secretbox import decrypt_secret, encrypt_secret
-from app.models.llm_config import LLM_MODULES, TeacherLLMConfig, TeacherModuleModel
+from app.models.llm_config import LLM_MODULES, SystemParentLLMConfig, TeacherLLMConfig, TeacherModuleModel
 
 
 @dataclass
@@ -18,6 +18,10 @@ class ResolvedLLM:
     embed_model: str | None
     config_id: uuid.UUID | None
     config_name: str | None
+    # —— 计量归属（Token 记账）：教师自配 → 个人成本；平台共享/env 回退 → 机构成本 ——
+    owner_id: uuid.UUID | None = None
+    module: str = ""
+    is_platform: bool = False
 
 
 def list_configs(db: Session, owner_id: uuid.UUID) -> list[TeacherLLMConfig]:
@@ -186,6 +190,9 @@ def resolve(db: Session, owner_id: uuid.UUID, module: str) -> ResolvedLLM | None
             embed_model=cfg.embed_model,
             config_id=cfg.id,
             config_name=cfg.name,
+            owner_id=cfg.owner_id,
+            module=module,
+            is_platform=False,
         )
     settings = get_settings()
     if (settings.LLM_API_KEY or "").strip():
@@ -197,5 +204,81 @@ def resolve(db: Session, owner_id: uuid.UUID, module: str) -> ResolvedLLM | None
             embed_model=(settings.LLM_EMBED_MODEL or "").strip() or None,
             config_id=None,
             config_name="系统默认",
+            owner_id=None,
+            module=module,
+            is_platform=True,
+        )
+    return None
+
+
+# ---------------- 家长客服共享对话模型（系统级，管理员） ----------------
+
+
+def get_system_parent_llm(db):
+    return db.scalar(select(SystemParentLLMConfig).limit(1))
+
+
+def set_system_parent_llm(db, config_id):
+    row = get_system_parent_llm(db)
+    if row is None:
+        row = SystemParentLLMConfig(config_id=config_id)
+        db.add(row)
+    else:
+        row.config_id = config_id
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_system_parent_llm(db):
+    row = get_system_parent_llm(db)
+    if row is not None:
+        db.delete(row)
+        db.commit()
+
+
+def resolve_parent_llm_shared(db):
+    """家长客服共享模型：仅返回管理员在「家长客服 · 共享模型」显式选定的配置。
+
+    不读环境变量，供路由层判断是否走共享通道；未配置时由调用方回退模块映射/系统默认。
+    """
+    row = get_system_parent_llm(db)
+    if row is None or row.config_id is None:
+        return None
+    cfg = get_config(db, row.config_id)
+    if cfg is None:
+        return None
+    return ResolvedLLM(
+        base_url=cfg.base_url,
+        api_key=decrypt_secret(cfg.api_key_enc),
+        model=cfg.model,
+        embed_model=cfg.embed_model,
+        config_id=cfg.id,
+        config_name=cfg.name,
+        owner_id=None,
+        module="parent_service",
+        is_platform=True,
+    )
+
+
+def resolve_parent_llm(db):
+    """家长客服有效对话模型：共享配置 → 系统默认（环境变量），用于状态展示/连通检查。"""
+    resolved = resolve_parent_llm_shared(db)
+    if resolved is not None:
+        return resolved
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    if (settings.LLM_API_KEY or "").strip():
+        return ResolvedLLM(
+            base_url=_normalize_base_url(settings.LLM_BASE_URL or ""),
+            api_key=settings.LLM_API_KEY.strip(),
+            model=settings.LLM_MODEL,
+            embed_model=(settings.LLM_EMBED_MODEL or "").strip() or None,
+            config_id=None,
+            config_name="系统默认",
+            owner_id=None,
+            module="parent_service",
+            is_platform=True,
         )
     return None

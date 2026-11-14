@@ -8,6 +8,7 @@
 
 import json
 import re
+import time
 from typing import Any
 
 from app.core.config import get_settings
@@ -74,7 +75,7 @@ def _build_chat(base_url: str, api_key: str, model: str, temperature: float, tim
     key = (base_url or "", api_key or "", model or "", temperature, timeout, max_retries)
     client = _client_cache.get(key)
     if client is None:
-        client = ChatOpenAI(
+        kwargs = dict(
             model=model,
             api_key=api_key,
             base_url=base_url or None,
@@ -82,6 +83,12 @@ def _build_chat(base_url: str, api_key: str, model: str, temperature: float, tim
             timeout=timeout,
             max_retries=max_retries,
         )
+        try:
+            # 流式也拿 usage（OpenAI 兼容网关支持 stream_options.include_usage）；
+            # 老版本 langchain-openai 无此参数时降级为默认（usage 缺失则走记账估算）。
+            client = ChatOpenAI(**kwargs, stream_usage=True)
+        except TypeError:
+            client = ChatOpenAI(**kwargs)
         _client_cache[key] = client
     return client
 
@@ -89,34 +96,158 @@ def _build_chat(base_url: str, api_key: str, model: str, temperature: float, tim
 def _chat_model():
     resolved = _active_resolved()
     if resolved is not None:
-        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.6, 60, 2)
+        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.6, 600, 2)
     settings = get_settings()
     base_url = _normalized_base_url(settings.LLM_BASE_URL)
-    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.6, 60, 2)
+    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.6, 600, 2)
 
 
 def _plan_model():
     resolved = _active_resolved()
     if resolved is not None:
-        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.0, 30, 0)
+        return _build_chat(resolved.base_url, resolved.api_key, resolved.model, 0.0, 120, 0)
     settings = get_settings()
     base_url = _normalized_base_url(settings.LLM_BASE_URL)
-    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.0, 30, 0)
+    return _build_chat(base_url or "", settings.LLM_API_KEY, settings.LLM_MODEL, 0.0, 120, 0)
+
+
+def _model_info() -> tuple[str, str]:
+    resolved = _active_resolved()
+    if resolved is not None:
+        return resolved.model or "", "openai-compatible"
+    settings = get_settings()
+    return settings.LLM_MODEL or "", "openai-compatible"
+
+
+def _usage_from_chunk(chunk) -> tuple[int, int]:
+    meta = getattr(chunk, "usage_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return 0, 0
+    return int(meta.get("input_tokens") or 0), int(meta.get("output_tokens") or 0)
+
+
+def _usage_from_response(resp) -> tuple[int, int, int]:
+    """从响应取 (输入, 输出, 缓存命中) tokens；网关不支持时返回 0（交给估算兜底）。"""
+    meta = getattr(resp, "usage_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return 0, 0, 0
+    details = meta.get("input_token_details") or {}
+    cached = int(details.get("cache_read") or 0) if isinstance(details, dict) else 0
+    return int(meta.get("input_tokens") or 0), int(meta.get("output_tokens") or 0), cached
+
+
+def _active_endpoint() -> tuple[str, str]:
+    """记账用的 (base_url, model)：优先当前请求的教师/系统解析结果。"""
+    resolved = _active_resolved()
+    if resolved is not None:
+        return resolved.base_url or "", resolved.model or ""
+    settings = get_settings()
+    return _normalized_base_url(settings.LLM_BASE_URL) or "", settings.LLM_MODEL or ""
+
+
+def _meter_chat(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int = 0,
+    prompt_text: str = "",
+    output_text: str = "",
+    output_chars: int = 0,
+    latency_ms: int = 0,
+    status: str = "ok",
+    base_url: str | None = None,
+    model: str | None = None,
+) -> None:
+    """写一笔 chat 记账：provider usage 优先；缺失时按字符估算并标注 estimated。
+
+    base_url/model 显式传入时优先使用（如「连通性检查」这类不依赖全局上下文的调用），
+    否则回退到当前上下文/全局 env——保证被调用模型的网关与名字能被价格表精确匹配。
+    """
+    from app.services import pricing, usage_meter
+
+    if base_url is None or model is None:
+        _bu, _model = _active_endpoint()
+        if base_url is None:
+            base_url = _bu
+        if model is None:
+            model = _model
+    # 失败且未收到任何 token 的调用（连不上/鉴权失败/超时）不产生记账行：
+    # 厂商未计费，按 prompt 估算 token 只会制造「未定价」噪声、污染成本口径。
+    # 若流式调用已收到部分增量（output_chars > 0），仍按估算记录真实消耗。
+    if (
+        status == "error"
+        and input_tokens <= 0
+        and output_tokens <= 0
+        and output_chars <= 0
+        and not output_text
+    ):
+        return
+    source = "provider"
+    if input_tokens <= 0 and prompt_text:
+        input_tokens = pricing.estimate_tokens(prompt_text)
+        source = "estimated"
+    if output_tokens <= 0:
+        if output_text:
+            output_tokens = pricing.estimate_tokens(output_text)
+            source = "estimated"
+        elif output_chars > 0:
+            output_tokens = max(1, int(output_chars))
+            source = "estimated"
+    try:
+        usage_meter.record_chat(
+            model=model,
+            base_url=base_url,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+            source=source,
+            latency_ms=latency_ms,
+            status=status,
+        )
+    except Exception:  # noqa: BLE001 —— 记账失败绝不影响主链路
+        pass
+
+
+def _messages_text(messages: list) -> str:
+    parts: list[str] = []
+    for m in messages or []:
+        content = getattr(m, "content", m)
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content)
+        else:
+            parts.append(str(content))
+    return "\n".join(parts)
 
 
 def ping(resolved=None) -> str:
-    model = _build_chat(
-        (resolved.base_url if resolved else ""),
-        (resolved.api_key if resolved else get_settings().LLM_API_KEY),
-        (resolved.model if resolved else get_settings().LLM_MODEL),
-        0.0,
-        15,
-        0,
-    )
+    base_url = resolved.base_url if resolved else ""
+    api_key = resolved.api_key if resolved else get_settings().LLM_API_KEY
+    model_name = resolved.model if resolved else get_settings().LLM_MODEL
+    model = _build_chat(base_url, api_key, model_name, 0.0, 15, 0)
     from langchain_core.messages import HumanMessage
 
-    resp = model.invoke([HumanMessage(content="ping")])
+    # 记账端点显式使用本次实际调用的配置，确保价格表能按「网关 + 模型名」命中（不依赖全局上下文）
+    meter_base = base_url or _normalized_base_url(get_settings().LLM_BASE_URL)
+    t0 = time.monotonic()
+    try:
+        resp = model.invoke([HumanMessage(content="ping")])
+    except Exception:
+        # 连通性检查失败（多为连不上/鉴权失败）：未产生计费 token，不写记账行，避免污染「未定价」统计
+        raise
     text = resp.content if isinstance(resp.content, str) else str(resp.content)
+    it, ot, cached = _usage_from_response(resp)
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text="ping",
+        output_text=text,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+        base_url=meter_base,
+        model=model_name,
+    )
     return (text or "").strip()[:200] or "pong"
 
 
@@ -171,38 +302,456 @@ def friendly_llm_error(exc: BaseException) -> str:
 def _invoke(prompt: str) -> str:
     from langchain_core.messages import HumanMessage, SystemMessage
 
+    sys_text = (
+        "你是少儿编程培训机构的教务助手，负责撰写给家长看的课堂评价与课后反馈。"
+        "文风亲切、具体、有条理，突出孩子本节课的收获、亮点与可提升之处，避免空话套话。"
+        "只根据给定的信息撰写，不编造不存在的细节。"
+    )
+    t0 = time.monotonic()
     try:
         model = _chat_model()
-        sys_text = (
-            "你是少儿编程培训机构的教务助手，负责撰写给家长看的课堂评价与课后反馈。"
-            "文风亲切、具体、有条理，突出孩子本节课的收获、亮点与可提升之处，避免空话套话。"
-            "只根据给定的信息撰写，不编造不存在的细节。"
-        )
         resp = model.invoke([SystemMessage(content=sys_text), HumanMessage(content=prompt)])
     except LLMConfigError:
         raise
     except Exception as e:  # noqa: BLE001 —— 超时/认证/限流/断网统一转中文提示
+        _meter_chat(
+            input_tokens=0,
+            output_tokens=0,
+            prompt_text=sys_text + prompt,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            status="error",
+        )
         raise LLMConfigError(friendly_llm_error(e)) from e
-    return (resp.content or "").strip()
+    text = (resp.content or "").strip()
+    it, ot, cached = _usage_from_response(resp)
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text=sys_text + prompt,
+        output_text=text,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+    )
+    return text
 
 
-def stream_text(system: str, prompt: str):
+def invoke_text(system: str, prompt: str, *, temperature: float = 0.0, timeout: int = 60) -> str:
+    """通用同步文本调用（意图分类/契约规划等轻量结构化任务）。
+
+    与反馈/报告专用 `_invoke` 不同，system 完全由调用方决定；失败统一抛 LLMConfigError。
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI")
+    resolved = _active_resolved()
+    if resolved is not None:
+        model = _build_chat(resolved.base_url, resolved.api_key, resolved.model, temperature, timeout, 0)
+    else:
+        settings = get_settings()
+        model = _build_chat(
+            _normalized_base_url(settings.LLM_BASE_URL) or "",
+            settings.LLM_API_KEY,
+            settings.LLM_MODEL,
+            temperature,
+            timeout,
+            0,
+        )
+    from app.services import agent_ops
+
+    model_name, provider = _model_info()
+    t0 = time.monotonic()
+    with agent_ops.span(span_type="model", name="model.invoke_text") as sp:
+        try:
+            resp = model.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
+        except LLMConfigError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            sp.end(status="error", error=str(e), model=model_name, provider=provider)
+            _meter_chat(
+                input_tokens=0,
+                output_tokens=0,
+                prompt_text=system + prompt,
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                status="error",
+            )
+            raise LLMConfigError(friendly_llm_error(e)) from e
+        it, ot, cached = _usage_from_response(resp)
+        sp.end(
+            summary=f"prompt={len(prompt)} chars",
+            model=model_name,
+            provider=provider,
+            input_tokens=it,
+            output_tokens=ot,
+        )
+    content = getattr(resp, "content", "") or ""
+    if isinstance(content, list):
+        content = "".join(
+            p.get("text", "") if isinstance(p, dict) else str(p) for p in content
+        )
+    text = str(content).strip()
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text=system + prompt,
+        output_text=text,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+    )
+    return text
+
+
+def stream_text(system: str, prompt: str, images: list[str] | None = None):
     """流式调用 LLM，逐段 yield 文本增量（供 SSE 对话式 PPT 定制使用）。
 
+    `images`：随消息上传的图片（data URL 列表，如 `data:image/png;base64,...`）。
+    传入后会以 OpenAI 兼容的 `image_url` 多模态内容块附在 user 消息里，
+    支持视觉的模型（如 deepseek-flash）可直接读取图片内容。
+
     未配置 LLM 时抛 LLMConfigError；调用异常时抛出，由调用方转为 SSE error 事件。
+    输出经 `_StreamSanitizer` 净化：模型偶发把「原生工具调用标记」（如
+    `<|tool▁calls▁begin|>` / `<｜｜DSML｜｜ …>` / `<function_calls>` 等）当普通文本吐出，
+    这类标记对用户是乱码、且会污染历史导致「越改越乱」。净化器跨 chunk 安全地剔除它们。
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
     _require_any_llm("未配置 LLM_API_KEY，暂时无法使用 AI")
     model = _chat_model()
-    for chunk in model.stream([SystemMessage(content=system), HumanMessage(content=prompt)]):
-        piece = getattr(chunk, "content", "") or ""
-        if isinstance(piece, list):
-            piece = "".join(
-                p.get("text", "") if isinstance(p, dict) else str(p) for p in piece
-            )
-        if piece:
-            yield piece
+    if images:
+        content: list = [{"type": "text", "text": prompt}]
+        for url in images:
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        human = HumanMessage(content=content)
+    else:
+        human = HumanMessage(content=prompt)
+    from app.services import agent_ops
+
+    model_name, provider = _model_info()
+    sp = agent_ops.start_span(span_type="model", name="model.chat_stream")
+    t0 = time.monotonic()
+    in_tokens = 0
+    out_tokens = 0
+    chars = 0
+    try:
+        san = _StreamSanitizer()
+        for chunk in model.stream([SystemMessage(content=system), human]):
+            it, ot = _usage_from_chunk(chunk)
+            in_tokens = max(in_tokens, it)
+            out_tokens = max(out_tokens, ot)
+            piece = getattr(chunk, "content", "") or ""
+            if isinstance(piece, list):
+                piece = "".join(
+                    p.get("text", "") if isinstance(p, dict) else str(p) for p in piece
+                )
+            if piece:
+                chars += len(str(piece))
+                out = san.feed(piece)
+                if out:
+                    yield out
+        tail = san.flush()
+        if tail:
+            yield tail
+        sp.end(
+            summary=f"prompt={len(prompt)} chars, output={chars} chars",
+            model=model_name,
+            provider=provider,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+        )
+        _meter_chat(
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            prompt_text=system + prompt,
+            output_chars=chars,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+        )
+    except Exception as e:  # noqa: BLE001
+        sp.end(status="error", error=str(e), model=model_name, provider=provider,
+               input_tokens=in_tokens, output_tokens=out_tokens)
+        _meter_chat(
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            prompt_text=system + prompt,
+            output_chars=chars,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            status="error",
+        )
+        raise
+
+
+# ---------------------------------------------------------------------------
+# 原生工具调用标记净化：防止模型把 function-call 特殊 token 当文本输出成乱码
+# ---------------------------------------------------------------------------
+
+# 已知「进入脏区」的开标记子串（半角 | 与全角 ｜ 都覆盖，大小写不敏感）
+_DIRTY_OPENERS = (
+    "<|tool\u2581calls\u2581begin|>", "<｜tool\u2581calls\u2581begin｜>",
+    "<|tool\u2581call\u2581begin|>", "<｜tool\u2581call\u2581begin｜>",
+    "<|tool\u2581calls\u2581begin", "<｜tool\u2581calls\u2581begin",
+    "<||DSML||", "<｜｜DSML｜｜", "<|｜DSML｜｜", "<｜|DSML|｜",
+    "<function_calls>", "<tool_calls>", "<tool_calls ", "<tool_call>", "<tool_call ",
+    "<invoke ", "<invoke>",
+)
+# 「退出脏区」的闭标记子串
+_DIRTY_CLOSERS = (
+    "<|tool\u2581calls\u2581end|>", "<｜tool\u2581calls\u2581end｜>",
+    "<|tool\u2581call\u2581end|>", "<｜tool\u2581call\u2581end｜>",
+    "<|tool\u2581calls\u2581end", "<｜tool\u2581calls\u2581end",
+    "</||DSML||>", "</｜｜DSML｜｜>", "</function_calls>", "</tool_calls>", "</tool_call>",
+    "</invoke>", "</parameter>", "<|end|>", "<｜end｜>",
+)
+
+
+def _toolcall_patterns():
+    """兜底正则：处理「成对闭合」的 XML 风格块（无跨行脏区时也能清）。"""
+    import re
+
+    return [
+        re.compile(r"<[|｜][\s\S]*?[|｜]>"),
+        re.compile(r"<function_calls>[\s\S]*?</function_calls>"),
+        re.compile(r"<tool_call>[\s\S]*?</tool_call>"),
+    ]
+
+
+def _find_any(text: str, needles: tuple[str, ...], start: int) -> tuple[int, str]:
+    """在 text[start:] 里找 needles 中最早出现的，返回 (index, needle)；无则 (-1, "")。"""
+    low = text.lower()
+    best_idx, best_n = -1, ""
+    for n in needles:
+        i = low.find(n.lower(), start)
+        if i != -1 and (best_idx == -1 or i < best_idx):
+            best_idx, best_n = i, n
+    return best_idx, best_n
+
+
+def _could_be_partial_opener(text: str) -> str:
+    """若 text 末尾可能是某个开标记的前缀（尚未完整），返回需保留的后缀。"""
+    for opener in _DIRTY_OPENERS:
+        lo = opener.lower()
+        # 末尾 ≤ len(opener) 的片段是否为 opener 的前缀
+        for k in range(1, min(len(lo), len(text)) + 1):
+            if text[-k:].lower() == lo[:k]:
+                return text[-k:]
+    return ""
+
+
+class _StreamSanitizer:
+    """流式净化器：识别原生工具调用「脏区」并整段吞掉。
+
+    机制：
+      - 看到开标记（`<|tool▁calls▁begin|>` / `<｜｜DSML｜｜…` / `<function_calls>` 等）→ 进入脏区；
+      - 脏区内所有内容丢弃，直到看到闭标记 → 退出脏区；
+      - 每次 feed 后，若 buffer 末尾是「未完成的开/闭标记前缀」，则保留到下一 chunk，
+        避免跨 chunk 把标记拆两半漏出去。
+    """
+
+    def __init__(self):
+        self._buf = ""
+        self._in_dirty = False
+
+    def feed(self, piece: str) -> str:
+        self._buf += piece
+        return self._drain(final=False)
+
+    def flush(self) -> str:
+        out = self._drain(final=True)
+        # 收尾仍在脏区：丢弃残余（未闭合的半截标记/JSON）宁可不出
+        self._buf = ""
+        return out
+
+    def _drain(self, *, final: bool) -> str:
+        data = self._buf
+        out: list[str] = []
+        i = 0
+        n = len(data)
+        while i < n:
+            if self._in_dirty:
+                idx, _ = _find_any(data, _DIRTY_CLOSERS, i)
+                if idx == -1:
+                    # 未遇到闭标记：整段丢弃；但尾部可能是闭标记前缀时保留
+                    if not final:
+                        keep = _tail_partial(data[i:], _DIRTY_CLOSERS)
+                        self._buf = data[n - len(keep):] if keep else ""
+                    else:
+                        self._buf = ""
+                    return "".join(out)
+                # 关闭标记结束处（闭标记可能是前缀子集，找最长匹配）
+                self._in_dirty = False
+                i = idx + _matched_len(data, idx, _DIRTY_CLOSERS)
+                continue
+            # 不在脏区：找下一个开标记
+            idx, needle = _find_any(data, _DIRTY_OPENERS, i)
+            if idx == -1:
+                # 无开标记：尾部若是开标记前缀则保留到下一轮
+                tail = "" if final else _could_be_partial_opener(data[i:])
+                if tail:
+                    out.append(data[i:n - len(tail)])
+                    self._buf = data[n - len(tail):]
+                    return "".join(out)
+                out.append(data[i:])
+                self._buf = ""
+                return "".join(out)
+            # 输出开标记之前的干净文本
+            out.append(data[i:idx])
+            # 进入脏区：开标记本身可能是更长闭标记前缀，按实际长度跳过
+            self._in_dirty = True
+            i = idx + _matched_len(data, idx, _DIRTY_OPENERS)
+        self._buf = "" if final else self._buf
+        return "".join(out)
+
+
+def _matched_len(text: str, idx: int, needles: tuple[str, ...]) -> int:
+    """在 idx 处匹配最长的 needle 长度（大小写不敏感）。"""
+    low = text.lower()
+    best = 1
+    for nd in needles:
+        if low.startswith(nd.lower(), idx):
+            best = max(best, len(nd))
+    return best
+
+
+def _tail_partial(text: str, needles: tuple[str, ...]) -> str:
+    """返回 text 末尾可能是任一 needle 前缀的最长后缀（用于脏区内保留闭标记前缀）。"""
+    for k in range(min(24, len(text)), 0, -1):
+        tail = text[-k:].lower()
+        for nd in needles:
+            if nd.lower().startswith(tail):
+                return text[-k:]
+    return ""
+
+
+# 伪工具调用文本（模型把「工具名(skill=…, path=…)」当正文吐出）：整块/整行剔除
+_PSEUDO_CALL_RE = (
+    r"(?:list_skill_files|write_skill_file|read_skill_file|delete_skill_file|run_skill_script|"
+    r"skill_info|skill_preview|mcp_[a-z_]+)"
+)
+
+# XML 风格的伪工具调用块（<write_skill_file>…</write_skill_file>）：只在流式显示层剔除，
+# 原始内容仍由调用方保留，用于「真实执行」与执行轨迹。
+XML_TOOL_BLOCK_NAMES = (
+    "write_skill_file", "read_skill_file", "list_skill_files", "delete_skill_file",
+    "run_skill_script", "tool_use",
+)
+_XML_BLOCK_OPENERS = tuple(f"<{n}>" for n in XML_TOOL_BLOCK_NAMES) + tuple(
+    f"<{n} " for n in XML_TOOL_BLOCK_NAMES
+) + ("<invoke ", "<invoke>", "<tool calls>", "<tool calls ", "<tool call ")
+_XML_BLOCK_CLOSERS = tuple(f"</{n}>" for n in XML_TOOL_BLOCK_NAMES) + ("</invoke>",)
+
+
+class XmlToolStreamFilter:
+    """流式剔除 XML 伪工具调用块的显示过滤器（原样内容由调用方另行累积）。
+
+    与 _StreamSanitizer 同思路：进入 `<write_skill_file>` 后吞掉，直到 `</write_skill_file>`；
+    末尾可能是未完成标记前缀时保留到下一 chunk，避免把标记拆两半漏给用户。
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_block = False
+        self._closers = _XML_BLOCK_CLOSERS
+
+    def feed(self, piece: str) -> str:
+        self._buf += piece
+        return self._drain(final=False)
+
+    def flush(self) -> str:
+        out = self._drain(final=True)
+        self._buf = ""
+        return out
+
+    def _drain(self, *, final: bool) -> str:
+        data = self._buf
+        out: list[str] = []
+        i = 0
+        n = len(data)
+        while i < n:
+            if self._in_block:
+                idx, _ = _find_any(data, self._closers, i)
+                if idx == -1:
+                    if not final:
+                        keep = _tail_partial(data[i:], self._closers)
+                        self._buf = data[n - len(keep):] if keep else ""
+                    else:
+                        self._buf = ""
+                    return "".join(out)
+                self._in_block = False
+                i = idx + _matched_len(data, idx, self._closers)
+                continue
+            idx, _needle = _find_any(data, _XML_BLOCK_OPENERS, i)
+            if idx == -1:
+                tail = "" if final else _could_be_partial_opener_xml(data[i:])
+                if tail:
+                    out.append(data[i:n - len(tail)])
+                    self._buf = data[n - len(tail):]
+                    return "".join(out)
+                out.append(data[i:])
+                self._buf = ""
+                return "".join(out)
+            out.append(data[i:idx])
+            self._in_block = True
+            opener = data[idx:idx + _matched_len(data, idx, _XML_BLOCK_OPENERS)].lower()
+            if opener.startswith("<tool calls"):
+                self._closers = ("</tool calls>",)
+            elif opener.startswith("<tool call "):
+                self._closers = ("/>", ">")
+            elif opener.startswith("<invoke"):
+                self._closers = ("</invoke>",)
+            else:
+                self._closers = _XML_BLOCK_CLOSERS
+            i = idx + _matched_len(data, idx, _XML_BLOCK_OPENERS)
+        self._buf = "" if final else self._buf
+        return "".join(out)
+
+
+def _could_be_partial_opener_xml(text: str) -> str:
+    for opener in _XML_BLOCK_OPENERS:
+        lo = opener.lower()
+        for k in range(1, min(len(lo), len(text)) + 1):
+            if text[-k:].lower() == lo[:k]:
+                return text[-k:]
+    return ""
+
+
+def strip_xml_tool_blocks(text: str) -> str:
+    """非流式剔除 XML 伪工具调用块（含块内的 YAML/SVG 载荷）。"""
+    if not text:
+        return text
+    try:
+        f = XmlToolStreamFilter()
+        clean = f.feed(text) + f.flush()
+        return re.sub(r"\n{3,}", "\n\n", clean).strip()
+    except Exception:
+        return text
+
+
+def strip_toolcall_markup(text: str) -> str:
+    """非流式净化：剔除原生工具调用标记及其脏区内容（历史清洗/持久化前用）。"""
+    if not text:
+        return text
+    try:
+        import re as _re
+
+        s = _StreamSanitizer()
+        clean = s.feed(text) + s.flush()
+        for pat in _toolcall_patterns():
+            clean = pat.sub("", clean)
+        # 模型把「伪工具调用」当代码块/正文输出（如 ```\nlist_skill_files(skill=ppt-master, path=…)```）：
+        # 整块删除代码围栏，再清理行内残余调用片段——这类内容对用户是噪音，还会污染后续历史。
+        fence_re = _re.compile(r"```[a-zA-Z0-9_-]*\n(?:(?!```)[\s\S])*?```", _re.S)
+
+        def _drop_pseudo_fence(m):
+            body = m.group(0)
+            return "" if _re.search(_PSEUDO_CALL_RE + r"\s*\(", body) else body
+
+        clean = fence_re.sub(_drop_pseudo_fence, clean)
+        clean = _re.sub(
+            r"(?:^|\n)\s*" + _PSEUDO_CALL_RE + r"\s*\([^\n]{0,300}\)?\s*(?=\n|$)", "\n", clean
+        )
+        # XML 风格伪工具块（<write_skill_file>…</write_skill_file> 含 SVG 载荷）：整块剔除
+        clean = strip_xml_tool_blocks(clean)
+        clean = _re.sub(r"\n{3,}", "\n\n", clean).strip()
+        return clean
+    except Exception:
+        return text
 
 
 def plan_tool_calls(message: str, tools: list[dict]) -> list[dict]:
@@ -232,6 +781,51 @@ TOOL_PLANNER_SYS = (
     "- 不确定班级名时，先 list_my_classes 确认，再把它传入 find_students/class_evaluation_overview；\n"
     "- 教师用 sql_query 查含教师归属的表必须带自己的 teacher_id；\n"
     "- 与业务数据无关（制度问答/闲聊）时不要调用任何工具。"
+    "\n【工具节制】：默认只调解决当前问题所必需的最少工具；"
+    "单工具能回答就只调一个，禁止'以防万一'多调；"
+    "需要第二个工具时，必须是已有结果证明信息不足（如班级名未知、名单被截断），"
+    "且一次只补一个；sql_* 三件套能用现成业务工具替代时不许用。"
+)
+
+
+TOOL_PLANNER_SYS += (
+    "\n【Skill 脚本执行】：当用户要求用 Skill 干活（生成文件/跑脚本/做 PPT 等）"
+    "且消息中附带「可用 Skill」清单时，用 run_skill_script 实际执行包内脚本"
+    "（先按 SKILL.md 选对入口脚本，需要参数就传参），禁止只描述不执行；"
+    "工具返回的生成文件下载链接必须原样传达给用户。"
+    "\n【先读后跑】：跑脚本前先用 read_skill_file 读 SKILL.md 与入口脚本源码，"
+    "确认参数与产物路径；需要多步完成（读文档→跑脚本→取产物）就分多轮调用，不要一次编造结果。"
+    "\n【需要先写文件的 Skill（如 ppt-master）】：这类 Skill 的产物要 agent 先手写源文件再转换。"
+    "标准链路：read_skill_file 读 SKILL.md 与 profile → 用 write_skill_file 逐页写入源文件"
+    "（如 projects/<名>/svg_output/01_cover.svg，每页一次调用）→ run_skill_script 跑转换脚本"
+    "（如 scripts/svg_to_pptx.py <项目目录> --quick-generate -o <项目目录>/out.pptx）→ 把返回的下载链接给用户。"
+    "注意：转换前若要求质量报告，先按报错提示跑质量检查脚本生成报告；"
+    "路劲务必用 SKILL.md/文档里给出的真实脚本名与参数，不要臆造 build.py/create_pptx.py 等不存在的入口。"
+    "\n【Skill 执行纪律】：读文件最多 4 次（SKILL.md→路由/入口文档→profile→按需），随后进入写入/执行阶段，"
+    "禁止把调用次数耗尽在读文件上；Skill 自带校验脚本先跑，不通过就停并如实告诉用户；"
+    "包内相对路径保持不变，用相对路径传参。"
+    "\n【交付纪律】：只有 run_skill_script 返回了生成文件的下载链接，才算真正生成了文件；"
+    "否则必须如实告诉用户哪一步失败、错误原文是什么，禁止用自编的 JSON、代码或文本冒充产物交付。"
+    "\n【防跑偏·与正文对齐】：生成的文件内容必须严格来自本轮已确认的正文/大纲/要点，"
+    "禁止中途换主题、换成别的会话的数据或旧模板；页序、标题、每页要点都要与规划一致。"
+    "若信息已足够（用户已给出主题/章节/页数），就直接进入写页+出片，不要反复追加无关的工具或反复读取文档。"
+    "\n【同会话主题纪律】：同一会话内，用户没有明确要求时，禁止把页面内容换成与本会话已确认主题无关的题材"
+    "（例如用户做 Python 课件，却写了公司宣传/其它产品介绍）；项目名沿用本会话前文已定的名称，"
+    "不要另起一个与主题无关的新项目。"
+    "\n【二次编辑判定】：用户说「调整/修改/改一下/加页/换配色」且会话里有已生成的项目（见「二次编辑基线」）时，"
+    "必须在**上一版项目**上就地改（覆盖改动的页 → 重新 build），禁止另起项目重做；"
+    "只有用户明确说「重新做/换主题/新的一套」才新建项目。"
+    "\n【多轮修改质量纪律】：基线里已列出「当前页（文件名+标题）」。改第 N 页就只覆盖第 N 页的 svg，"
+    "**其余页原样保留、禁止重写**（重写会把已定稿的设计改差）；删页用 delete_skill_file 删除对应 svg；"
+    "插入页文件名用「插入位置序号+描述」（如 21x_xinsai.svg），build 自动规范序号；"
+    "改完必须重新 build，页数变化要与计划一致。"
+    "用户补充内容（讲师/日期/条款/数字等）时，只把内容改入对应页，不要整份重新生成。"
+    "\n【门禁自愈·自己修不要问】：build 返回失败/质量报告含 error 时，**不要停下来向用户解释**，"
+    "按报错提示修 SVG 后重新 build（常见错：data-pptx-role 元素缺 id、font-size 0、非法颜色、bounds 越界），"
+    "同一轮内最多自动重试 3 次；修复成功后正常交付 pptx 下载链接。"
+    "只有 3 次仍失败、或需要用户业务决策（改内容/换主题）时才向用户说明，且必须附上实际错误原文。"
+    "\n【防拖沓】：同一任务里读文档不超过 4 次；一旦写了页就必须调用 run_skill_script 出片；"
+    "不允许只写 pages 不出片、也不允许只读文件就结束——没有下载链接就等于没交付。"
 )
 
 
@@ -239,19 +833,57 @@ def tool_step(messages: list, tools: list[dict]) -> tuple[str, list[dict]]:
     """一次非流式 function-calling 步骤：返回 (文本内容, [{id, name, arguments}])。
 
     供规划层多轮循环使用：把上一轮工具结果以 HumanMessage 追加后再调用本函数即可。
-    温度取 0（规划要确定性）。未配置 LLM 时返回 ("", [])。
+    温度取 0（规划要确定性）。全局 Key 与本次请求解析出的教师 Key 都没有时返回 ("", [])。
     """
     if not is_llm_configured():
-        return "", []
+        try:
+            from app.services import llm_context as _ctx
+
+            if _ctx.get_current() is None:
+                return "", []
+        except Exception:
+            return "", []
+    from app.services import agent_ops
+
     model = _plan_model()
-    bound = model.bind_tools(tools)
-    resp = bound.invoke(messages)
-    content = resp.content if isinstance(resp.content, str) else ""
-    calls: list[dict] = []
-    for tc in getattr(resp, "tool_calls", None) or []:
-        calls.append(
-            {"id": tc.get("id") or "", "name": tc.get("name"), "arguments": tc.get("args") or {}}
+    model_name, provider = _model_info()
+    t0 = time.monotonic()
+    with agent_ops.span(span_type="model", name="model.tool_planner") as sp:
+        bound = model.bind_tools(tools)
+        try:
+            resp = bound.invoke(messages)
+        except Exception as e:  # noqa: BLE001
+            sp.end(status="error", error=str(e), model=model_name, provider=provider)
+            _meter_chat(
+                input_tokens=0,
+                output_tokens=0,
+                prompt_text=_messages_text(messages),
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                status="error",
+            )
+            raise
+        content = resp.content if isinstance(resp.content, str) else ""
+        calls: list[dict] = []
+        for tc in getattr(resp, "tool_calls", None) or []:
+            calls.append(
+                {"id": tc.get("id") or "", "name": tc.get("name"), "arguments": tc.get("args") or {}}
+            )
+        it, ot, cached = _usage_from_response(resp)
+        sp.end(
+            summary=f"tools={[c.get('name') for c in calls]}",
+            model=model_name,
+            provider=provider,
+            input_tokens=it,
+            output_tokens=ot,
         )
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text=_messages_text(messages),
+        output_text=content or f"[tool_calls]{[c.get('name') for c in calls]}",
+        latency_ms=int((time.monotonic() - t0) * 1000),
+    )
     return content, calls
 
 
@@ -355,12 +987,13 @@ def generate_report_summary(
             "【今日工作/问题与处理/明日计划】三项必须基于教师已填内容改写扩写"
             "（保留原意、理顺条理、补充可执行细节）；教师没填的项写「（教师未填写）」，绝不编造。"
             "【授课情况】严格按下方的【当日授课明细】整理为 Markdown 表格输出："
-            "表头固定为 | 时间 | 班级 | 科目 | 课题 | 到课/缺课 | 反馈情况 |，"
+            "表头固定为 | 时间 | 班级 | 科目 | 课题 | 应到人次 | 到课人次 | 缺课人次 | 反馈情况 |，到课人次+缺课人次=应到人次（以明细为准，不要自行推算），"
             "每节课一行；明细里没有的信息不要脑补，没有授课则 courses 只写「今日无授课」。"
         )
     elif report_type == "weekly" and draft_mode == "weekly_dailies":
         schema_hint = (
             '{"title": "如：第35周 工作周报", "summary": "本周工作总结", '
+            '"courses": "本周授课情况", '
             '"highlights": "本周亮点", "problems": "问题与改进", "next_plan": "下周计划"}'
         )
         instruction = (
@@ -368,17 +1001,24 @@ def generate_report_summary(
             "【本周总结/本周亮点/问题与改进】必须综合下方的【本周日报】提炼（串联事件、指出趋势与根因），"
             "不要只复述统计；" + no_number_rule +
             "【下周计划】基于教师已填内容润色（明确优先级与可检查事项）；教师没填则写「（请先填写下周计划要点）」。"
+            "【授课情况】按【周期授课明细】逐节累积拼接为一个 Markdown 表格输出："
+            "表头固定为 | 日期 | 时间 | 班级 | 科目 | 课题 | 应到人次 | 到课人次 | 缺课人次 | 反馈情况 |，日期必须写成年月日（含年，如 2026-10-06）；到课/缺课拆成两列、另加应到人次列（到课+缺课=应到，以明细为准）；直接汇总本周各日报的授课情况逐节累积拼接（与【周期授课明细】逐条核对，日期/时间/班级/课题对齐），"
+            "每节课一行（日期按明细原样填写）；明细里没有的信息不要脑补，没有授课则 courses 只写「本周无授课」。"
         )
     elif report_type == "monthly" or draft_mode == "monthly_rollup":
         schema_hint = (
             '{"title": "如：9月 工作月报", "summary": "本月工作总结", '
+            '"courses": "本月授课情况", '
             '"highlights": "本月亮点", "problems": "问题与改进", "next_plan": "下月计划", '
             '"stats_notes": "结合统计数据的教学情况说明"}'
         )
         instruction = (
             "你是少儿编程培训机构的教务助手，正在帮教师撰写工作月报。"
             "【本月总结/亮点/问题与改进/下月计划】综合下方的【本月日报与周报摘要】提炼，"
-            "突出月度趋势与关键事件；【数据说明】结合统计做定性分析；" + no_number_rule
+            "突出月度趋势与关键事件；【数据说明】结合统计做定性分析；" + no_number_rule +
+            "【授课情况】按【周期授课明细】逐节累积拼接为一个 Markdown 表格输出："
+            "表头固定为 | 日期 | 时间 | 班级 | 科目 | 课题 | 应到人次 | 到课人次 | 缺课人次 | 反馈情况 |，日期必须写成年月日（含年，如 2026-10-06）；到课/缺课拆成两列、另加应到人次列（到课+缺课=应到，以明细为准）；直接汇总本周各日报的授课情况逐节累积拼接（与【周期授课明细】逐条核对，日期/时间/班级/课题对齐），"
+            "每节课一行（日期按明细原样填写）；明细里没有的信息不要脑补，没有授课则 courses 只写「本月无授课」。"
         )
     elif report_type == "daily":
         schema_hint = (
@@ -744,20 +1384,44 @@ def _invoke_fast(prompt: str) -> str:
     from langchain_openai import ChatOpenAI
 
     settings = get_settings()
-    base_url = (settings.LLM_BASE_URL or "").rstrip("/")
+    resolved = _active_resolved()
+    base_url = ((resolved.base_url if resolved else settings.LLM_BASE_URL) or "").rstrip("/")
     if base_url and not base_url.endswith("/v1"):
         base_url += "/v1"
+    model_name = (resolved.model if resolved else settings.LLM_MODEL) or ""
+    api_key = (resolved.api_key if resolved else settings.LLM_API_KEY) or ""
     model = ChatOpenAI(
-        model=settings.LLM_MODEL,
-        api_key=settings.LLM_API_KEY,
+        model=model_name,
+        api_key=api_key,
         base_url=base_url or None,
         temperature=0.7,
         timeout=25,
         max_retries=0,
     )
     sys_text = "你是少儿编程培训机构的家长会标题策划，擅长起有记忆点的中文标题。只按要求返回结果，不解释。"
-    resp = model.invoke([SystemMessage(content=sys_text), HumanMessage(content=prompt)])
-    return (resp.content or "").strip()
+    t0 = time.monotonic()
+    try:
+        resp = model.invoke([SystemMessage(content=sys_text), HumanMessage(content=prompt)])
+    except Exception:
+        _meter_chat(
+            input_tokens=0,
+            output_tokens=0,
+            prompt_text=sys_text + prompt,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            status="error",
+        )
+        raise
+    text = (resp.content or "").strip()
+    it, ot, cached = _usage_from_response(resp)
+    _meter_chat(
+        input_tokens=it,
+        output_tokens=ot,
+        cached_tokens=cached,
+        prompt_text=sys_text + prompt,
+        output_text=text,
+        latency_ms=int((time.monotonic() - t0) * 1000),
+    )
+    return text
 
 
 def refine_ppt_content(

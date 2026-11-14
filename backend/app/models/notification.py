@@ -21,6 +21,7 @@ class NotificationType(enum.StrEnum):
     EVALUATION_PUBLISHED = "evaluation_published"  # 学员评估已发布（FR-EV-04，M6）
     KNOWLEDGE_INDEXED = "knowledge_indexed"  # 知识库文档索引落定（成功/失败）
     TRIAL_ASSIGNED = "trial_assigned"  # 教师被安排体验课（写明班级时间）
+    USAGE_BUDGET = "usage_budget"  # AI 费用预算提醒（管理员）
 
 
 class Notification(Base):

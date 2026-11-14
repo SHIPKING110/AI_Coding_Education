@@ -67,19 +67,38 @@ def set_enabled(db: Session, doc: KnowledgeDocument, enabled: bool) -> Knowledge
     return doc
 
 
-def usable_doc_ids(db: Session, *, doc_ids: list[str]) -> set[str]:
-    """候选 doc_id 中可参与检索的：存在 + 已就绪 + 开关打开。"""
+def set_parent_visible(db: Session, doc: KnowledgeDocument, visible: bool) -> KnowledgeDocument:
+    """家长版开关：仅 visible_to_parents=true 的文档参与家长端 RAG（白名单制）。"""
+    doc.visible_to_parents = visible
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+
+def usable_doc_ids(db: Session, *, doc_ids: list[str], parent_visible: bool = False) -> set[str]:
+    """候选 doc_id 中可参与检索的：存在 + 已就绪 + 开关打开。
+
+    parent_visible=True 时（家长域检索）还必须家长可见——父集合里可能残留
+    文档改为不可见前的旧分片，不能只靠同步清理兜底（ADR-0027）。
+    """
     uniq = {str(d) for d in doc_ids if d}
     if not uniq:
         return set()
-    rows = db.scalars(
-        select(KnowledgeDocument.id).where(
-            KnowledgeDocument.status == "ready",
-            KnowledgeDocument.enabled.is_(True),
-        )
-    ).all()
+    stmt = select(KnowledgeDocument.id).where(
+        KnowledgeDocument.status == "ready",
+        KnowledgeDocument.enabled.is_(True),
+    )
+    if parent_visible:
+        stmt = stmt.where(KnowledgeDocument.visible_to_parents.is_(True))
+    rows = db.scalars(stmt).all()
     ready = {str(r) for r in rows}
     return uniq & ready
+
+
+def all_document_ids(db: Session) -> list[str]:
+    """数据库中仍存在的全部文档 id（含未就绪/停用）——用于僵尸向量清理比对。"""
+    rows = db.scalars(select(KnowledgeDocument.id)).all()
+    return [str(r) for r in rows]
 
 
 def mark_indexing(db: Session, doc: KnowledgeDocument) -> KnowledgeDocument:
@@ -120,6 +139,53 @@ def delete_document(db: Session, doc: KnowledgeDocument) -> None:
     db.commit()
 
 
+def mark_failed(db: Session, doc: KnowledgeDocument, error: str) -> None:
+    """将文档标记为失败（用于增量同步时源文件丢失等场景）。"""
+    doc.status = "failed"
+    doc.error = error
+    doc.extra = {k: v for k, v in dict(doc.extra or {}).items() if k != "progress"}
+    db.commit()
+
+
+def list_all_documents(db: Session, *, limit: int = 1000) -> list[KnowledgeDocument]:
+    """全部文档（含未就绪/停用）——供增量同步扫描。按更新时间升序，优先处理旧的。"""
+    return list(
+        db.scalars(
+            select(KnowledgeDocument)
+            .order_by(KnowledgeDocument.updated_at.asc())
+            .limit(limit)
+        ).all()
+    )
+
+
+def list_parent_visible_documents(db: Session, *, limit: int = 500) -> list[KnowledgeDocument]:
+    """家长客服可检索的文档（ready + 启用 + 家长可见），供父索引同步。"""
+    return list(
+        db.scalars(
+            select(KnowledgeDocument)
+            .where(
+                KnowledgeDocument.status == "ready",
+                KnowledgeDocument.enabled.is_(True),
+                KnowledgeDocument.visible_to_parents.is_(True),
+            )
+            .order_by(KnowledgeDocument.updated_at.asc())
+            .limit(limit)
+        ).all()
+    )
+
+
+def owned_ready_doc_ids(db: Session, *, user_id) -> list[uuid.UUID]:
+    """本人已就绪且启用检索的文档 id（未收藏时的默认检索范围）。"""
+    rows = db.scalars(
+        select(KnowledgeDocument.id).where(
+            KnowledgeDocument.owner_id == user_id,
+            KnowledgeDocument.status == "ready",
+            KnowledgeDocument.enabled.is_(True),
+        )
+    ).all()
+    return list(rows)
+
+
 def collected_doc_ids(db: Session, *, user_id) -> list[uuid.UUID]:
     stmt = select(KnowledgeCollection.doc_id).where(KnowledgeCollection.user_id == user_id)
     return list(db.scalars(stmt).all())
@@ -155,5 +221,6 @@ def uncollect(db: Session, *, user_id, doc_id) -> bool:
 __all__ = [
     "create_document", "get_document", "get_document_any", "list_my_documents",
     "list_plaza", "set_visibility", "mark_indexed", "delete_document",
-    "collected_doc_ids", "is_collected", "collect", "uncollect",
+    "collected_doc_ids", "owned_ready_doc_ids", "is_collected", "collect", "uncollect",
+    "list_all_documents", "list_parent_visible_documents",
 ]

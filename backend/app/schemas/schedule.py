@@ -73,6 +73,7 @@ class ScheduleOut(BaseModel):
     status: str
     is_trial: bool = False
     trial_status: str = "none"
+    readonly: bool = Field(default=False, description="非属主只读查看：可看考勤，不可操作")
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

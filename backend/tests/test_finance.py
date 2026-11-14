@@ -235,6 +235,24 @@ def test_fraction_consume_and_ledger(client, admin):
     """乐高班考勤扣 1.5 + 创收账本（FIFO 单价快照 + 抽成快照）。"""
     parent = _register(client, "parent", "ledger-parent")
     parent_uid = _uid(client, parent)
+    # 扣课按"科目"的单次课时数（per_session）：乐高 1.5，其余默认 2。
+    # 需先建/更新乐高科目，否则回落默认 2，扣减断言对不上。
+    existing = client.get("/api/business/subjects", headers=admin).json()["items"]
+    lego = next((x for x in existing if x["name"] == "乐高"), None)
+    if lego is None:
+        created = client.post(
+            "/api/business/subjects",
+            json={"name": "乐高", "per_session": "1.5"},
+            headers=admin,
+        )
+        assert created.status_code == 201, created.text
+    else:
+        upd = client.patch(
+            f"/api/business/subjects/{lego['id']}",
+            json={"per_session": "1.5"},
+            headers=admin,
+        )
+        assert upd.status_code == 200, upd.text
     r = client.post(
         "/api/classes", json={"name": "乐高消耗班", "subject": "乐高"}, headers=admin
     )
@@ -286,8 +304,15 @@ def test_fraction_consume_and_ledger(client, admin):
     assert tea.status_code == 200
     assert len(tea.json()["items"]) >= 1
 
-    # 教师无 finance_view 被拒
+    # 教师关闭 finance_view 后被拒
     teacher = _register(client, "teacher", "ledger-teacher")
+    t_uid = _uid(client, teacher)
+    off = client.put(
+        f"/api/permissions/teachers/{t_uid}",
+        json={"finance_view": False},
+        headers=admin,
+    )
+    assert off.status_code == 200, off.text
     r = client.get("/api/finance/overview", headers=teacher)
     assert r.status_code == 403
 
@@ -405,15 +430,22 @@ def test_parent_self_refund_gates(client, admin, dbsession):
 
 
 def test_permission_keys_and_teacher_nav(client, admin, teacher):
-    """权限键含新键；教师默认关闭设置/财务；学生不可见课时包。"""
+    """权限键含新键；教师默认关闭设置/财务明细；学生不可见课时包。
+
+    财务权限设计：finance_view（可见）+ finance_revenue（创收概览）默认开，
+    finance_records / finance_salary / finance_salary_all（账本与薪资明细）默认关。
+    """
     keys = client.get("/api/permissions/keys", headers=admin).json()["keys"]
     by_key = {k["key"]: k["label"] for k in keys}
     assert "settings_manage" in by_key and "finance_view" in by_key
 
     mine = client.get("/api/permissions/mine", headers=teacher).json()["permissions"]
     assert mine["settings_manage"] is False
-    assert mine["finance_view"] is False
-    assert mine["order_visible"] is False
+    # 敏感明细默认关闭（order_visible 已并入 finance_revenue，键不再存在）
+    assert "order_visible" not in mine
+    assert mine["finance_records"] is False
+    assert mine["finance_salary"] is False
+    assert mine["finance_salary_all"] is False
 
     student_user = _register(client, "student", "fin-student")
     r = client.get("/api/client/packages", headers=student_user)

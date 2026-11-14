@@ -71,10 +71,12 @@ def test_build_ppt_with_real_data():
             rep_id = str(rep.id)
         conv = client.post(
             "/api/agents/conversations",
-            json={"agent_id": "report_ppt", "context_ref": {"kind": "report", "id": rep_id, "title": "Q3"},
+            # 内置「report_ppt」Agent 已下线，PPT 生成统一由通用助手 + ppt-master Skill 承担
+            json={"agent_id": "assistant", "context_ref": {"kind": "report", "id": rep_id, "title": "Q3"},
                   "title": "Q3 总结"},
             headers=headers,
         ).json()
+        assert conv.get("id"), conv
         outline = [
             {"id": "p1", "title": "封面", "kind": "prose", "note": "2026 Q3 教学总结"},
             {"id": "p2", "title": "核心指标", "kind": "stats"},

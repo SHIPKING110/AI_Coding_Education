@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { getSharedConversation, type SharedConversation } from '@/api/agent'
 import { renderMarkdown } from '@/utils/markdown'
+import { observeMermaid, renderMermaidNodes } from '@/utils/mermaid'
 
 const route = useRoute()
 const loading = ref(true)
 const error = ref('')
 const data = ref<SharedConversation | null>(null)
+const bodyEl = ref<HTMLElement | null>(null)
 
 onMounted(async () => {
   try {
@@ -19,6 +21,13 @@ onMounted(async () => {
     loading.value = false
   }
 })
+
+watch(loading, () =>
+  void nextTick().then(() => {
+    observeMermaid(bodyEl.value)
+    void renderMermaidNodes(bodyEl.value)
+  }),
+)
 
 function fmt(iso: string | null): string {
   if (!iso) return ''
@@ -41,7 +50,7 @@ function fmt(iso: string | null): string {
       </div>
     </header>
 
-    <main class="share-body">
+    <main ref="bodyEl" class="share-body">
       <p v-if="loading" class="share-empty">加载中…</p>
       <p v-else-if="error" class="share-empty err">{{ error }}</p>
       <template v-else>
@@ -95,6 +104,15 @@ function fmt(iso: string | null): string {
 .share-bubble :deep(code) { background: rgba(99, 102, 241, 0.12); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
 .share-bubble :deep(.md-table) { border-collapse: collapse; margin: 8px 0; }
 .share-bubble :deep(.md-table th), .share-bubble :deep(.md-table td) { border: 1px solid var(--line, #e5e7ef); padding: 6px 10px; }
+.share-bubble :deep(.md-mermaid) { margin: 8px 0; }
+.share-bubble :deep(.md-mermaid-head) { font-size: 12px; font-weight: 700; color: var(--brand-strong, #615fff); margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+.share-bubble :deep(.md-mermaid pre) { background: #f8fafc; border: 1px dashed var(--brand, #6366f1); border-radius: 8px; padding: 10px; font-size: 11.5px; overflow-x: auto; color: var(--ink, #1f2937); }
+.share-bubble :deep(.md-mermaid.rendered pre.mermaid-src) { display: none; }
+.share-bubble :deep(.mermaid-render) { background: #fff; border: 1px solid var(--line, #e5e7ef); border-radius: 8px; padding: 10px; overflow-x: auto; }
+.share-bubble :deep(.mermaid-render:empty) { display: none; }
+.share-bubble :deep(.mermaid-render svg) { max-width: 100%; height: auto; }
+.share-bubble :deep(.md-mermaid-error) { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #a03028; }
+.share-bubble :deep(.md-mermaid-retry) { padding: 3px 10px; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; font-size: 11.5px; cursor: pointer; }
 .share-empty { text-align: center; color: var(--ink-3, #94a3b8); font-size: 13px; padding: 30px 0; }
 .share-empty.err { color: var(--danger, #ef4444); }
 .share-foot { margin-top: 18px; font-size: 12px; color: var(--ink-3, #94a3b8); }

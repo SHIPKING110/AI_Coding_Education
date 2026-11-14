@@ -19,6 +19,8 @@ dist/
 *.log
 backend/uploads/
 backend/media/
+uploads/
+backend/scripts/_tmp_probe.py
 
 # IDE / 绯荤粺
 .idea/
@@ -31,3 +33,4 @@ backend/data/
 
 # 生产环境配置（含密码，切勿提交）
 .env.prod
+backend/seed_skills/*.zip

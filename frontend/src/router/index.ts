@@ -49,10 +49,73 @@ const router = createRouter({
           meta: { adminOnly: true },
         },
         {
+          path: 'rag',
+          redirect: '/rag/overview',
+        },
+        {
+          path: 'rag/overview',
+          name: 'rag-overview',
+          component: () => import('@/views/rag/RagOverviewView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/assets',
+          name: 'rag-assets',
+          component: () => import('@/views/rag/RagAssetsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/traces',
+          name: 'rag-traces',
+          component: () => import('@/views/rag/RagTracesView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/runs',
+          name: 'rag-runs',
+          component: () => import('@/views/rag/RagRunsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/sessions',
+          name: 'rag-sessions',
+          component: () => import('@/views/rag/RagSessionsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/parent-sessions',
+          name: 'rag-parent-sessions',
+          component: () => import('@/views/rag/RagParentSessionsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/routes',
+          name: 'rag-routes',
+          component: () => import('@/views/rag/RagRoutesView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/eval',
+          name: 'rag-eval',
+          component: () => import('@/views/rag/RagEvalView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'rag/settings',
+          name: 'rag-settings',
+          component: () => import('@/views/rag/RagSettingsView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
+          path: 'usage',
+          name: 'usage-dashboard',
+          component: () => import('@/views/usage/UsageDashboardView.vue'),
+          meta: { staffOnly: true },
+        },
+        {
           path: 'settings',
           name: 'settings',
           component: () => import('@/views/settings/SettingsView.vue'),
-          meta: { perm: 'settings_manage' },
         },
         {
           path: 'personalize',
@@ -116,6 +179,12 @@ const router = createRouter({
           component: () => import('@/views/agents/AgentsView.vue'),
         },
         {
+          path: 'service',
+          name: 'service',
+          component: () => import('@/views/service/ServiceView.vue'),
+          meta: { perm: 'service_reply' },
+        },
+        {
           path: 'students/:id/evaluations',
           name: 'student-evaluations',
           component: () => import('@/views/evaluations/EvaluationsView.vue'),
@@ -144,6 +213,16 @@ const router = createRouter({
           name: 'profile',
           component: () => import('@/views/profile/ProfileView.vue'),
         },
+        {
+          path: 'docs',
+          redirect: '/docs/index',
+        },
+        {
+          path: 'docs/:slug',
+          name: 'docs',
+          component: () => import('@/views/docs/DocsView.vue'),
+          meta: { staffOnly: true },
+        },
       ],
     },
     {
@@ -171,6 +250,11 @@ const router = createRouter({
           path: 'evaluations',
           name: 'client-evaluations',
           component: () => import('@/views/client/ClientEvaluationsView.vue'),
+        },
+        {
+          path: 'service',
+          name: 'client-service',
+          component: () => import('@/views/client/ClientServiceView.vue'),
         },
         {
           path: 'assignments',
@@ -240,7 +324,7 @@ router.beforeEach(async (to) => {
   }
   if (
     user.role === 'student' &&
-    (to.name === 'client-packages' || to.name === 'client-orders')
+    (to.name === 'client-packages' || to.name === 'client-orders' || to.name === 'client-service')
   ) {
     return { name: 'client-home' }
   }
@@ -252,10 +336,22 @@ router.beforeEach(async (to) => {
   if (to.meta.adminOnly && user.role !== 'admin') {
     return { name: 'students' }
   }
+  // 仅管理员/教务可访问（如用量与成本：教师无平台账单视角）
+  if (to.meta.staffOnly && !['admin', 'staff'].includes(user.role)) {
+    return { name: 'students' }
+  }
   // 权限键路由：教师需对应权限（管理员/教务默认放行，后端同样兜底）
   if (typeof to.meta.perm === 'string' && user.role === 'teacher') {
     const perms = await auth.fetchPerms()
     if (perms[to.meta.perm] !== true) {
+      return { name: 'students' }
+    }
+  }
+  // 设置页按 tab 细分权限：只要拥有任一设置 tab 权限即可进入（页面内部再控制可见 tab）
+  if (to.name === 'settings' && user.role === 'teacher') {
+    const perms = await auth.fetchPerms()
+    const allowed = ['settings_manage', 'settings_tab_personalize', 'settings_tab_model', 'settings_tab_business']
+    if (!allowed.some((k) => perms[k] === true)) {
       return { name: 'students' }
     }
   }

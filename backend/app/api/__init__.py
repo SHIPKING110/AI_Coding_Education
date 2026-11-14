@@ -1,7 +1,9 @@
 from fastapi import APIRouter
 
 from app.api.routers import (
+    agent_ops,
     agents,
+    agents_ext,
     assignments,
     auth,
     business,
@@ -16,24 +18,33 @@ from app.api.routers import (
     notifications,
     orders,
     packages,
+    parent_service,
     permissions,
     prompts,
+    rag_admin,
     reports,
+    retrieval_configs,
     schedules,
+    search_configs,
     students,
     system_settings,
     trials,
+    usage,
     users,
 )
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+api_router.include_router(agent_ops.router)
 api_router.include_router(agents.router)
+api_router.include_router(agents_ext.router)
 api_router.include_router(knowledge.router)
 api_router.include_router(users.router)
 api_router.include_router(students.router)
 api_router.include_router(classes.router)
 api_router.include_router(packages.router)
+api_router.include_router(parent_service.parent_router)
+api_router.include_router(parent_service.teacher_router)
 api_router.include_router(lessons.router)
 api_router.include_router(schedules.router)
 api_router.include_router(feedbacks.router)
@@ -48,5 +59,9 @@ api_router.include_router(system_settings.router)
 api_router.include_router(business.router)
 api_router.include_router(finance.router)
 api_router.include_router(llm_configs.router)
+api_router.include_router(retrieval_configs.router)
+api_router.include_router(rag_admin.router)
+api_router.include_router(search_configs.router)
 api_router.include_router(client.router)
 api_router.include_router(trials.router)
+api_router.include_router(usage.router)

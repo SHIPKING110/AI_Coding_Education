@@ -51,23 +51,95 @@ def _elapsed_ms(t0: float) -> float:
     return (time.monotonic() - t0) * 1000.0
 
 
+def _skill_inventory(db, user) -> str:
+    """用户可用的 Skill 及可执行脚本清单（供规划器选 run_skill_script 用）。
+
+    范围 = 本人名下 ∪ 已收录的广场 Skill（作者仍在架才有效）——
+    收录者与发布者看到同一份清单、跑同一份文件包，效果一致（见 ADR-0013）。
+    """
+    try:
+        from app.crud import agent_ext as _ext
+
+        collected = {
+            str(x) for x in _ext.collected_skill_ids(db, user_id=user.id)
+        }
+        rows: list = list(_ext.list_skills(db, owner_id=user.id))
+        if collected:
+            for s in _ext.list_plaza_skills(db):
+                if str(s.id) in collected and all(str(x.id) != str(s.id) for x in rows):
+                    rows.append(s)
+        lines = []
+        for s in rows:
+            if not s.enabled:
+                continue
+            # 权限界定：只列出「当前 Agent 生效绑定」的 Skill（没勾选的不进清单）
+            if not agent_tools._skill_allowed(s.id):
+                continue
+            files = [str(f) for f in (s.files or [])]
+            scripts = sorted(
+                (f for f in files if f.lower().endswith((".py", ".js", ".sh"))),
+                key=lambda f: (0 if "/scripts/" in f.lower() else 1, f),
+            )
+            if scripts:
+                doc = next((f for f in files if f.lower().endswith("skill.md")), "")
+                seg = f"- {s.name}：{(s.description or '')[:60]}；"
+                if doc:
+                    seg += f"说明文档：{doc}（读它确认入口与参数，path 必须用这个完整路径）；"
+                seg += f"脚本：{'、'.join(scripts[:8])}"
+                lines.append(seg)
+        return "\n".join(lines[:10])
+    except Exception:
+        return ""
+
+
 def plan_and_run(
     db: Session,
     user: User,
     message: str,
     *,
+    conversation_id=None,
+    agent_id: str | None = None,
     max_rounds: int | None = None,
     max_calls: int | None = None,
     time_budget_ms: int | None = None,
+    history: list[tuple[str, str]] | None = None,
+    context_block: str | None = None,
+    on_step=None,
 ) -> PlanOutcome:
     """规划并执行只读业务工具，返回调用记录与注入文本块。
 
     - 非业务问题：直接返回空（不触发任何 LLM 调用）；
     - LLM 不可用或规划失败：降级为关键词启发式单轮路由；
     - 任何工具异常：记录错误并继续，不中断整体流程。
+    - conversation_id：设置会话作用域，使 Skill 的 projects/ 工作区按会话隔离。
+    - history：本会话最近几轮 (role, content)。规划器只带当前消息时，用户短确认句
+      （如「继续用深靛，按你的主题生成」）会丢失上下文，导致模型换主题/另起无关项目——
+      这正是「多轮续写跑偏出错片」的根因。这里把最近对话摘要一并带给规划器。
+    - on_step：每执行完一个工具就回调一次（工具名/参数/结果），用于前端实时展示
+      「执行到哪一步、何时开始、何时结束」，无需等整轮结束才看到全链路。
     """
+    agent_tools.use_conversation(conversation_id)
+    # 权限界定：求出「当前 Agent 生效可用的 Skill id」（per-agent 绑定 ∪ 全局默认，含 id 漂移同名自愈），
+    # 没勾选的 Skill 不进清单、也不能被 run_skill_script / 自动出片兜底调用。
+    try:
+        allowed: list[str] | None = None
+        if agent_id:
+            from app.services import agent_registry as _reg
+
+            allowed = _reg.effective_skill_ids(db, user.id, agent_id)
+        agent_tools.use_allowed_skills(allowed)
+    except Exception:
+        agent_tools.use_allowed_skills(None)
+    inv = _skill_inventory(db, user)
     if not agent_tools.looks_like_business(message):
-        return PlanOutcome()
+        if not (inv and (
+            agent_tools.looks_like_skill_task(message)
+            or agent_tools.looks_like_ppt_edit(message)
+            or agent_tools.looks_like_ppt_continue(message)
+        )):
+            # 外部/时效性事实问题也需要规划器参与（由模型决定是否调 web_search）
+            if not agent_tools.looks_like_web_search(message):
+                return PlanOutcome()
 
     cfg = get_settings()
     budget_ms = time_budget_ms or cfg.AGENT_TOOL_TIME_BUDGET_MS
@@ -80,15 +152,113 @@ def plan_and_run(
     steps: list[Step] = []
     seen: set[str] = set()
     rounds = 0
-    # 规划消息：只带「系统角色 + 用户问题 + 各轮工具结果」，不带历史对话，省 token
-    messages: list = [llm._sys_msg(llm.TOOL_PLANNER_SYS), llm._human_msg(message)]
+
+    def _run_one(name: str, args: dict) -> "Step":
+        """执行一个工具：先回调「开始」，执行完再回调「结束」（前端实时展示执行到哪步）。"""
+        from app.services import agent_ops
+
+        step = Step(tool=name, args=args, ok=True, result=None, error=None)
+        span_type = "skill" if name in {
+            "write_skill_file", "delete_skill_file", "read_skill_file", "list_skill_files", "run_skill_script",
+        } else ("rag" if name in {"search_knowledge", "knowledge_search"} else "tool")
+        sp = agent_ops.start_span(
+            span_type=span_type, name=f"{span_type}.{name}",
+            attributes={"tool": name, "arguments": compact_result(args, 800)},
+        )
+        if on_step is not None:
+            try:
+                on_step(step, len(steps) + 1, "start")
+            except Exception:
+                pass
+        try:
+            ok, payload = _exec(db, user, name, args)
+        except Exception as exc:  # noqa: BLE001
+            sp.end(status="error", error=str(exc))
+            raise
+        step.ok = ok
+        step.result = payload if ok else None
+        step.error = None if ok else str(payload)
+        steps.append(step)
+        sp.end(
+            status="ok" if ok else "error",
+            summary=compact_result(payload, 700) if ok else str(payload),
+            error=None if ok else str(payload),
+            attributes={"tool": name},
+        )
+        if on_step is not None:
+            try:
+                on_step(step, len(steps), "done")
+            except Exception:
+                pass
+        return step
+
+    def _push_step(step: "Step") -> None:
+        """追加一步并即时回调（用于兜底/自愈等非主循环路径）。"""
+        from app.services import agent_ops
+
+        steps.append(step)
+        agent_ops.record_span(
+            span_type="skill" if step.tool in {
+                "write_skill_file", "delete_skill_file", "run_skill_script",
+            } else "tool",
+            name=f"auto.{step.tool}",
+            status="ok" if step.ok else "error",
+            summary=(compact_result(step.result, 700) if step.ok else (step.error or "")),
+            error="" if step.ok else (step.error or ""),
+            attributes={"tool": step.tool, "auto": True},
+        )
+        if on_step is not None:
+            try:
+                on_step(step, len(steps), "done")
+            except Exception:
+                pass
+    # 是否属于「Skill 任务」（生成/编辑/催出片续作）：决定是否注入 Skill 清单与强制执行兜底。
+    is_skill_task = bool(inv) and (
+        agent_tools.looks_like_skill_task(message)
+        or agent_tools.looks_like_ppt_edit(message)
+        or agent_tools.looks_like_ppt_continue(message)
+    )
+    # 规划消息：系统角色 + 最近几轮对话摘要 + 用户问题 + 各轮工具结果
+    # （多轮 Skill 续作必须有历史上下文，否则「继续用深靛」这类短确认句会被规划成新任务）
+    messages: list = [llm._sys_msg(llm.TOOL_PLANNER_SYS)]
+    if history:
+        lines = []
+        for role, content in history[-6:]:
+            txt = (content or "").strip().replace("\n", " ")
+            if not txt:
+                continue
+            who = "用户" if role == "user" else "助手"
+            lines.append(f"{who}：{txt[:400]}")
+        if lines:
+            messages.append(llm._sys_msg(
+                "【本会话最近对话（规划时必须延续，用户短回复通常是对上一轮的确认）】\n"
+                + "\n".join(lines)
+                + "\n规则：本轮任务若与上文是同一套 PPT 的续作（改风格/出片/加页），"
+                "必须沿用上文已定的主题与项目名，禁止换成无关主题或另起新项目。"
+            ))
+    messages.append(llm._human_msg(message))
+    if is_skill_task:
+        messages.append(llm._sys_msg(f"可用 Skill（用户已绑定，可用 run_skill_script 实际执行包内脚本，生成文件会取回下载链接）：\n{inv}"))
+    if context_block:
+        # 会话内 PPT 现状（项目/页清单/真实标题）：规划「插页/删页/改某页」时要据此定位，
+        # 不能只靠 list_skill_files 现读；同时也防止多轮修改另起项目。
+        messages.append(llm._sys_msg(context_block))
+        messages.append(llm._sys_msg(
+            "【页级编辑规划纪律】用户要求插页/删页/改页/调顺序时：\n"
+            "1) 先给出页级规划（例如「在第 21 页后插入 2 页：22_赛事概览、23_赛制与晋级」），"
+            "再按规划执行；新增页文件名用「插入位置序号 + 描述」，如 21x_xinsai.svg、21y_saizhi.svg"
+            "（build 会自动规范为连续序号）；\n"
+            "2) 只新增/覆盖受影响的页，其余页保持不动；删页用 delete_skill_file 删除对应 svg 文件；\n"
+            "3) 必须实际 write_skill_file/delete_skill_file + run_skill_script(build)，只 list/read 不收工；"
+            "build 后核对页数变化符合规划。"
+        ))
     planner_failed = False
 
     for _ in range(rounds_cap):
         if len(steps) >= calls_cap or _elapsed_ms(t0) > budget_ms:
             break
         try:
-            _, calls = llm.tool_step(messages, agent_tools.TOOLS_SCHEMA)
+            _, calls = llm.tool_step(messages, agent_tools.tool_schema_for(is_skill_task))
         except Exception:
             planner_failed = True
             break
@@ -111,12 +281,8 @@ def plan_and_run(
                 observations.append(f"· {name}：{json.dumps(args, ensure_ascii=False)}（重复调用已跳过）")
                 continue
             seen.add(key)
-            ok, payload = _exec(db, user, name, args)
-            steps.append(
-                Step(tool=name, args=args, ok=ok,
-                     result=payload if ok else None, error=None if ok else str(payload))
-            )
-            observations.append(f"· {name}：{compact_result(payload, result_chars)}")
+            step = _run_one(name, args)
+            observations.append(f"· {name}：{compact_result(step.result if step.ok else step.error, result_chars)}")
         if observations:
             messages.append(llm._human_msg("工具结果：\n" + "\n".join(observations)))
 
@@ -125,6 +291,66 @@ def plan_and_run(
         # 规划成功但返回空（模型漏调，某些模型 function-calling 偏保守）时，
         # 若关键词启发式能命中，也走启发式兜底——业务问题绝不允许"零工具"回答。
         heuristic = agent_tools._heuristic_calls(message)[:calls_cap]
+        # Skill 任务优先兜底（必须放业务分支之前：教师自配 Key 时 is_llm_configured() 为 False，
+        # 原顺序会直接吞掉 Skill 路径，导致"零工具纯描述"）。
+        # 强制先读 SKILL.md，再带着文档内容继续多轮规划，让模型真正去执行脚本。
+        if is_skill_task:
+            skill_calls = agent_tools.heuristic_skill_calls(db, user)[:calls_cap]
+            if skill_calls:
+                logger.info("Skill 兜底：规划零工具，强制读 SKILL.md 后继续多轮规划")
+                observations: list[str] = []
+                for c in skill_calls:
+                    if len(steps) >= calls_cap:
+                        break
+                    name = str(c.get("name") or "")
+                    args = c.get("arguments") or {}
+                    step = _run_one(name, args)
+                    observations.append(f"· {name}：{compact_result(step.result if step.ok else step.error, result_chars)}")
+                if observations:
+                    observations.append("（SKILL.md 已读：下一步必须调 run_skill_script 执行入口脚本，禁止再读文件；"
+                                        "先跑 Skill 自带的校验脚本，不通过就停并如实告诉用户）")
+                    messages.append(llm._human_msg("工具结果：\n" + "\n".join(observations)))
+                for _ in range(rounds_cap):
+                    if len(steps) >= calls_cap or _elapsed_ms(t0) > budget_ms:
+                        break
+                    try:
+                        _, calls = llm.tool_step(messages, agent_tools.TOOLS_SCHEMA)
+                    except Exception:
+                        break
+                    if not calls:
+                        break
+                    rounds += 1
+                    round_obs: list[str] = []
+                    for c in calls:
+                        if len(steps) >= calls_cap:
+                            break
+                        name = str(c.get("name") or "")
+                        args = c.get("arguments") or {}
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except (ValueError, TypeError):
+                                args = {}
+                        key = f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+                        if key in seen:
+                            round_obs.append(f"· {name}：{json.dumps(args, ensure_ascii=False)}（重复调用已跳过）")
+                            continue
+                        seen.add(key)
+                        step = _run_one(name, args)
+                        round_obs.append(f"· {name}：{compact_result(step.result if step.ok else step.error, result_chars)}")
+                    if round_obs:
+                        messages.append(llm._human_msg("工具结果：\n" + "\n".join(round_obs)))
+                # 自动出片兜底：读文档/写页之后模型仍没真正执行脚本 →
+                # 替它对已写好的项目跑一次 build，避免「说了出片却不出片」。
+                if not any(s.tool == "run_skill_script" and s.ok for s in steps):
+                    built = agent_tools.auto_build_ppt(db, user)
+                    if built is not None:
+                        _push_step(Step(tool="run_skill_script",
+                                        args={"auto": True}, ok=bool(built.get("成功")),
+                                        result=built if built.get("成功") else None,
+                                        error=None if built.get("成功") else str(built.get("错误") or built)))
+                block = _format_block(steps, block_chars, result_chars=result_chars)
+                return PlanOutcome(steps=steps, block=block, rounds=rounds, degraded=True)
         if planner_failed or not llm.is_llm_configured() or heuristic:
             if planner_failed:
                 logger.warning("工具规划失败，已降级启发式路由")
@@ -136,6 +362,15 @@ def plan_and_run(
         return PlanOutcome()
 
     block = _format_block(steps, block_chars, result_chars=result_chars)
+    # 自动出片兜底（主循环正常结束但没真正跑出文件时）：替模型对已写好的项目跑一次 build。
+    if is_skill_task and not any(s.tool == "run_skill_script" and s.ok for s in steps):
+        built = agent_tools.auto_build_ppt(db, user)
+        if built is not None:
+            _push_step(Step(tool="run_skill_script", args={"auto": True},
+                            ok=bool(built.get("成功")),
+                            result=built if built.get("成功") else None,
+                            error=None if built.get("成功") else str(built.get("错误") or built)))
+            block = _format_block(steps, block_chars, result_chars=result_chars)
     return PlanOutcome(steps=steps, block=block, rounds=rounds)
 
 
@@ -146,9 +381,9 @@ def _exec(db: Session, user: User, name: str, args: dict) -> tuple[bool, Any]:
         return False, {"错误": str(e)}
 
 
-def _heuristic_run(db: Session, user: User, message: str, calls_cap: int) -> list[Step]:
+def _heuristic_run(db: Session, user: User, message: str, calls_cap: int, calls: list | None = None) -> list[Step]:
     steps: list[Step] = []
-    for c in agent_tools._heuristic_calls(message)[:calls_cap]:
+    for c in (calls if calls is not None else agent_tools._heuristic_calls(message))[:calls_cap]:
         name = str(c.get("name") or "")
         args = c.get("arguments") or {}
         ok, payload = _exec(db, user, name, args)
@@ -215,23 +450,43 @@ def _format_block(
 ) -> str:
     if not steps:
         return ""
-    parts = ["【业务数据】（系统实时数据，请据此作答并注明数据周期；未列出的不要编造）"]
-    for s in steps:
-        if s.ok:
-            parts.append(f"· {s.tool}({_brief_args(s.args)})：{compact_result(s.result, result_chars)}")
-        else:
-            parts.append(f"· {s.tool}：查询失败（{s.error}）")
-    # 整块也按条裁剪：宁可少保留一个结果，也不截断到一行中间
-    total = 0
-    kept: list[str] = []
-    for p in parts:
-        if total + len(p) + 1 > max_chars:
+    # 内部业务数据与公网搜索结果严格分块，避免模型把网上信息当成本机构事实
+    internal = [s for s in steps if s.tool != "web_search"]
+    external = [s for s in steps if s.tool == "web_search"]
+
+    sections: list[str] = []
+    if internal:
+        parts = ["【业务数据】（系统实时数据，请据此作答并注明数据周期；未列出的不要编造）"]
+        for s in internal:
+            if s.ok:
+                parts.append(f"· {s.tool}({_brief_args(s.args)})：{compact_result(s.result, result_chars)}")
+            else:
+                parts.append(f"· {s.tool}：查询失败（{s.error}）")
+        sections.append("\n".join(parts))
+    if external:
+        parts = [
+            "【联网搜索结果·公网外部资料】（仅用于补充行业/公开/通用知识等外部事实，"
+            "**不得**用于回答本校的学员、课时、排课、收费、退费、请假政策等内部问题；"
+            "引用时请标注来源链接；若与内部数据或知识库冲突，一律以内部为准）"
+        ]
+        for s in external:
+            if s.ok:
+                parts.append(f"· web_search({_brief_args(s.args)})：{compact_result(s.result, result_chars)}")
+            else:
+                parts.append(f"· web_search：联网检索失败（{s.error}）")
+        sections.append("\n".join(parts))
+
+    # 整块按预算拼接（优先保留内部业务数据；空间不足时公网块可被裁掉）
+    block = ""
+    for sec in sections:
+        candidate = (block + "\n\n" + sec).strip() if block else sec
+        if len(candidate) > max_chars:
+            if not block:
+                block = sec[:max_chars] + "…（已截断）"
+            else:
+                block += "\n…（其余内容因篇幅未列出，如需可再追问）"
             break
-        kept.append(p)
-        total += len(p) + 1
-    block = "\n".join(kept)
-    if len(kept) < len(parts):
-        block += "\n…（其余业务数据因篇幅未列出，如需可再追问）"
+        block = candidate
     return block
 
 

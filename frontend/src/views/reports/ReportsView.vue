@@ -131,12 +131,14 @@ const FIELD_MAP: Record<ReportType, { key: string; label: string; placeholder: s
   ],
   weekly: [
     { key: 'summary', label: '本周总结', placeholder: '概括本周整体工作情况…' },
+    { key: 'courses', label: '授课情况', placeholder: '本周授课逐节累积（AI 按周期授课明细自动拼接为表格）…' },
     { key: 'highlights', label: '本周亮点', placeholder: '值得记录的亮点、进步…' },
     { key: 'problems', label: '问题与改进', placeholder: '客观指出问题并给改进建议…' },
     { key: 'next_plan', label: '下周计划', placeholder: '下周的安排 / 目标…' },
   ],
   monthly: [
     { key: 'summary', label: '本月总结', placeholder: '综合本月日报/周报，概括整体工作与趋势…' },
+    { key: 'courses', label: '授课情况', placeholder: '本月授课逐节累积（AI 按周期授课明细自动拼接为表格）…' },
     { key: 'highlights', label: '本月亮点', placeholder: '值得记录的亮点、进步（需有事例支撑）…' },
     { key: 'problems', label: '问题与改进', placeholder: '客观指出问题并给改进方向…' },
     { key: 'next_plan', label: '下月计划', placeholder: '下月的安排 / 目标…' },
@@ -152,6 +154,91 @@ const fields = computed<{ key: string; label: string; placeholder: string }[]>((
 
 // 授课情况表格原文折叠（默认只看表格）
 const showCoursesSrc = ref(false)
+
+// —— 授课表格超 10 行折叠：拼接后越来越长，多出部分收缩，点击展开看全部 ——
+const COURSES_COLLAPSE_LIMIT = 10
+const coursesExpanded = ref(false)
+const boardCoursesExpanded = ref(false)
+watch([() => form.value.fields['courses'], activeTab], () => {
+  coursesExpanded.value = false
+  showCoursesSrc.value = false
+})
+
+/** 统计 Markdown 表格数据行数（表头+分隔行之后以 | 开头的行） */
+function countMdTableRows(md: string): number {
+  const lines = (md ?? '').replace(/\r\n/g, '\n').split('\n')
+  let n = 0
+  let inTable = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (!inTable) {
+      const next = lines[i + 1]
+      if (line.startsWith('|') && next !== undefined && /^\|?[\s:|-]+\|?[\s:|~-]*$/.test(next.trim()) && next.includes('-')) {
+        inTable = true
+        i++
+      }
+      continue
+    }
+    if (line.startsWith('|')) n++
+    else if (line === '') continue
+    else inTable = false
+  }
+  return n
+}
+
+/** 表格超限时只保留前 N 个数据行，其余折叠 */
+function truncateMdTable(md: string, limit: number): string {
+  const lines = (md ?? '').replace(/\r\n/g, '\n').split('\n')
+  const out: string[] = []
+  let kept = 0
+  let inTable = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const t = line.trim()
+    if (!inTable) {
+      out.push(line)
+      const next = lines[i + 1]
+      if (t.startsWith('|') && next !== undefined && /^\|?[\s:|-]+\|?[\s:|~-]*$/.test(next.trim()) && next.includes('-')) {
+        out.push(next)
+        inTable = true
+        i++
+      }
+      continue
+    }
+    if (t.startsWith('|')) {
+      if (kept < limit) {
+        out.push(line)
+        kept++
+      }
+      continue
+    }
+    if (t === '') {
+      out.push(line)
+      continue
+    }
+    inTable = false
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
+const coursesRowCount = computed(() => countMdTableRows(form.value.fields['courses'] ?? ''))
+const coursesCollapsed = computed(() => coursesRowCount.value > COURSES_COLLAPSE_LIMIT && !coursesExpanded.value)
+const visibleCoursesMd = computed(() =>
+  coursesCollapsed.value
+    ? truncateMdTable(form.value.fields['courses'] ?? '', COURSES_COLLAPSE_LIMIT)
+    : (form.value.fields['courses'] ?? ''),
+)
+const boardCoursesRowCount = computed(() =>
+  countMdTableRows(((boardDetail.value?.content as any)?.courses ?? '') as string),
+)
+const boardCoursesCollapsed = computed(
+  () => boardCoursesRowCount.value > COURSES_COLLAPSE_LIMIT && !boardCoursesExpanded.value,
+)
+const visibleBoardCoursesMd = computed(() => {
+  const md = (((boardDetail.value?.content as any)?.courses ?? '') as string) ?? ''
+  return boardCoursesCollapsed.value ? truncateMdTable(md, COURSES_COLLAPSE_LIMIT) : md
+})
 
 // —— 周报/日报/月报自动统计预览 ——
 const weeklyStats = ref<WeeklyStatsOut | null>(null)
@@ -741,6 +828,7 @@ function boardCampusChanged() {
 
 function openBoardDetail(item: ReportBoardItemOut) {
   boardDetail.value = item
+  boardCoursesExpanded.value = false
   showBoardDetail.value = true
 }
 
@@ -1037,12 +1125,31 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="boardDetail.type === 'daily'" class="board-fields">
             <label><span>今日工作</span><div class="readonly-field md" v-html="renderMarkdown((boardDetail.content as any)?.work || '—')"></div></label>
-            <label><span>授课情况</span><div class="readonly-field md" v-html="renderMarkdown((boardDetail.content as any)?.courses || '—')"></div></label>
+            <label><span>授课情况
+              <span v-if="boardCoursesRowCount > COURSES_COLLAPSE_LIMIT" class="collapse-hint">（共 {{ boardCoursesRowCount }} 节）</span>
+            </span><div class="readonly-field md" v-html="renderMarkdown(visibleBoardCoursesMd || '—')"></div>
+              <button
+                v-if="boardCoursesRowCount > COURSES_COLLAPSE_LIMIT"
+                class="btn ghost small courses-toggle-btn"
+                type="button"
+                @click="boardCoursesExpanded = !boardCoursesExpanded"
+              >{{ boardCoursesExpanded ? '收起，只看前 10 节' : `展开全部 ${boardCoursesRowCount} 节` }}</button>
+            </label>
             <label><span>问题与处理</span><div class="readonly-field md" v-html="renderMarkdown((boardDetail.content as any)?.problems || '—')"></div></label>
             <label><span>明日计划</span><div class="readonly-field md" v-html="renderMarkdown((boardDetail.content as any)?.plan || '—')"></div></label>
           </div>
           <div v-else-if="boardDetail.type === 'monthly'" class="board-fields">
             <label><span>本月总结</span><div class="readonly-field">{{ (boardDetail.content as any)?.summary || '—' }}</div></label>
+            <label><span>授课情况
+              <span v-if="boardCoursesRowCount > COURSES_COLLAPSE_LIMIT" class="collapse-hint">（共 {{ boardCoursesRowCount }} 节）</span>
+            </span><div class="readonly-field md" v-html="renderMarkdown(visibleBoardCoursesMd || '—')"></div>
+              <button
+                v-if="boardCoursesRowCount > COURSES_COLLAPSE_LIMIT"
+                class="btn ghost small courses-toggle-btn"
+                type="button"
+                @click="boardCoursesExpanded = !boardCoursesExpanded"
+              >{{ boardCoursesExpanded ? '收起，只看前 10 节' : `展开全部 ${boardCoursesRowCount} 节` }}</button>
+            </label>
             <label><span>本月亮点</span><div class="readonly-field">{{ (boardDetail.content as any)?.highlights || '—' }}</div></label>
             <label><span>问题与改进</span><div class="readonly-field">{{ (boardDetail.content as any)?.problems || '—' }}</div></label>
             <label><span>下月计划</span><div class="readonly-field">{{ (boardDetail.content as any)?.next_plan || '—' }}</div></label>
@@ -1050,6 +1157,16 @@ onBeforeUnmount(() => {
           </div>
           <div v-else class="board-fields">
             <label><span>本周总结</span><div class="readonly-field">{{ (boardDetail.content as any)?.summary || '—' }}</div></label>
+            <label><span>授课情况
+              <span v-if="boardCoursesRowCount > COURSES_COLLAPSE_LIMIT" class="collapse-hint">（共 {{ boardCoursesRowCount }} 节）</span>
+            </span><div class="readonly-field md" v-html="renderMarkdown(visibleBoardCoursesMd || '—')"></div>
+              <button
+                v-if="boardCoursesRowCount > COURSES_COLLAPSE_LIMIT"
+                class="btn ghost small courses-toggle-btn"
+                type="button"
+                @click="boardCoursesExpanded = !boardCoursesExpanded"
+              >{{ boardCoursesExpanded ? '收起，只看前 10 节' : `展开全部 ${boardCoursesRowCount} 节` }}</button>
+            </label>
             <label><span>本周亮点</span><div class="readonly-field">{{ (boardDetail.content as any)?.highlights || '—' }}</div></label>
             <label><span>问题与改进</span><div class="readonly-field">{{ (boardDetail.content as any)?.problems || '—' }}</div></label>
             <label><span>下周计划</span><div class="readonly-field">{{ (boardDetail.content as any)?.next_plan || '—' }}</div></label>
@@ -1187,18 +1304,30 @@ onBeforeUnmount(() => {
         <input v-model="form.title" type="text" placeholder="如：8月31日 工作日报 / 第35周 工作周报 / 9月 工作月报" maxlength="160" />
       </label>
       <template v-for="f in fields" :key="f.key">
-        <!-- 日报授课情况：纯表格展示（AI 按当日课后反馈自动整理），无需手填文本框 -->
-        <div v-if="activeTab === 'daily' && f.key === 'courses'" class="field">
-          <span class="field-label">{{ f.label }}</span>
+        <!-- 授课情况：纯表格展示（日报=当日明细；周报/月报=周期逐节累积拼接），超 10 行自动折叠 -->
+        <div v-if="f.key === 'courses'" class="field">
+          <span class="field-label">{{ f.label }}
+            <span v-if="coursesRowCount > COURSES_COLLAPSE_LIMIT" class="collapse-hint">（共 {{ coursesRowCount }} 节，{{ coursesExpanded ? '已展开' : `仅显示前 ${COURSES_COLLAPSE_LIMIT} 节` }}）</span>
+          </span>
           <div
             v-if="(form.fields[f.key] ?? '').trim()"
             class="md-preview"
-            v-html="renderMarkdown(form.fields[f.key])"
+            v-html="renderMarkdown(visibleCoursesMd)"
           />
-          <p v-else class="hint">授课情况由 AI 草稿根据当日课后反馈自动整理为表格，无需手填</p>
-          <button class="btn ghost small courses-src-toggle" type="button" @click="showCoursesSrc = !showCoursesSrc">
-            {{ showCoursesSrc ? '收起表格原文' : '编辑表格原文' }}
-          </button>
+          <p v-else class="hint">授课情况由 AI 草稿根据周期内课后反馈/授课明细自动整理为表格，无需手填</p>
+          <div class="courses-toggle-row">
+            <button
+              v-if="coursesRowCount > COURSES_COLLAPSE_LIMIT"
+              class="btn ghost small"
+              type="button"
+              @click="coursesExpanded = !coursesExpanded"
+            >
+              {{ coursesExpanded ? '收起，只看前 10 节' : `展开全部 ${coursesRowCount} 节` }}
+            </button>
+            <button class="btn ghost small courses-src-toggle" type="button" @click="showCoursesSrc = !showCoursesSrc">
+              {{ showCoursesSrc ? '收起表格原文' : '编辑表格原文' }}
+            </button>
+          </div>
           <textarea
             v-if="showCoursesSrc"
             v-autogrow
@@ -1717,6 +1846,23 @@ onBeforeUnmount(() => {
   display: block;
 }
 .courses-src-toggle {
+  margin-top: 8px;
+}
+.courses-toggle-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.courses-toggle-row .courses-src-toggle {
+  margin-top: 0;
+}
+.collapse-hint {
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+.courses-toggle-btn {
   margin-top: 8px;
 }
 

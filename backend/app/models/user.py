@@ -35,6 +35,8 @@ class User(Base):
     role: Mapped[str] = mapped_column(Enum(Role, native_enum=False, length=16, values_callable=_enum_values), index=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
+    # 微信小程序 openid（家长端登录绑定；唯一可空，未绑定为空）
+    wechat_openid: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     name: Mapped[str] = mapped_column(String(64))
     password_hash: Mapped[str] = mapped_column(String(255))
     # 校区/分支机构标签（多校区区分，如 一校/二校/三校，可自定义）

@@ -58,6 +58,30 @@ export interface MaterialItem {
   period?: string
   stat_keys?: string[]
   stat_count?: number
+  student_count?: number
+  eval_done?: number
+  students?: string[]
+  snippet?: string
+}
+
+export interface ChatAttachment {
+  id: string
+  name: string
+  kind: 'image' | 'doc' | string
+  url: string
+  size: number
+  text?: string | null
+}
+
+/** 上传对话附件（图片/文档）：暂存后返回可预览 URL 与文档正文（供本轮对话引用） */
+export async function uploadChatAttachment(convId: string, file: File): Promise<ChatAttachment> {
+  const fd = new FormData()
+  fd.append('file', file)
+  const { data } = await http.post<ChatAttachment>(
+    `/agents/conversations/${convId}/attachments`, fd,
+    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000 },
+  )
+  return data
 }
 
 export async function getConversationMaterial(id: string): Promise<{
@@ -140,17 +164,6 @@ export async function getSharedConversation(token: string): Promise<SharedConver
   return data
 }
 
-export async function listMemories(agentId: string): Promise<{ id: string; key: string; value: string }[]> {
-  const { data } = await http.get<{ items: { id: string; key: string; value: string }[] }>('/agents/memories', {
-    params: { agent_id: agentId },
-  })
-  return data.items
-}
-
-export async function deleteMemory(id: string): Promise<void> {
-  await http.delete(`/agents/memories/${id}`)
-}
-
 export interface AgentPhase {
   key: string
   label: string
@@ -165,18 +178,50 @@ export interface ToolTraceStep {
   error?: string | null
 }
 
+/** 实时执行步骤（规划阶段逐步推送）：phase=running 表示这一步正在执行。 */
+export interface LiveToolStep {
+  phase?: 'start' | 'done'
+  seq: number
+  tool: string
+  args: Record<string, unknown>
+  ok: boolean
+  summary: string
+}
+
+/** RAG 命中的知识库片段：similarity=向量相似度，rerank_score=重排分（启用重排时才有）。 */
+export interface RagHit {
+  title: string
+  text: string
+  similarity?: number
+  rerank_score?: number | null
+}
+
+/** 检索诊断：向量/关键词/重排是否真的生效（用于「引用来源」标注与排障）。 */
+export interface RetrievalInfo {
+  vector: boolean
+  keyword: boolean
+  rerank: boolean
+  rerank_model?: string | null
+  summary: string
+  trace_id?: string | null
+}
+
 /** 统一流式对话：SSE，回调 delta；onPhase 回调阶段；onDone 回调完成帧（含 stage/options/工具轨迹） */
 export async function agentChatStream(
   convId: string,
-  payload: { stage: string; message: string; state: Record<string, unknown>; use_rag?: boolean; config_id?: string | null },
+  payload: { stage: string; message: string; state: Record<string, unknown>; use_rag?: boolean; config_id?: string | null; attachments?: ChatAttachment[] },
   onDelta: (text: string) => void,
   signal?: AbortSignal,
   onPhase?: (phase: AgentPhase) => void,
   onDone?: (info: {
     stage?: string; options?: ChatOption[]; has_spec?: boolean; title?: string;
     tool_trace?: ToolTraceStep[]; tool_rounds?: number; tool_degraded?: boolean;
+    mcp_trace?: { step: string; ok: boolean; ms: number; detail: string }[];
+    rag_auto?: boolean;
+    hits?: RagHit[];
+    retrieval?: RetrievalInfo;
   }) => void,
-  opts?: { idleTimeoutMs?: number; onTimeout?: () => void },
+  opts?: { idleTimeoutMs?: number; onTimeout?: () => void; onToolsLive?: (steps: ToolTraceStep[]) => void; onToolStep?: (step: LiveToolStep) => void },
 ): Promise<void> {
   const token = localStorage.getItem('access_token')
   const resp = await fetch(`/api/agents/conversations/${convId}/chat`, {
@@ -239,9 +284,15 @@ export async function agentChatStream(
           title?: string
           error?: string
           phase?: AgentPhase
+          tools_live?: ToolTraceStep[]
+          tool_step?: LiveToolStep
           tool_trace?: ToolTraceStep[]
           tool_rounds?: number
           tool_degraded?: boolean
+          mcp_trace?: { step: string; ok: boolean; ms: number; detail: string }[]
+          rag_auto?: boolean
+          hits?: RagHit[]
+          retrieval?: RetrievalInfo
         }
         try {
           data = JSON.parse(line.slice(5).trim())
@@ -250,12 +301,15 @@ export async function agentChatStream(
         }
         if (data.error) throw new Error(data.error)
         if (data.phase && onPhase) onPhase(data.phase)
+        if (data.tools_live && opts?.onToolsLive) opts.onToolsLive(data.tools_live)
+        if (data.tool_step && opts?.onToolStep) opts.onToolStep(data.tool_step)
         if (data.delta) onDelta(data.delta)
         if (data.done) {
           if (onDone) {
             onDone({
               stage: data.stage, options: data.options, has_spec: data.has_spec, title: data.title,
               tool_trace: data.tool_trace, tool_rounds: data.tool_rounds, tool_degraded: data.tool_degraded,
+              mcp_trace: data.mcp_trace, rag_auto: data.rag_auto, hits: data.hits, retrieval: data.retrieval,
             })
           }
           return
