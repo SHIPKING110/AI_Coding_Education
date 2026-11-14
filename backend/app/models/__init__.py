@@ -54,6 +54,10 @@ from app.models.parent_service import ParentServiceMessage, ParentServiceThread
 from app.models.ppt_task import AgentPptTask, AgentPptTaskEvent
 from app.models.prompt import PromptScope, PromptTemplate
 from app.models.rag_admin import (
+    AgentEvalCase,
+    AgentEvalResult,
+    AgentEvalRun,
+    AgentEvalSet,
     RagAdminAudit,
     RagConfigVersion,
     RagEvalCase,
@@ -89,6 +93,10 @@ __all__ = [
     "AgentWorkingMemory",
     "AgentRunSpan",
     "AgentRunTrace",
+    "AgentEvalCase",
+    "AgentEvalResult",
+    "AgentEvalRun",
+    "AgentEvalSet",
     "AgentPptTask",
     "AgentPptTaskEvent",
     "AgentGlobalSetting",

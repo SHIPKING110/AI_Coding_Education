@@ -95,22 +95,89 @@ def check_release_evidence(
     return problems
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="RAG 评测验收闸门（部署前校验）")
-    ap.add_argument("--set-id", default=os.environ.get("RAG_GATE_SET_ID") or None,
-                    help="评测集 UUID（也可用环境变量 RAG_GATE_SET_ID）")
-    ap.add_argument("--set-name", default=os.environ.get("RAG_GATE_SET_NAME") or None,
-                    help="评测集名称（也可用环境变量 RAG_GATE_SET_NAME，与 --set-id 二选一）")
-    ap.add_argument("--allow-missing", action="store_true",
-                    help="没有完成的运行时放行（默认阻断）")
-    ap.add_argument("--require-answer", action="store_true",
-                    help="要求发布运行执行了答案质量评测（answer_eval），否则阻断")
-    ap.add_argument("--require-calibration", action="store_true",
-                    help="要求人工复核 ≥10 对且 Kappa ≥0.6，否则阻断")
-    ap.add_argument("--require-baseline", action="store_true",
-                    help="要求同集存在更早的基线运行（冻结/关键回退可对比），否则阻断")
-    ap.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    args = ap.parse_args()
+def check_agent_eval(db, *, set_id: str | None, set_name: str | None) -> tuple[int, dict]:
+    """Agent 行为评测发布闸门：读取指定集合最近一次完成的运行并校验。
+
+    闸门规则（与 services/agent_eval_runner 一致，见 evals/agent_metrics.py）：
+    - 禁用工具调用率 > 0 → fail（安全红线）；
+    - 冻结集序列得分 / 工具召回较基线回退 > 2pp → fail；
+    - 冻结集应拒答率回退 > 5pp → fail；
+    - 未配置冻结集 → skip（严格模式下阻断）。
+    """
+    from sqlalchemy import select
+
+    from app.models.rag_admin import AgentEvalRun, AgentEvalSet
+    from evals.agent_metrics import agent_eval_gate
+
+    payload: dict = {"agent_eval": True}
+    try:
+        if set_id:
+            es = db.get(AgentEvalSet, uuid.UUID(set_id))
+            err = None if es else f"Agent 评测集不存在：{set_id}"
+        elif set_name:
+            es = db.scalars(
+                select(AgentEvalSet).where(AgentEvalSet.name == set_name).order_by(AgentEvalSet.created_at)
+            ).first()
+            err = None if es else f"Agent 评测集名称未找到：{set_name}"
+        else:
+            # 默认取「默认」集合
+            es = db.scalars(
+                select(AgentEvalSet).where(AgentEvalSet.name == "默认").order_by(AgentEvalSet.created_at)
+            ).first()
+            err = None if es else "未找到默认 Agent 评测集"
+        if es is None:
+            payload.update({"gate": "fail", "reasons": [err]})
+            return 2, payload
+        runs = [
+            r
+            for r in db.scalars(
+                select(AgentEvalRun)
+                .where(AgentEvalRun.set_id == es.id, AgentEvalRun.status == "done")
+                .order_by(AgentEvalRun.created_at.desc())
+                .limit(10)
+            ).all()
+            # CLI 冒烟限额运行不参与发布闸门（基线对比会被样本差异污染）
+            if not (r.eval_snapshot or {}).get("limit")
+        ]
+        if not runs:
+            payload.update({"set": es.name, "gate": "fail", "reasons": ["没有完成的 Agent 评测运行"]})
+            return 2, payload
+        run = runs[0]
+        gate = run.gate if isinstance(run.gate, dict) else None
+        if not gate:
+            from app.services.agent_eval_runner import _baseline_metrics
+
+            gate = agent_eval_gate(run.metrics or {}, baseline_metrics=_baseline_metrics(db, run))
+        state = gate.get("gate") or "fail"
+        overall = (run.metrics or {}).get("overall") or {}
+        frozen = ((run.metrics or {}).get("splits") or {}).get("frozen") or {}
+        payload.update(
+            {
+                "set": es.name,
+                "run_id": str(run.id),
+                "gate": state,
+                "reasons": list(gate.get("reasons") or []),
+                "pass_rate": overall.get("pass_rate"),
+                "tool_recall": overall.get("tool_recall"),
+                "seq_score": overall.get("seq_score"),
+                "forbidden_rate": overall.get("forbidden_rate"),
+                "frozen_seq_score": frozen.get("seq_score"),
+                "frozen_abstention_rate": frozen.get("abstention_rate"),
+                "done_runs": len(runs),
+            }
+        )
+        if state == "pass":
+            return 0, payload
+        return 1, payload
+    except ValueError:
+        payload.update({"gate": "fail", "reasons": ["Agent 评测集 ID 非法"]})
+        return 2, payload
+    except Exception as exc:  # noqa: BLE001
+        payload.update({"gate": "fail", "reasons": [f"Agent 评测闸门校验异常：{exc}"]})
+        return 3, payload
+
+
+def _rag_gate(args) -> int:
     strict = args.require_answer or args.require_calibration or args.require_baseline
 
     db = SessionLocal()
@@ -201,6 +268,63 @@ def main() -> int:
         return 1
     finally:
         db.close()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="RAG 评测验收闸门（部署前校验，可选叠加 Agent 行为评测）")
+    ap.add_argument("--set-id", default=os.environ.get("RAG_GATE_SET_ID") or None,
+                    help="评测集 UUID（也可用环境变量 RAG_GATE_SET_ID）")
+    ap.add_argument("--set-name", default=os.environ.get("RAG_GATE_SET_NAME") or None,
+                    help="评测集名称（也可用环境变量 RAG_GATE_SET_NAME，与 --set-id 二选一）")
+    ap.add_argument("--allow-missing", action="store_true",
+                    help="没有完成的运行时放行（默认阻断）")
+    ap.add_argument("--require-answer", action="store_true",
+                    help="要求发布运行执行了答案质量评测（answer_eval），否则阻断")
+    ap.add_argument("--require-calibration", action="store_true",
+                    help="要求人工复核 ≥10 对且四指标 SLA 达标（ADR-0027），否则阻断")
+    ap.add_argument("--require-baseline", action="store_true",
+                    help="要求同集存在更早的基线运行（冻结/关键回退可对比），否则阻断")
+    ap.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    ap.add_argument("--require-agent-eval", action="store_true",
+                    help="同时校验 Agent 行为评测闸门（默认「默认」集合或 --agent-eval-set-*），失败则阻断")
+    ap.add_argument("--agent-eval-set-id", default=os.environ.get("AGENT_EVAL_GATE_SET_ID") or None,
+                    help="Agent 行为评测集 UUID（也可用环境变量 AGENT_EVAL_GATE_SET_ID）")
+    ap.add_argument("--agent-eval-set-name", default=os.environ.get("AGENT_EVAL_GATE_SET_NAME") or None,
+                    help="Agent 行为评测集名称（也可用环境变量 AGENT_EVAL_GATE_SET_NAME）")
+    args = ap.parse_args()
+
+    rag_code = _rag_gate(args)
+
+    check_agent = args.require_agent_eval or bool(args.agent_eval_set_id) or bool(args.agent_eval_set_name)
+    if not check_agent:
+        return rag_code
+
+    db = SessionLocal()
+    try:
+        agent_code, payload = check_agent_eval(
+            db, set_id=args.agent_eval_set_id, set_name=args.agent_eval_set_name
+        )
+    finally:
+        db.close()
+
+    if args.json:
+        print(json.dumps({"agent_eval": payload}, ensure_ascii=False, indent=2))
+    else:
+        print(f"[deploy_gate] agent_eval set={payload.get('set')} run={payload.get('run_id')} "
+              f"gate={payload.get('gate')}")
+        print(
+            f"  通过率={_fmt(payload.get('pass_rate'))} 工具召回={_fmt(payload.get('tool_recall'))} "
+            f"序列={_fmt(payload.get('seq_score'))} 禁用率={_fmt(payload.get('forbidden_rate'))} "
+            f"冻结集序列={_fmt(payload.get('frozen_seq_score'))} "
+            f"应拒答率={_fmt(payload.get('frozen_abstention_rate'))}"
+        )
+        for reason in payload.get("reasons") or []:
+            print(f"  - {reason}")
+
+    if args.require_agent_eval and agent_code != 0:
+        print("[deploy_gate] Agent 行为评测闸门未通过，阻断发布", file=sys.stderr)
+        return max(rag_code, 1)
+    return rag_code
 
 
 if __name__ == "__main__":

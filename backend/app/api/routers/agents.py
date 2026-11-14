@@ -7,7 +7,7 @@ import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -1793,11 +1793,18 @@ def conversation_chat(
     body: ConversationChatIn,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    x_eval_run: str | None = Header(default=None, alias="X-Eval-Run"),
 ) -> StreamingResponse:
     """统一流式对话：对话 + 可执行 options + phase，自动持久化消息并注入长短期记忆。
 
     事件格式与报告 ppt-chat 一致：phase / delta / done / error。
+
+    评测守卫（Agent 行为评测驱动时带 X-Eval-Run 头）：
+    - 不写长期记忆、不触发异步蒸馏（避免评测污染用户画像）；
+    - 会话来源为 eval 时不出现在用户会话列表（create 侧已隔离，这里兜底）；
+    - trace 记录 eval_run_id，成本可在「任务监控」按来源筛选。
     """
+    is_eval = bool(x_eval_run)
     conv = agent_crud.get_conversation(db, conv_id=conv_id, owner_id=user.id)
     if conv is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -1812,6 +1819,12 @@ def conversation_chat(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except llm.LLMConfigError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    if is_eval:
+        # 评测消耗独立归属：用量账本按模块 agent_eval 统计，不混入用户的 agent 用量
+        try:
+            resolved.module = "agent_eval"
+        except Exception:
+            pass
 
     state = body.state or {}
     message = body.message or ""
@@ -1875,7 +1888,7 @@ def conversation_chat(
         rag_decision=_initial_rag_decision,
         rag_skip_reason=_initial_skip_reason,
         task_kind=intent_info.get("task_kind") or "chat",
-        attributes={"intent_reason": intent_info.get("reason")},
+        attributes={"intent_reason": intent_info.get("reason"), **({"eval_run_id": x_eval_run} if is_eval else {})},
     )
 
     mem_ctx = agent_memory.build_memory_context(
@@ -2737,7 +2750,9 @@ def conversation_chat(
         except Exception:
             pass
         try:
-            agent_memory.distill_async(user.id, conv.agent_id, conv.id, message, full)
+            # 评测驱动（X-Eval-Run）不写长期记忆，避免评测会话污染用户画像
+            if not is_eval:
+                agent_memory.distill_async(user.id, conv.agent_id, conv.id, message, full)
         except Exception:
             pass
         yield _frame({

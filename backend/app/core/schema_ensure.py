@@ -137,6 +137,8 @@ def ensure_business_schema(engine: Engine) -> None:
     addcol("rag_eval_results", "human_judge VARCHAR(64)", "human_judge")
     addcol("rag_eval_results", "human_at TIMESTAMPTZ", "human_at")
     addcol("rag_eval_results", "human_reason TEXT", "human_reason")
+    # Agent 行为评测：评测驱动的对话标记 eval，列表按来源隔离
+    addcol("agent_conversations", "source VARCHAR(16) NOT NULL DEFAULT 'chat'", "source")
     # 用量与成本细粒度权限（默认关闭）
     for _usage_col in ("usage_view", "usage_price_create", "usage_budget_save", "usage_recon_upsert"):
         addcol("teacher_permissions", f"{_usage_col} BOOLEAN NOT NULL DEFAULT FALSE", _usage_col)

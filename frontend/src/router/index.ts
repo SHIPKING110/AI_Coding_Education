@@ -101,6 +101,12 @@ const router = createRouter({
           meta: { adminOnly: true },
         },
         {
+          path: 'rag/agent-eval',
+          name: 'rag-agent-eval',
+          component: () => import('@/views/rag/AgentEvalView.vue'),
+          meta: { adminOnly: true },
+        },
+        {
           path: 'rag/settings',
           name: 'rag-settings',
           component: () => import('@/views/rag/RagSettingsView.vue'),

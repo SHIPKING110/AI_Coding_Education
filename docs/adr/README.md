@@ -17,3 +17,4 @@
 | [ADR-0004](adr-0004-tool-list-integrity.md) | 名单类工具的完整性与截断语义 | 已采纳 |
 | [ADR-0026](adr-0026-eval-calibration-rubric-and-keyword-metrics.md) | 人工复核只打 correctness + 关键词命中度量增强与生成口径收敛 | 已采纳 |
 | [ADR-0027](adr-0027-calibration-sla-and-retrieval-observability.md) | 人工校准四指标 SLA + 检索观测/低置信门控/关键词腿与入库策略 | 已采纳 |
+| [ADR-0028](adr-0028-agent-eval-rollback-gate.md) | Agent 行为评测闸门（工具编排回归） | 已采纳 |

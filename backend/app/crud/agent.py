@@ -16,11 +16,11 @@ from app.models.agent import (
 
 def create_conversation(
     db: Session, *, owner_id, agent_id: str, context_ref: dict, title: str = "新的对话",
-    rag_enabled: bool = False,
+    rag_enabled: bool = False, source: str = "chat",
 ) -> AgentConversation:
     conv = AgentConversation(
         owner_id=owner_id, agent_id=agent_id, context_ref=context_ref or {},
-        title=title or "新的对话", rag_enabled=rag_enabled,
+        title=title or "新的对话", rag_enabled=rag_enabled, source=source or "chat",
     )
     db.add(conv)
     db.commit()
@@ -31,7 +31,7 @@ def create_conversation(
 def list_conversations(db: Session, *, owner_id) -> list[AgentConversation]:
     stmt = (
         select(AgentConversation)
-        .where(AgentConversation.owner_id == owner_id)
+        .where(AgentConversation.owner_id == owner_id, AgentConversation.source != "eval")
         .order_by(desc(AgentConversation.pinned), desc(AgentConversation.updated_at))
     )
     return list(db.scalars(stmt).all())

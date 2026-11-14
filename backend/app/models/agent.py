@@ -24,6 +24,8 @@ class AgentConversation(Base):
     rag_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     stage: Mapped[str] = mapped_column(String(32), default="data")
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # 会话来源：chat=用户对话；eval=Agent 行为评测的一次性会话（不出现在列表、不写长期记忆）
+    source: Mapped[str] = mapped_column(String(16), default="chat", server_default="chat")
     share_token: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

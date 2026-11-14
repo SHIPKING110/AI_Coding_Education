@@ -57,7 +57,19 @@ export function renderMarkdown(input: string): string {
         : /stateDiagram/.test(code) ? '状态机图' : /mindmap/.test(code) ? '思维导图'
         : /graph|flowchart/.test(code) ? '流程图' : /pie/.test(code) ? '饼图' : '关系图'
       const id = uid()
-      return `<div class="md-mermaid" data-kind="${kind}"><div class="md-mermaid-head">◈ ${kind} ${copyBtn(id)}</div><pre class="mermaid-src" id="${id}">${esc}</pre><div class="mermaid-render"></div></div>`
+      const icon = (paths: string) =>
+        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`
+      const zoomIcon = icon('<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>')
+      const copyIcon = icon('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>')
+      const copyJs = `(function(b){var t=document.getElementById(b.dataset.copy);var s=t?t.innerText:'';var x=b.querySelector('.md-mm-tx');var done=function(){if(x){x.textContent='已复制';setTimeout(function(){x.textContent='复制'},1200)}};if(navigator.clipboard){navigator.clipboard.writeText(s).then(done,function(){done()})}else{done()}})(this)`
+      return `<div class="md-mermaid" data-kind="${kind}">` +
+        `<div class="md-mermaid-head">` +
+        `<span class="md-mermaid-kind">◈ ${kind}</span>` +
+        `<span class="md-mermaid-ops">` +
+        `<button class="md-mm-btn md-mermaid-zoom" type="button" title="放大预览（滚轮缩放 / 拖拽平移）">${zoomIcon}<span class="md-mm-tx">放大</span></button>` +
+        `<button class="md-mm-btn" type="button" data-copy="${id}" title="复制 Mermaid 源码" onclick="${copyJs.replace(/"/g, '&quot;')}">${copyIcon}<span class="md-mm-tx">复制</span></button>` +
+        `</span></div>` +
+        `<pre class="mermaid-src" id="${id}">${esc}</pre><div class="mermaid-render"></div></div>`
     }
     if (l === 'chart') {
       try {

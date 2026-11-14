@@ -8,6 +8,7 @@ const tabs = [
   { to: '/rag/assets', group: 'knowledge', label: '知识资产' },
   { to: '/rag/routes', group: 'knowledge', label: '路由测试' },
   { to: '/rag/eval', group: 'knowledge', label: '评测' },
+  { to: '/rag/agent-eval', group: 'knowledge', label: 'Agent 行为' },
   { to: '/rag/settings', group: 'knowledge', label: '设置' },
   { to: '/rag/traces', group: 'observability', label: '检索追踪' },
   { to: '/rag/runs', group: 'observability', label: '任务监控' },

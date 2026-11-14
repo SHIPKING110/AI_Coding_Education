@@ -195,6 +195,106 @@ class RagEvalResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AgentEvalSet(Base):
+    """Agent 行为评测集：一组「问题 → 期望行为（工具序列/拒答/关键事实）」用例。"""
+
+    __tablename__ = "agent_eval_sets"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # 评测范围：teacher=智能助手（Agent 工作台）；parent=家长客服
+    agent_scope: Mapped[str] = mapped_column(String(32), default="teacher", index=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentEvalCase(Base):
+    """Agent 行为评测用例：期望工具序列 / 禁用工具 / 应拒答 / 关键事实。"""
+
+    __tablename__ = "agent_eval_cases"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_eval_sets.id", ondelete="CASCADE"), index=True
+    )
+    query: Mapped[str] = mapped_column(Text)
+    # 多轮用例脚本：[{role: user|assistant, content: ...}]；空则按单轮 query 执行
+    messages: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 期望调用的工具（有序，用于序列得分）；工具名与 agent_tools 注册表一致
+    expected_tools: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 允许的额外工具（调用了不算扣分，但也不计入期望集合）
+    allowed_extra_tools: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 禁用工具：出现即该用例判 fail（如查询类任务误用写操作/PPT 生成）
+    forbidden_tools: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 期望行为为拒答/转人工（风控、超范围问题的正确行为）
+    expect_abstain: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 终答复中应出现的关键事实关键词（复用 rag 评测的关键词匹配器）
+    expected_facts: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    split: Mapped[str] = mapped_column(String(16), default="regression")
+    business_criticality: Mapped[str] = mapped_column(String(16), default="normal")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(32), default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentEvalRun(Base):
+    """一次 Agent 行为评测运行：后台线程逐条驱动真实对话链路，进度可轮询。"""
+
+    __tablename__ = "agent_eval_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_eval_sets.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    stage: Mapped[str] = mapped_column(String(32), default="pending")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    total_cases: Mapped[int] = mapped_column(Integer, default=0)
+    processed_cases: Mapped[int] = mapped_column(Integer, default=0)
+    # 被测 Agent 与模型配置快照（模型为空=平台默认）
+    agent_id: Mapped[str] = mapped_column(String(64), default="assistant")
+    model_config_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    model_name: Mapped[str] = mapped_column(String(128), default="")
+    eval_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    gate: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentEvalResult(Base):
+    """单条 Agent 行为评测结果：期望 vs 实际工具序列、事实覆盖与拒答判定。"""
+
+    __tablename__ = "agent_eval_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_eval_runs.id", ondelete="CASCADE"), index=True
+    )
+    case_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, index=True)
+    query: Mapped[str] = mapped_column(Text, default="")
+    # 被驱动对话在 agent_ops 中的 run_id，便于跳转检索追踪/任务监控排查
+    trace_run_id: Mapped[str] = mapped_column(String(48), default="")
+    final_text: Mapped[str] = mapped_column(Text, default="")
+    expected_tools: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    tool_calls: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 人工复核：好/坏（1/0），用于与自动判定的一致性抽检
+    human_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    human_judge: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    human_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    human_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 __all__ = [
     "RagRetrievalTrace",
     "RagConfigVersion",
@@ -203,4 +303,8 @@ __all__ = [
     "RagEvalCase",
     "RagEvalRun",
     "RagEvalResult",
+    "AgentEvalSet",
+    "AgentEvalCase",
+    "AgentEvalRun",
+    "AgentEvalResult",
 ]

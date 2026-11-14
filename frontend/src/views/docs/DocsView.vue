@@ -95,9 +95,9 @@ const REGISTRY: DocMeta[] = [
   {
     slug: 'ai-agent',
     title: 'AI 与 Agent 架构',
-    desc: 'LangChain、编排、工具、记忆、RAG',
+    desc: 'LangChain、编排、工具、记忆、RAG、生产闭环评估',
     group: 'AI 架构',
-    keywords: 'LangChain LangGraph function calling agent 智能体 记忆 mcp 沙箱 rag',
+    keywords: 'LangChain LangGraph function calling agent 智能体 记忆 mcp 沙箱 rag 工作流程 生产闭环',
   },
   { slug: 'permissions', title: '权限体系', desc: '角色、权限键、职务预设与鉴权链路', group: '基础' },
   { slug: 'modules', title: '业务模块', desc: '学员、排课、反馈、报告、评估、习题', group: '业务' },

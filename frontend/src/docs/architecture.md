@@ -31,29 +31,43 @@
 
 ## 系统分层
 
-```tree
-┌──────────────────────────────────────────────────────────────────┐
-│ 浏览器：管理端（教师/教务/管理员）   ·   客户端 H5（家长/学员）        │
-└───────────────▲────────────────────────────────▲─────────────────┘
-                │ HTTPS / SSE 流式 / JSON          │
-        ┌───────┴────────┐                ┌───────┴─────────┐
-        │ Nginx (web)    │───────────────▶│ FastAPI (api)    │
-        │ 静态资源 + /api │                │ uvicorn :8000    │
-        └────────────────┘                └───────┬─────────┘
-                                                  │
-              ┌───────────────────────────────────┼─────────────────────────┐
-              │                                   │                         │
-      ┌───────▼────────┐                ┌─────────▼────────┐        ┌───────▼────────┐
-      │ 业务服务层      │                │ AI 能力层         │        │ 数据层          │
-      │ 学员/排课/反馈  │                │ 意图路由/规划器    │        │ PostgreSQL     │
-      │ 报告/评估/财务  │                │ LangChain 模型     │        │ SQLAlchemy     │
-      └───────┬────────┘                │ RAG/记忆/工具      │        └────────────────┘
-              │                         └─────────┬────────┘
-              │                                   │
-      ┌───────▼────────┐                ┌─────────▼─────────────────────────────┐
-      │ 用量记账/审计   │                │ ChromaDB · Embedding · Rerank · MCP    │
-      │ agent_ops span │                │ E2B/百炼 Sandbox · Web Search          │
-      └────────────────┘                └───────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph U["接入层"]
+        direction LR
+        U1["管理端 Web<br/>教师 / 教务 / 管理员"]
+        U2["客户端 H5<br/>家长 / 学员"]
+    end
+
+    subgraph G["网关层"]
+        N["Nginx web<br/>静态资源 + /api 反代"]
+    end
+
+    subgraph A["应用层"]
+        API["FastAPI api<br/>JWT · 角色/权限键"]
+        BIZ["业务服务层<br/>学员 · 排课 · 反馈 · 报告 · 财务"]
+        AI["AI 能力层<br/>意图路由 · RAG · 规划器 · 工具"]
+        META["体验保障<br/>usage_meter 记账 · agent_ops 观测"]
+    end
+
+    subgraph D["数据与依赖层"]
+        PG[("PostgreSQL 16")]
+        CH[("ChromaDB<br/>向量集合按指纹分片")]
+        LLM["LangChain ChatOpenAI<br/>OpenAI 兼容网关"]
+        EXT["Embedding · Rerank<br/>MCP · Web Search · E2B/百炼沙箱"]
+    end
+
+    U1 -->|HTTPS| N
+    U2 -->|SSE 流式 / JSON| N
+    N --> API
+    API --> BIZ
+    API --> AI
+    BIZ --> PG
+    AI --> CH
+    AI --> LLM
+    AI --> EXT
+    AI --> META
+    META --> PG
 ```
 
 ## 仓库目录
@@ -126,29 +140,41 @@ flowchart TD
 
 ### 普通业务请求
 
-```text
-axios(/api) → JWT 校验 → 角色/权限键 → crud → PostgreSQL → 响应
+```mermaid
+flowchart LR
+    A["axios(/api)"] --> B["JWT 校验"] --> C["角色 / 权限键"] --> D["crud"] --> E[("PostgreSQL")] --> F["响应"]
 ```
 
 ### AI 对话请求
 
-```text
-SSE 请求 → 意图分类(agent_intent) → [RAG 检索] + [业务工具规划(agent_planner)]
-        → 记忆注入(agent_memory) → LangChain ChatOpenAI 流式生成
-        → 前端逐块渲染 → usage_meter 异步记账 + agent_ops 记录 span
+```mermaid
+flowchart LR
+    A["SSE 请求"] --> B["意图分类<br/>agent_intent"]
+    B --> C["RAG 检索<br/>(按需)"]
+    B --> D["业务工具规划<br/>agent_planner"]
+    C --> E["记忆注入<br/>agent_memory"]
+    D --> E
+    E --> F["ChatOpenAI<br/>流式生成"]
+    F --> G["前端逐块渲染"]
+    F --> H["usage_meter 记账<br/>agent_ops span"]
 ```
 
 ### 检索请求
 
-```text
-query → Embedding → Chroma 向量过召回(top_k*5) → [Rerank 精排] → top_k
-      → trace 记录召回/耗时/命中 → 注入提示词
+```mermaid
+flowchart LR
+    A["query"] --> B["Embedding"] --> C["Chroma 过召回<br/>top_k × 5"]
+    C --> D["Rerank 精排"] --> E["top_k"]
+    E --> F["trace 记录<br/>召回/耗时/命中"]
+    F --> G["注入提示词"]
 ```
 
 ### 评测请求
 
-```text
-评测集 → 逐条运行(检索 off/on) → 生成回答 → LLM 裁判 → 指标聚合 → Bad Case 复核
+```mermaid
+flowchart LR
+    A["评测集"] --> B["逐条运行<br/>检索 off / on"]
+    B --> C["生成回答"] --> D["LLM 裁判"] --> E["指标聚合"] --> F["Bad Case 复核<br/>人工校准"]
 ```
 
 ## 关键设计
