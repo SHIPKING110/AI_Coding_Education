@@ -111,6 +111,19 @@ Child_Code/
 
 ## 请求链路
 
+```mermaid
+flowchart TD
+    A([浏览器 / H5]) -->|HTTPS · SSE · JSON| B[Nginx web<br/>静态资源 + /api 反代]
+    B --> C[FastAPI api<br/>JWT 校验 → 角色/权限键]
+    C --> D{请求类型}
+    D -->|业务 CRUD| E[业务服务层<br/>schemas → crud]
+    E --> H[(PostgreSQL)]
+    D -->|AI 对话 / 检索| F[AI 能力层<br/>意图路由 → RAG → 规划器/工具]
+    F --> G[LangChain ChatOpenAI<br/>SSE 流式输出]
+    F --> I[(ChromaDB<br/>向量集合)]
+    C --> J[usage_meter 异步记账<br/>agent_ops 记录 span]
+```
+
 ### 普通业务请求
 
 ```text

@@ -75,17 +75,22 @@ def set_parent_visible(db: Session, doc: KnowledgeDocument, visible: bool) -> Kn
     return doc
 
 
-def usable_doc_ids(db: Session, *, doc_ids: list[str]) -> set[str]:
-    """候选 doc_id 中可参与检索的：存在 + 已就绪 + 开关打开。"""
+def usable_doc_ids(db: Session, *, doc_ids: list[str], parent_visible: bool = False) -> set[str]:
+    """候选 doc_id 中可参与检索的：存在 + 已就绪 + 开关打开。
+
+    parent_visible=True 时（家长域检索）还必须家长可见——父集合里可能残留
+    文档改为不可见前的旧分片，不能只靠同步清理兜底（ADR-0027）。
+    """
     uniq = {str(d) for d in doc_ids if d}
     if not uniq:
         return set()
-    rows = db.scalars(
-        select(KnowledgeDocument.id).where(
-            KnowledgeDocument.status == "ready",
-            KnowledgeDocument.enabled.is_(True),
-        )
-    ).all()
+    stmt = select(KnowledgeDocument.id).where(
+        KnowledgeDocument.status == "ready",
+        KnowledgeDocument.enabled.is_(True),
+    )
+    if parent_visible:
+        stmt = stmt.where(KnowledgeDocument.visible_to_parents.is_(True))
+    rows = db.scalars(stmt).all()
     ready = {str(r) for r in rows}
     return uniq & ready
 

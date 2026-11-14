@@ -57,7 +57,7 @@ export function renderMarkdown(input: string): string {
         : /stateDiagram/.test(code) ? '状态机图' : /mindmap/.test(code) ? '思维导图'
         : /graph|flowchart/.test(code) ? '流程图' : /pie/.test(code) ? '饼图' : '关系图'
       const id = uid()
-      return `<div class="md-mermaid" data-kind="${kind}"><div class="md-mermaid-head">◈ ${kind} ${copyBtn(id)}</div><pre class="mermaid-src" id="${id}">${esc}</pre><div class="mermaid-render" data-src="${id}">${esc}</div></div>`
+      return `<div class="md-mermaid" data-kind="${kind}"><div class="md-mermaid-head">◈ ${kind} ${copyBtn(id)}</div><pre class="mermaid-src" id="${id}">${esc}</pre><div class="mermaid-render"></div></div>`
     }
     if (l === 'chart') {
       try {

@@ -460,6 +460,9 @@ def _run_pass(
             "split": split, "retrieval_mode": retrieval_mode,
             "vector": bool(diag.get("vector")), "keyword": bool(diag.get("keyword")),
             "rerank": bool(diag.get("rerank")),
+            # 检索观测（ADR-0027）：关键词腿在最终 top-k 中的贡献数与低置信标记
+            "keyword_leg_hits": int((diag or {}).get("keyword_leg_hits") or 0),
+            "low_confidence": bool((diag or {}).get("low_confidence")),
         }
         if exec_error:
             row_metrics["error"] = exec_error
@@ -477,6 +480,10 @@ def _run_pass(
                 {
                     "doc_id": h.get("doc_id"), "title": h.get("title"),
                     "similarity": h.get("similarity"), "rerank_score": h.get("rerank_score"),
+                    # 每条命中来自哪条召回腿（ADR-0027 观测）：vector / keyword / 双命中
+                    "legs": h.get("legs") or (["vector"] if h.get("similarity") is not None else None),
+                    "vector_rank": h.get("vector_rank"),
+                    "keyword_rank": h.get("keyword_rank"),
                     "preview": (h.get("text") or "")[:300],
                 }
                 for h in hits
@@ -506,16 +513,66 @@ def _run_pass(
     return evaluate_retrieval(eval_cases, k_values=(1, 3, 5)), rows, eval_cases
 
 
+_CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cnum_to_arabic(s: str) -> str:
+    """常见中文数字转阿拉伯数字（0-99）：七级→7级、十二周岁→12周岁、二十→20。
+
+    关键词与回答两侧都做同一转换，避免「七级80分」与「7级80分」这类写法差异被误判为漏命中。
+    """
+    def repl_xy(m: re.Match) -> str:
+        tens = _CN_DIGITS.get(m.group(1), 1)
+        ones = _CN_DIGITS.get(m.group(2), 0) if m.group(2) else 0
+        return str(tens * 10 + ones)
+
+    s = re.sub(r"([一二两三四五六七八九])十([一二三四五六七八九])?", repl_xy, s)
+    s = re.sub(r"十([一二三四五六七八九])", lambda m: str(10 + _CN_DIGITS[m.group(1)]), s)
+    return "".join(str(_CN_DIGITS[c]) if c in _CN_DIGITS else c for c in s)
+
+
 def _normalize_match(text: str) -> str:
-    """关键词匹配前归一化：全半角、大小写、空白与常见标点差异不应算漏命中。"""
+    """关键词匹配前归一化：全半角、大小写、中文数字、比较符号与标点差异不应算漏命中。"""
     s = unicodedata.normalize("NFKC", text or "").lower()
+    s = _cnum_to_arabic(s)
     s = re.sub(r"\s+", "", s)
-    return re.sub(r"[，。！？、；：,.!?;:\"'“”‘’（）()【】\[\]《》<>—–\-_/]", "", s)
+    return re.sub(r"[，。！？、；：,.!?;:\"'“”‘’（）()【】\[\]《》<>—–\-_/≥≤≈~±+=|·…]", "", s)
 
 
+def _keyword_appears(answer_norm: str, keyword: str) -> bool:
+    """关键词命中判定。
+
+    1) 归一化后连续包含 → 命中；
+    2) 否则按子序列匹配，仅允许关键词字符之间插入 ASCII 字母/数字片段
+       （覆盖「回答写免CSP-J第一轮、标注写免第一轮」这类编号插入写法）；
+       间隔中出现中文则视为不同表述，不算命中，避免跨句拼接造成虚高。
+    """
+    key = _normalize_match(keyword)
+    if not key:
+        return True
+    if key in answer_norm:
+        return True
+    i = 0
+    prev_end: int | None = None
+    for ch in key:
+        j = answer_norm.find(ch, i)
+        if j < 0:
+            return False
+        if prev_end is not None and j > prev_end:
+            if not re.fullmatch(r"[a-z0-9]*", answer_norm[prev_end:j]):
+                return False
+        prev_end = j + 1
+        i = j + 1
+    return True
+
+
+# 拒答判定只看回答开头：长答案中顺带说“片段未提及某细节”不代表整体拒答
+# （曾导致三条可答用例被误计弃答，abstention_rate 虚高）。
 _ABSTAIN_RE = re.compile(
-    r"文档未提供|未提供|不知道|无法回答|无法确定|未提及|没有(?:相关|明确|具体)?(?:信息|内容|答案|数据)"
+    r"文档未提供|未提供|不知道|无法回答|无法确定|无法确认|未提及|并未提及|未说明|没有明确说明"
+    r"|没有(?:相关|明确|具体)?(?:信息|内容|答案|数据)"
 )
+_ABSTAIN_HEAD_CHARS = 24
 
 # 引用标记：兼容 [1]、[1,2]、[1][2]、^1,2^、【1】 等常见写法
 _CITE_BRACKET_RE = re.compile(r"[\[【]\s*(\d+(?:\s*[,，、]\s*\d+)*)\s*[\]】]")
@@ -553,9 +610,9 @@ def _answer_case(
         answer = _generate_answer(case.query, contexts)
     keywords = [str(k).strip() for k in (case.gt_keywords or []) if str(k).strip()]
     answer_norm = _normalize_match(answer)
-    missing = [k for k in keywords if _normalize_match(k) not in answer_norm]
+    missing = [k for k in keywords if not _keyword_appears(answer_norm, k)]
     keyword_hit = round((len(keywords) - len(missing)) / len(keywords), 4) if keywords else None
-    abstained = bool(_ABSTAIN_RE.search(answer or ""))
+    abstained = bool(_ABSTAIN_RE.search((answer or "")[:_ABSTAIN_HEAD_CHARS]))
     citation = _parse_citations(answer, len(contexts))
     with llm_context.use_llm(judge_resolved):
         judge = _judge_quality(
@@ -583,15 +640,16 @@ def _generate_answer(query: str, contexts: list[str]) -> str:
         from app.services import llm
 
         system = (
-            "你是知识库问答助手。必须严格只依据提供的片段回答，不得使用片段外的常识、记忆或猜测。"
-            "如果片段中没有直接、明确的依据，必须只输出：文档未提供。"
+            "你是知识库问答助手。只能依据提供的片段回答，不得使用片段外的常识、记忆或猜测。"
+            "请先通读全部片段并逐条提取相关信息；如果片段中列出了多项内容（课程、条件、数值、时间、流程），"
+            "必须完整列出，不要遗漏。只有在全部片段都与问题无关、确实没有任何可用信息时，才输出：文档未提供。"
             "回答时在引用的句子后标注来源编号，如 [1]、[1][2]，编号对应片段序号。"
-            "不要根据相似问题推断答案，也不要补充解释。"
+            "不要根据相似问题推断答案。"
         )
         prompt = (
             f"问题：{query}\n\n片段：\n"
             + ("\n---\n".join(f"[{i+1}] {c[:800]}" for i, c in enumerate(contexts)) or "（无检索片段）")
-            + "\n\n请先判断片段是否足以回答。足以回答时给出简洁答案；不足时只输出：文档未提供。"
+            + "\n\n请先完整阅读全部片段，判断是否有足以回答的信息；有则给出完整答案（含关键数值、条件与条目），确实没有才输出：文档未提供。"
         )
         return "".join(llm.stream_text(system, prompt)).strip()
     except Exception:
@@ -649,10 +707,20 @@ def _agg_answer_subset(answers: list[dict]) -> dict:
     if not answers:
         return {"cases": 0}
     scored = [a for a in answers if isinstance(a.get("keyword_hit"), (int, float))]
+    scored_non_abs = [
+        a for a in answers
+        if not a.get("abstained") and isinstance(a.get("keyword_hit"), (int, float))
+    ]
     judged = [a["judge"] for a in answers if isinstance(a.get("judge"), dict)]
     out = {
         "cases": len(answers),
         "keyword_hit": round(sum(a["keyword_hit"] for a in scored) / len(scored), 4) if scored else None,
+        # 剔除拒答（abstained）后的命中率：拒答场景由「不可答拒答率」单独衡量，
+        # 混入平均会把真实覆盖短板与拒答行为搅在一起。
+        "keyword_hit_non_abstained": (
+            round(sum(a["keyword_hit"] for a in scored_non_abs) / len(scored_non_abs), 4)
+            if scored_non_abs else None
+        ),
         "abstention_rate": round(
             sum(1 for a in answers if a.get("abstained")) / len(answers), 4
         ) if answers else None,
@@ -677,8 +745,29 @@ GATE_FROZEN_HIT3_MAX_DROP = 0.02      # 冻结集 hit@3 下降容忍 2 个百分
 GATE_CRITICAL_HIT3_MAX_DROP = 0.02    # 关键用例 hit@3 下降容忍 2 个百分点
 GATE_UNSUPPORTED_MAX = 0.05           # 无依据回答率上限 5%
 GATE_ERROR_RATE_MAX = 0.001           # 检索异常率必须接近 0
-GATE_KAPPA_MIN = 0.6                  # 裁判-人工一致性门槛（substantial agreement）
-GATE_KAPPA_MIN_PAIRS = 10             # 少于该样本对数不做 Kappa 判断
+GATE_KAPPA_MIN = 0.6                  # （观察指标：ADR-0027 起不再作为闸门依据）
+GATE_KAPPA_MIN_PAIRS = 10             # 少于该样本对数不做校准判定
+
+
+def _evaluate_calibration(report: dict | None) -> list[str]:
+    """按四指标 SLA 判定人工校准（ADR-0027）；返回不达标原因列表。
+
+    兼容旧数据：若无 exact/within1/severe 字段（旧版 calibration），仅提示
+    需重算，不直接判 fail——避免历史运行被新口径误杀。
+    """
+    from evals.metrics import CALIB_MIN_PAIRS, calibration_sla
+
+    if not isinstance(report, dict):
+        return []
+    pairs = int(report.get("pairs") or 0)
+    if pairs < CALIB_MIN_PAIRS:
+        return []
+    if not all(k in report for k in ("exact_rate", "within1_rate", "severe_rate")):
+        return ["人工校准数据为旧口径，重评任意一条即可按四指标 SLA 重算"]
+    sla = report.get("sla") if isinstance(report.get("sla"), dict) else calibration_sla(report)
+    if sla.get("passed") is False:
+        return [f"人工校准未达 SLA：{r}" for r in (sla.get("reasons") or [])] or ["人工校准未达 SLA"]
+    return []
 
 
 def _slice_val(metrics: dict, *path: str):
@@ -696,9 +785,9 @@ def evaluate_run_gate(current: dict, previous: dict | None) -> dict:
     只对有 `frozen` / `critical` 切片的运行生效：没有冻结集时返回
     `passed=None`（提示先建冻结集），不阻断日常调参。
 
-    裁判可信度：已人工复核足够样本（≥ GATE_KAPPA_MIN_PAIRS 对）且
-    quadratic kappa < GATE_KAPPA_MIN 时，自动评测结论不可信，判 fail；
-    尚无人工样本时跳过该项（不能因“还没复核”阻断调参）。
+    裁判可信度（ADR-0027）：人工样本足够（≥10 对）时按四指标 SLA 判定——
+    严重分歧率（|Δ|≥3）≤5%、±1 内一致率 ≥85%、严格一致率 ≥60%、
+    |bias| ≤0.3；Kappa 保留为观察指标，不参与判定。尚未复核时跳过该项。
     """
     reasons: list[str] = []
     frozen_cur = _slice_val(current, "frozen", "hit@3")
@@ -706,16 +795,9 @@ def evaluate_run_gate(current: dict, previous: dict | None) -> dict:
     unsupported = _slice_val(current, "answer", "unsupported_answer_rate")
     error_rate = current.get("eval_error_rate") if isinstance(current, dict) else None
 
-    # 裁判可信度校验（先于切片判断：kappa 不达标时结论整体不可信）
+    # 裁判可信度校验（先于切片判断：校准不达标时结论整体不可信）
     calibration = current.get("calibration") if isinstance(current, dict) else None
-    kappa = calibration.get("kappa") if isinstance(calibration, dict) else None
-    pairs = calibration.get("pairs") if isinstance(calibration, dict) else 0
-    if isinstance(pairs, int) and pairs >= GATE_KAPPA_MIN_PAIRS and isinstance(kappa, (int, float)):
-        if kappa < GATE_KAPPA_MIN:
-            reasons.append(
-                f"裁判与人工一致性 kappa={kappa} 低于门槛 {GATE_KAPPA_MIN}"
-                f"（{pairs} 对样本），自动评测结论不可信"
-            )
+    reasons.extend(_evaluate_calibration(calibration))
 
     if frozen_cur is None and critical_cur is None:
         if reasons:
@@ -763,12 +845,16 @@ def recompute_run_calibration(db: Session, run_id) -> dict:
             "human_score": r.human_score,
         })
     calibration = calibration_from_pairs(pairs, dimension="correctness")
-    run.metrics["calibration"] = calibration
+    # metrics 是普通 JSON 列：对已加载对象的原地修改不会被 SQLAlchemy 变更追踪捕获
+    # （commit 相当于空写）。必须整体重新赋值，否则人工复核后的 Kappa/闸门重算永不落库。
+    metrics = dict(run.metrics)
+    metrics["calibration"] = calibration
     try:
         prev = crud.previous_done_run(db, run.set_id, run.id)
-        run.metrics["gate"] = evaluate_run_gate(run.metrics, prev.metrics if prev else None)
+        metrics["gate"] = evaluate_run_gate(metrics, prev.metrics if prev else None)
     except Exception:  # noqa: BLE001
         logger.exception("重算闸门失败")
+    run.metrics = metrics
     db.commit()
     return calibration
 

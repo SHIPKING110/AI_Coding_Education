@@ -36,6 +36,9 @@ COLLECTION_BASE = "knowledge"
 PARENT_COLLECTION_BASE = "parent_knowledge"
 # 未配置 embedding（回退本地 Qwen）时的默认集合名，保持与历史数据兼容
 DEFAULT_COLLECTION = COLLECTION_BASE
+# 家长索引内容版本：切块/入库策略变更（ADR-0027 标题前缀、FAQ 合并）时递增，
+# 与 doc.extra.parent_index_version 不一致即触发重建（不影响集合名/指纹）。
+PARENT_INDEX_VERSION = 2
 
 # rerank 熔断：连续失败达到阈值后临时短路，直接用向量序（避免每次查询都等超时）
 _RERANK_FAIL_STREAK = 0
@@ -119,6 +122,43 @@ def _split_blocks(text: str) -> list[str]:
     return blocks
 
 
+def _with_title_prefix(title: str, chunk: str) -> str:
+    """入库前给分片补文档标题前缀（ADR-0027）。
+
+    标题参与向量化与关键词检索后，「考级政策」这类问题能借标题语境命中正文块。
+    """
+    t = (title or "").strip()
+    body = chunk or ""
+    if not t or t in body[: len(t) + 8]:
+        return body
+    return f"《{t}》\n{body}"
+
+
+_QA_ANSWER_PREFIX = ("答：", "答:", "A：", "A:", "答案：", "答案:")
+
+
+def _pair_qa_blocks(blocks: list[str]) -> list[str]:
+    """FAQ 问句与紧随其后的答案并成一块（ADR-0027）。
+
+    问句单独成块会把问答语义拆散：向量只嵌入半截问题、关键词只命中问句，
+    导致「问得出来但答不出来」。仅在“短问句 + 下一块是答”时合并，避免误伤正文。
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(blocks):
+        cur = blocks[i]
+        nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+        is_q = cur.strip().endswith(("？", "?")) and len(cur) <= 200
+        is_a = bool(nxt) and nxt.lstrip().startswith(_QA_ANSWER_PREFIX)
+        if is_q and is_a and len(cur) + len(nxt) <= 1600:
+            out.append(f"{cur}\n{nxt}")
+            i += 2
+        else:
+            out.append(cur)
+            i += 1
+    return out
+
+
 def chunk_semantic(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
     """语义切片：Markdown 标题为硬边界，章节正文按窗口聚合，超长块定长开窗 + 重叠。
 
@@ -126,7 +166,7 @@ def chunk_semantic(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK
     - 章节内按段落聚合、不超窗口 → 不切断语义；
     - 超大单块退化为带重叠的定长窗口，避免超长 embedding。
     """
-    blocks = _split_blocks(text)
+    blocks = _pair_qa_blocks(_split_blocks(text))
     if not blocks:
         return _char_windows(text, chunk_size, overlap)
     win = max(200, int(chunk_size * 1.75))
@@ -991,16 +1031,19 @@ def index_document(
     except Exception:
         chunk_size, overlap, parent_size = CHUNK_SIZE, CHUNK_OVERLAP, 0
     chunks = chunk_semantic(text, chunk_size, overlap)
+    chunks = [_with_title_prefix(title, ch) for ch in chunks]
     if on_progress is not None:
         on_progress("chunk", 40, f"切块完成，共 {len(chunks)} 块")
     if not chunks:
         return 0
     parent_texts = _build_parent_texts(chunks, parent_size)
     col = get_collection(parent=True) if parent else get_collection()
-    delete_document_vectors(doc_id, parent=parent)
     if on_progress is not None:
         on_progress("embed", 65, "向量化中…")
+    # 先嵌入、后删除旧向量：embedding 失败时绝不清空已可用索引，
+    # 否则一次上游故障就能把整个集合删空（ADR-0027 事故复盘）。
     embs = embed_texts(chunks, parent=True) if parent else embed_texts(chunks)
+    delete_document_vectors(doc_id, parent=parent)
     ids = [f"{doc_id}:{i}" for i in range(len(chunks))]
     metas = []
     for i in range(len(chunks)):
@@ -1276,19 +1319,42 @@ def _rewrite_query(query: str, cfg: dict) -> tuple[str, bool]:
     return f"{q} {' '.join(dict.fromkeys(extras))}", True
 
 
-def _rrf_merge(vector_cands: list[dict], keyword_cands: list[dict], *, k: int = 60) -> list[dict]:
-    """RRF 融合向量与关键词候选：只看排名，不比较量纲。"""
+# 关键词腿 RRF 权重（ADR-0027）：双字滑窗/分词命中的弱相关命中不应与向量腿同权，
+# 默认降到 0.5；可在 rag 配置里用 rrf_keyword_weight 调整并做 A/B。
+_RRF_KEYWORD_WEIGHT = 0.5
+# 低置信阈值（ADR-0027）：重排后 top1 低于该分时不再硬塞片段，交给生成侧拒答/引导。
+_LOW_CONFIDENCE_RERANK_MIN = 0.45
+
+
+def _rrf_merge(
+    vector_cands: list[dict], keyword_cands: list[dict], *,
+    k: int = 60, vector_weight: float = 1.0, keyword_weight: float = _RRF_KEYWORD_WEIGHT,
+) -> list[dict]:
+    """RRF 融合向量与关键词候选：只看排名，不比较量纲。
+
+    同时记录每条命中的来源腿（vector/keyword/双命中）与各自名次，
+    供评测与诊断量化「关键词腿贡献」（ADR-0027）。
+    """
     merged: dict[tuple[str, str], dict] = {}
     scores: dict[tuple[str, str], float] = {}
-    for source, items in (("v", vector_cands), ("k", keyword_cands)):
+    provenance: dict[tuple[str, str], dict] = {}
+    for source, items, weight in (
+        ("vector", vector_cands, vector_weight),
+        ("keyword", keyword_cands, keyword_weight),
+    ):
         for rank, c in enumerate(items):
             key = (str(c.get("doc_id") or ""), (c.get("text") or "")[:120])
             if key not in merged:
                 merged[key] = dict(c)
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+                provenance[key] = {"legs": [], "vector_rank": None, "keyword_rank": None}
+            if source not in provenance[key]["legs"]:
+                provenance[key]["legs"].append(source)
+            provenance[key][f"{source}_rank"] = rank + 1
+            scores[key] = scores.get(key, 0.0) + weight / (k + rank + 1)
     out = []
     for key, c in merged.items():
         c["rrf_score"] = round(scores[key], 6)
+        c.update(provenance[key])
         out.append(c)
     out.sort(key=lambda x: x.get("rrf_score", 0.0), reverse=True)
     return out
@@ -1464,6 +1530,10 @@ def _hit_preview(hit: dict, *, limit: int = 500) -> dict:
         "similarity": hit.get("similarity"),
         "rerank_score": hit.get("rerank_score"),
         "rrf_score": hit.get("rrf_score"),
+        # 召回腿来源（ADR-0027）：vector / keyword / 双命中 + 各腿名次
+        "legs": hit.get("legs"),
+        "vector_rank": hit.get("vector_rank"),
+        "keyword_rank": hit.get("keyword_rank"),
         "preview": (hit.get("text") or "")[:limit],
     }
 
@@ -1692,8 +1762,12 @@ def retrieve(
             _bump("vector_fail")
         d["stage_timings"]["vector"] = round((time.time() - t_vec) * 1000, 2)
 
-        # 文档级过滤：关闭检索 / 未就绪 / 已删除的文档，其分片一律不要
-        usable = _kb.usable_doc_ids(db, doc_ids=[c["doc_id"] for c in cands]) if cands else set()
+        # 文档级过滤：关闭检索 / 未就绪 / 已删除的文档，其分片一律不要；
+        # 家长域还要求家长可见（父集合可能残留改可见性前的旧分片）
+        usable = (
+            _kb.usable_doc_ids(db, doc_ids=[c["doc_id"] for c in cands], parent_visible=parent_mode)
+            if cands else set()
+        )
         cands = [c for c in cands if c["doc_id"] in usable]
 
         # 正式 Hybrid：无论向量是否有结果，都执行关键词召回，再用 RRF 融合。
@@ -1708,7 +1782,10 @@ def retrieve(
             )
             keyword_candidates = len(kw)
             if kw:
-                cands = _rrf_merge(cands, kw)
+                cands = _rrf_merge(
+                    cands, kw,
+                    keyword_weight=float(cfg.get("rrf_keyword_weight", _RRF_KEYWORD_WEIGHT)),
+                )
                 d["hybrid"] = True
             d["stage_timings"]["keyword"] = round((time.time() - t_kw) * 1000, 2)
 
@@ -1782,6 +1859,26 @@ def retrieve(
         _sort_by_score(out)
         out = _demote_faq_on_tie(out, faq_tie_margin)
         out = _maybe_auto_multi(out)
+
+        # —— 观测（ADR-0027）：关键词腿在最终 top-k 中的贡献数 ——
+        d["keyword_leg_hits"] = sum(1 for h in out if "keyword" in (h.get("legs") or []))
+
+        # —— 低置信（ADR-0027）：重排后 top1 仍低于阈值、且上下文完全靠关键词腿
+        #    硬撑（向量腿缺席/零命中）时，不再提供片段，交由生成侧拒答/引导。
+        #    向量腿在场时低重排分更可能是量纲差异（如多意图合并），不整单丢弃。——
+        low_conf_min = float(cfg.get("low_confidence_rerank_min", _LOW_CONFIDENCE_RERANK_MIN) or 0.0)
+        if low_conf_min > 0 and out and d.get("rerank"):
+            top = out[0]
+            top_score = top.get("rerank_score")
+            legs = top.get("legs")
+            vector_present = (
+                legs is None or "vector" in legs or int(d.get("vector_in") or 0) > 0
+            )
+            if (isinstance(top_score, (int, float)) and float(top_score) < low_conf_min
+                    and not vector_present):
+                d["low_confidence"] = round(float(top_score), 4)
+                out = []
+
         d["final"] = len(out)
         _record_query(out, t0)
         _emit(out)
@@ -1818,7 +1915,9 @@ def retrieval_summary(diag: dict) -> str:
         if diag.get("gated_out"):
             stages.append(f"门控过滤 {diag.get('gated_out')} 条（相似度<{diag.get('gate')}）")
     if diag.get("hybrid"):
-        stages.append("混合检索 RRF")
+        contrib = diag.get("keyword_leg_hits")
+        suffix = f"（关键词腿贡献 {contrib} 条）" if isinstance(contrib, int) and contrib > 0 else ""
+        stages.append(f"混合检索 RRF{suffix}")
     if diag.get("rerank"):
         model = diag.get("rerank_model") or ""
         stages.append(f"重排精排（{model}）" if model else "重排精排")
@@ -1826,6 +1925,8 @@ def retrieval_summary(diag: dict) -> str:
         stages.append("未重排")
     if diag.get("keyword"):
         stages.append("关键词兜底")
+    if diag.get("low_confidence"):
+        stages.append(f"低置信（top1 重排 {diag.get('low_confidence')} 低于阈值），不提供片段")
     summary = " → ".join(stages) if stages else "未检索"
     mode = diag.get("retrieval_mode")
     return f"[{mode}] {summary}" if mode else summary
@@ -1843,8 +1944,33 @@ def _record_query(out: list[dict], t0: float) -> None:
 
 _STOP_CHARS = set("的了和是我你他她它们在有就不都与及或对为以于被把将从到")
 
+# 家长口语 → 术语别名（ADR-0027）：只用于关键词腿的查询扩展，
+# 让「退钱/包过/多少钱」这类口语命中制度文档。可持续补充。
+_QUERY_ALIASES: dict[str, tuple[str, ...]] = {
+    "退钱": ("退费",),
+    "包过": ("保过班", "不可信"),
+    "多少钱": ("费用", "收费", "价格"),
+    "几岁": ("年龄", "年级"),
+    "学历": ("教师资质", "招聘"),
+    "换老师": ("调换教师",),
+    "请假": ("缺课", "补课"),
+}
+
+
+def _jieba_cut(text: str) -> list[str]:
+    """中文分词（jieba 可用时）；未安装/异常时返回空列表，由双字滑窗兜底。"""
+    try:
+        import jieba
+    except Exception:
+        return []
+    try:
+        return [w for w in jieba.cut(text) if w and w.strip()]
+    except Exception:
+        return []
+
+
 def _query_terms(query: str) -> list[str]:
-    """查询词元：中文取双字滑窗（无分词依赖）+ 英文/数字整词。"""
+    """查询词元：中文分词（jieba）+ 双字滑窗兜底 + 英文/数字整词 + 口语别名扩展。"""
     q = _norm_text(query).lower()
     terms = set(re.findall(r"[a-z0-9_]+", q))
     cjk = re.sub(r"[^\u4e00-\u9fff]+", "", q)
@@ -1852,6 +1978,15 @@ def _query_terms(query: str) -> list[str]:
         bg = cjk[i : i + 2]
         if not (set(bg) & _STOP_CHARS):
             terms.add(bg)
+    for w in _jieba_cut(cjk):
+        if len(w) >= 2 and not (set(w) & _STOP_CHARS):
+            terms.add(w)
+    for key, targets in _QUERY_ALIASES.items():
+        if key in q:
+            for t in targets:
+                terms.add(t)
+                for i in range(len(t) - 1):
+                    terms.add(t[i : i + 2])
     return [t for t in terms if len(t) >= 2]
 
 
@@ -1922,24 +2057,50 @@ def _keyword_search(
         return []
     from app.crud import knowledge as _kb
 
-    usable = _kb.usable_doc_ids(db, doc_ids=[(m or {}).get("doc_id", "") for m in metas])
+    usable = _kb.usable_doc_ids(
+        db, doc_ids=[(m or {}).get("doc_id", "") for m in metas], parent_visible=parent,
+    )
+    corpus = [
+        (doc, meta or {}) for doc, meta in zip(docs, metas)
+        if (meta or {}).get("doc_id", "") in usable
+    ]
+    if not corpus:
+        return []
+    # BM25-lite（ADR-0027）：文档频率越低（越有区分度）的词元权重越高；
+    # 标题命中额外加权。相比纯命中计数，弱查询词（“怎么/可以”）不再制造噪声。
+    import math
+
+    n_docs = len(corpus)
+    df = {t: sum(1 for doc, _ in corpus if t in (doc or "").lower()) for t in terms}
+    idf = {t: math.log((n_docs + 1) / (df[t] + 1)) + 1.0 for t in terms}
     scored: list[dict] = []
-    for doc, meta in zip(docs, metas):
-        meta = meta or {}
-        doc_id = meta.get("doc_id", "")
-        if doc_id not in usable:
-            continue
+    max_score = 0.0
+    for doc, meta in corpus:
         low = (doc or "").lower()
-        hits = sum(low.count(t) for t in terms)
-        if hits <= 0:
+        title_low = str(meta.get("title") or "").lower()
+        score = 0.0
+        title_hit = False
+        for t in terms:
+            cnt = low.count(t)
+            if cnt <= 0:
+                continue
+            score += idf[t] * min(cnt, 3)
+            if t in title_low:
+                title_hit = True
+        if score <= 0:
             continue
+        if title_hit:
+            score *= 1.3  # 高价值字段（标题）命中加权
+        max_score = max(max_score, score)
         scored.append({
-            "text": doc, "title": meta.get("title", ""), "doc_id": doc_id,
-            "similarity": round(min(1.0, hits / max(len(terms), 1) / 3), 4),
-            "parent_text": meta.get("parent_text"),
+            "text": doc, "title": meta.get("title", ""),
+            "doc_id": meta.get("doc_id", ""), "title_hit": title_hit,
+            "parent_text": meta.get("parent_text"), "_score": score,
         })
     if not scored:
         return []
+    for c in scored:
+        c["similarity"] = round(c.pop("_score") / max_score, 4)
     scored.sort(key=lambda x: x["similarity"], reverse=True)
     per_doc: dict[str, int] = {}
     out: list[dict] = []
@@ -2074,7 +2235,7 @@ def sync_parent_index(limit: int = 200) -> dict:
         if _parent_sync_state.get("running"):
             return {"dedicated": True, "running": True, "documents": 0, "indexed": 0, "skipped": 0, "failed": 0}
         _parent_sync_state["running"] = True
-    stats = {"dedicated": True, "documents": 0, "indexed": 0, "skipped": 0, "failed": 0}
+    stats = {"dedicated": True, "documents": 0, "indexed": 0, "skipped": 0, "failed": 0, "purged": 0}
     db = _session_factory()()
     try:
         try:
@@ -2083,10 +2244,29 @@ def sync_parent_index(limit: int = 200) -> dict:
             stats["error"] = f"读取家长可见文档失败：{exc}"
             return stats
         stats["documents"] = len(docs)
+        visible_ids = {str(d.id) for d in docs}
+        # 清理不再家长可见/已删除文档的残留分片：切可见性开关不会自动删向量，
+        # 留着会被家长域检索命中（ADR-0027 工资结算泄露事故的直接原因）。
+        try:
+            col = get_collection(parent=True)
+            metas = (col.get(include=["metadatas"]) or {}).get("metadatas") or []
+            stale = {
+                str((m or {}).get("doc_id") or "") for m in metas
+            } - visible_ids - {""}
+            for doc_id in stale:
+                try:
+                    delete_document_vectors(uuid.UUID(doc_id), parent=True)
+                    stats["purged"] += 1
+                except Exception:  # noqa: BLE001 —— 单篇清理失败不阻断同步
+                    continue
+        except Exception:  # noqa: BLE001 —— 集合不可读时跳过清理
+            pass
         for doc in docs:
             extra = dict(doc.extra or {})
             fh = _file_hash(doc.file_path)
-            if extra.get("parent_index_fingerprint") == fp and extra.get("parent_indexed_hash") == fh:
+            if (extra.get("parent_index_fingerprint") == fp
+                    and extra.get("parent_indexed_hash") == fh
+                    and extra.get("parent_index_version") == PARENT_INDEX_VERSION):
                 stats["skipped"] += 1
                 continue
             try:
@@ -2099,6 +2279,7 @@ def sync_parent_index(limit: int = 200) -> dict:
                 )
                 extra["parent_index_fingerprint"] = fp
                 extra["parent_indexed_hash"] = fh
+                extra["parent_index_version"] = PARENT_INDEX_VERSION
                 extra.pop("parent_index_error", None)
                 doc.extra = extra
                 db.commit()

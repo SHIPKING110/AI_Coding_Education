@@ -75,10 +75,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { renderMarkdown } from '@/utils/markdown'
+import { observeMermaid, renderMermaidNodes } from '@/utils/mermaid'
 
 interface DocMeta {
   slug: string
@@ -197,6 +198,16 @@ function toTop() {
 watch(slug, () => {
   nextTick(toTop)
 })
+
+// 文档中的 mermaid 流程图：MutationObserver 自动渲染（本地打包懒加载，失败保留源码+重试）
+function renderDocMermaid() {
+  void nextTick().then(() => {
+    observeMermaid(articleRef.value)
+    void renderMermaidNodes(articleRef.value)
+  })
+}
+onMounted(renderDocMermaid)
+watch(() => rendered.value.html, renderDocMermaid)
 </script>
 
 <style scoped>
@@ -462,6 +473,15 @@ watch(slug, () => {
   color: inherit;
   font-size: inherit;
 }
+.docs-article :deep(.md-mermaid) { margin: 14px 0; }
+.docs-article :deep(.md-mermaid-head) { font-size: 12px; font-weight: 700; color: var(--brand-strong); margin-bottom: 5px; display: flex; align-items: center; gap: 8px; }
+.docs-article :deep(.mermaid-render:empty) { display: none; }
+.docs-article :deep(.mermaid-render) { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 14px; overflow-x: auto; }
+.docs-article :deep(.mermaid-render svg) { max-width: 100%; height: auto; }
+.docs-article :deep(.md-mermaid.rendered pre.mermaid-src) { display: none; }
+.docs-article :deep(.md-mermaid pre.mermaid-src) { border: 1px dashed var(--brand); background: #f8fafc; color: var(--ink-2); }
+.docs-article :deep(.md-mermaid-error) { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: #a03028; }
+.docs-article :deep(.md-mermaid-retry) { padding: 3px 10px; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; font-size: 11.5px; cursor: pointer; }
 .docs-article :deep(.md-code-wrap) {
   margin: 14px 0;
   border-radius: 10px;

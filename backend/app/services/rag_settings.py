@@ -34,6 +34,9 @@ DEFAULTS: dict = {
     "keyword_fallback_enabled": True,
     "hybrid_enabled": False,
     "hybrid_candidates": 50,
+    # 混合检索 RRF 分腿权重与低置信门控（ADR-0027）
+    "rrf_keyword_weight": 0.5,
+    "low_confidence_rerank_min": 0.45,
     "query_rewrite_enabled": False,
   "title_match_boost": 0.12,
   "faq_tie_margin": 0.01,
@@ -83,6 +86,10 @@ def sanitize(raw: dict | None) -> dict:
     out["keyword_fallback_enabled"] = bool(src.get("keyword_fallback_enabled", True))
     out["hybrid_enabled"] = bool(src.get("hybrid_enabled", False))
     out["hybrid_candidates"] = _clamp_int(src.get("hybrid_candidates", 50), 5, 200, 50)
+    out["rrf_keyword_weight"] = _clamp_float(src.get("rrf_keyword_weight", 0.5), 0.0, 2.0, 0.5)
+    out["low_confidence_rerank_min"] = _clamp_float(
+        src.get("low_confidence_rerank_min", 0.45), 0.0, 1.0, 0.45
+    )
     out["query_rewrite_enabled"] = bool(src.get("query_rewrite_enabled", False))
     out["title_match_boost"] = _clamp_float(src.get("title_match_boost", 0.12), 0.0, 0.5, 0.12)
     out["faq_tie_margin"] = _clamp_float(src.get("faq_tie_margin", 0.01), 0.0, 0.2, 0.01)

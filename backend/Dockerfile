@@ -18,7 +18,9 @@ RUN apt-get update \
 WORKDIR /srv/app
 
 # uv 可执行文件（多阶段复制，避免残留构建工具）
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# 固定 digest：ghcr.io 在国内网络拉取易卡死；该 digest 已验证可用（动作等价于 uv:latest 的已验证版本）。
+# 升级 uv 时改这里的 digest 并跑一遍部署闸门验证。
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /usr/local/bin/uv
 
 # 依赖安装层：仅当 pyproject/uv.lock 变化时重建（uv.lock 纳入版本库保证可复现）
 # --extra ai：装 AI 运行依赖（langchain/chromadb 等走清华镜像，国内可直连）；

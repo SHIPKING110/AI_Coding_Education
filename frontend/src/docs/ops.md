@@ -25,6 +25,30 @@ docker compose logs -f api
 | `api` | FastAPI（uvicorn） |
 | `db` | PostgreSQL，数据存于命名卷 |
 
+## 发布与评测闸门
+
+发版前先通过评测闸门（判据：冻结集 / 关键用例切片无回退，无依据回答率与检索异常率未超限；开启答案评测时还要求回答、校准与基线证据齐备）：
+
+```mermaid
+flowchart TD
+    A([准备发版]) --> B[确认 alembic 迁移就绪<br/>模型字段与库结构一致]
+    B --> C[docker compose build<br/>构建 api / web 镜像]
+    C --> D[启动并执行迁移<br/>alembic upgrade head]
+    D --> E{deploy_gate<br/>读取最近一次 done 运行}
+    E -->|pass| F([make release<br/>构建 + 迁移 + 闸门 + 重启])
+    E -->|fail| G[定位失败原因]
+    G --> G1[冻结集 / 关键切片回退<br/>→ 查 Bad Case 与检索改动]
+    G --> G2[Kappa < 0.6 或证据缺失<br/>→ 补人工复核 / 重跑评测]
+    G --> G3[无依据回答率 / 异常率超限<br/>→ 回归提示词与检索参数]
+    G1 --> E
+    G2 --> E
+    G3 --> E
+```
+
+- 手动校验：`python -m scripts.deploy_gate --set-name <评测集名>`（镜像内需用 `.venv` 解释器）
+- `make release` 固定启用 `--require-answer --require-calibration --require-baseline` 证据校验，历史运行缺少对应数据时会直接拒绝发版
+
+
 > 前端产物更新后需重新构建 `web` 镜像：`docker compose up -d --build web`。
 
 ## 数据库迁移

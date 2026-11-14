@@ -517,8 +517,13 @@ def previous_done_run(db: Session, set_id, exclude_id) -> RagEvalRun | None:
 
 
 def list_eval_results(db: Session, run_id) -> list[RagEvalResult]:
+    # 同一运行的结果是批量写入，created_at 常完全相同；仅按 created_at 排序时
+    # 并列顺序由数据库物理顺序决定，人工复核更新行之后顺序会乱掉（前端逐条复核会跳条）。
+    # 追加 id 作为确定性二级排序键，保证多次拉取顺序稳定。
     return list(db.scalars(
-        select(RagEvalResult).where(RagEvalResult.run_id == run_id).order_by(RagEvalResult.created_at)
+        select(RagEvalResult)
+        .where(RagEvalResult.run_id == run_id)
+        .order_by(RagEvalResult.created_at, RagEvalResult.id)
     ).all())
 
 

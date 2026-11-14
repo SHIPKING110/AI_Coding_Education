@@ -9,14 +9,16 @@
 
 退出码（可直接用于 CI/发布脚本拦截）：
     0 = 闸门通过（或 --allow-missing 且无历史运行）
-    1 = 闸门未通过（冻结集/关键用例回退、无依据回答率或异常率超限、Kappa 不达标）
+    1 = 闸门未通过（冻结集/关键用例回退、无依据回答率或异常率超限、校准 SLA 不达标）
     2 = 找不到评测集 / 没有完成的运行（默认阻断发布）
     3 = 运行数据异常（gate 缺失且无法现场补算）
 
 闸门规则（与后台评测页一致，见 app/services/rag_evaluation.py）：
 - 冻结集 / 关键用例 hit@3 相对上一次完成运行下降 > 2pp → fail
 - 无依据回答率 > 5% → fail；检索异常率 > 0.1% → fail
-- 人工复核样本 ≥ 10 对且 quadratic kappa < 0.6 → fail（自动评测结论不可信）
+- 人工复核样本 ≥ 10 对时按四指标 SLA 判定（ADR-0027）：
+  严重分歧率（|Δ|≥3）≤5%、±1 内一致率 ≥85%、严格一致率 ≥60%、|bias| ≤0.3；
+  Kappa 仅报告不做门槛
 - 无冻结集/关键用例切片时 gate=skip，本脚本按“未配置验收”处理，默认阻断（--allow-missing 可放行）
 """
 
@@ -73,13 +75,21 @@ def check_release_evidence(
     if require_calibration:
         calib = (metrics.get("calibration") or {}) if isinstance(metrics, dict) else {}
         pairs = int(calib.get("pairs") or 0)
-        kappa = calib.get("kappa")
         if pairs < 10:
             problems.append(f"人工复核样本不足：{pairs} 对（需 ≥10 对），裁判可信度未校准")
-        elif not isinstance(kappa, (int, float)):
-            problems.append("Kappa 无定义（评分档位退化），裁判可信度不可判定")
-        elif kappa < 0.6:
-            problems.append(f"裁判与人工一致性 kappa={kappa} 低于 0.6，自动评测结论不可信")
+        else:
+            from evals.metrics import calibration_sla
+
+            sla = calib.get("sla") if isinstance(calib.get("sla"), dict) else (
+                calibration_sla(calib)
+                if all(k in calib for k in ("exact_rate", "within1_rate", "severe_rate"))
+                else None
+            )
+            if sla is None:
+                problems.append("人工校准数据为旧口径，缺少四指标（重评任意一条即可重算）")
+            elif sla.get("passed") is False:
+                for reason in sla.get("reasons") or ["人工校准未达 SLA"]:
+                    problems.append(f"人工校准未达 SLA：{reason}")
     if require_baseline and done_runs < 2:
         problems.append("同评测集没有更早的基线运行，冻结/关键回退无法对比（需先建立基线）")
     return problems
@@ -156,6 +166,9 @@ def main() -> int:
             "eval_error_rate": error_rate,
             "kappa_pairs": calib.get("pairs"),
             "kappa": calib.get("kappa"),
+            "calib_exact_rate": calib.get("exact_rate"),
+            "calib_within1_rate": calib.get("within1_rate"),
+            "calib_severe_rate": calib.get("severe_rate"),
             "done_runs": len(runs),
         }
         if args.json:
@@ -166,7 +179,9 @@ def main() -> int:
             print(
                 f"  冻结集 hit@3={_fmt(frozen)} 关键用例 hit@3={_fmt(critical)} "
                 f"无依据率={_fmt(unsupported)} 异常率={_fmt(error_rate)} "
-                f"kappa={_fmt(calib.get('kappa'))}（{calib.get('pairs') or 0} 对）"
+                f"严格一致={_fmt(calib.get('exact_rate'))} ±1={_fmt(calib.get('within1_rate'))} "
+                f"严重分歧={_fmt(calib.get('severe_rate'))} kappa={_fmt(calib.get('kappa'))}"
+                f"（{calib.get('pairs') or 0} 对）"
             )
             for reason in gate.get("reasons") or []:
                 print(f"  - {reason}")

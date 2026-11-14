@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import EvalResultReviewDialog from './EvalResultReviewDialog.vue'
 import {
   addEvalCase,
   addEvalCasesBulk,
@@ -17,7 +18,6 @@ import {
   listEvalModels,
   listEvalRuns,
   listEvalSets,
-  setEvalResultHumanScore,
   updateEvalCase,
   type RagEvalCase,
   type RagEvalModel,
@@ -36,6 +36,17 @@ const evalModels = ref<RagEvalModel[]>([])
 const runs = ref<RagEvalRun[]>([])
 const activeRun = ref<RagEvalRun | null>(null)
 const results = ref<RagEvalResult[]>([])
+// 运行记录分页：列表已整体加载，前端分页即可（不额外请求后端）
+const runPage = ref(1)
+const runPageSize = 10
+const runPageCount = computed(() => Math.max(1, Math.ceil(runs.value.length / runPageSize)))
+const pagedRuns = computed(() => {
+  const start = (runPage.value - 1) * runPageSize
+  return runs.value.slice(start, start + runPageSize)
+})
+function gotoRunPage(page: number) {
+  runPage.value = Math.min(Math.max(1, page), runPageCount.value)
+}
 const loading = ref(false)
 const error = ref('')
 const msg = ref('')
@@ -417,6 +428,8 @@ async function selectSet(s: RagEvalSet) {
   activeRun.value = null
   results.value = []
   casePage.value = 1
+  runPage.value = 1
+  resultPage.value = 1
   runForm.value.generation_config_id = ''
   runForm.value.judge_config_id = ''
   try {
@@ -579,6 +592,8 @@ async function startRun() {
     msg.value = '评测已启动，正在后台运行'
     activeRun.value = run
     results.value = []
+    resultPage.value = 1
+    runPage.value = 1
     startPoll(run.id)
     runs.value = await listEvalRuns(activeSet.value.id)
   } catch (e) {
@@ -603,17 +618,53 @@ async function generateCases() {
   }
 }
 
-// 人工复核打分（0-5）：用于与 LLM Judge 计算 Cohen's Kappa，作为裁判可信度闸门
-const editingResultId = ref<string | null>(null)
-const humanScoreForm = ref({ score: '', judge: '', reason: '' })
-// 逐条评判详情展开（裁判五维分/理由、关键词缺失、引用校验、生成回答）
-const resultDetailId = ref<string | null>(null)
+// 逐条复核弹窗：裁判五维/生成回答/检索判定 + 人工打分连评（0-5，用于与 LLM Judge 计算 Cohen's Kappa）
+const reviewOpen = ref(false)
+const reviewIndex = ref(0)
+const onlyUnreviewed = ref(false)
+const reviewList = computed(() =>
+  onlyUnreviewed.value ? results.value.filter((r) => r.human_score == null) : results.value,
+)
+// 评测结果分页（在筛选后的列表上分页；「只看未复核」切换时回落第一页）
+const resultPage = ref(1)
+const resultPageSize = 20
+const resultPageCount = computed(() => Math.max(1, Math.ceil(reviewList.value.length / resultPageSize)))
+const pagedResults = computed(() => {
+  const start = (resultPage.value - 1) * resultPageSize
+  return reviewList.value.slice(start, start + resultPageSize)
+})
+function gotoResultPage(page: number) {
+  resultPage.value = Math.min(Math.max(1, page), resultPageCount.value)
+}
+const reviewedCount = computed(() => results.value.filter((r) => r.human_score != null).length)
 const judgeKeys = ['faithfulness', 'relevance', 'completeness', 'logic', 'correctness'] as const
 const judgeShort: Record<string, string> = {
   faithfulness: '忠实', relevance: '相关', completeness: '完整', logic: '逻辑', correctness: '正确',
 }
-function toggleResultDetail(r: RagEvalResult) {
-  resultDetailId.value = resultDetailId.value === r.id ? null : r.id
+const SPLIT_LABELS: Record<string, string> = { tuning: '调优', regression: '回归', frozen: '冻结' }
+const CRIT_LABELS: Record<string, string> = { critical: '关键', important: '重要', normal: '普通' }
+const KIND_LABELS: Record<string, string> = { answerable: '可答', unanswerable: '不可答', unlabeled: '未标注' }
+function resultChips(m: any): Array<{ text: string; cls: string }> {
+  const chips: Array<{ text: string; cls: string }> = []
+  if (m?.split) chips.push({ text: SPLIT_LABELS[m.split] || m.split, cls: m.split === 'frozen' ? 'crit' : '' })
+  if (m?.business_criticality) {
+    chips.push({
+      text: CRIT_LABELS[m.business_criticality] || m.business_criticality,
+      cls: m.business_criticality === 'critical' ? 'crit' : m.business_criticality === 'important' ? 'warn' : '',
+    })
+  }
+  if (m?.case_kind) chips.push({ text: KIND_LABELS[m.case_kind] || m.case_kind, cls: m.case_kind === 'unanswerable' ? 'warn' : '' })
+  return chips
+}
+function openReview(r: RagEvalResult) {
+  const i = reviewList.value.findIndex((x) => x.id === r.id)
+  reviewIndex.value = i >= 0 ? i : 0
+  reviewOpen.value = true
+}
+async function onReviewSaved(runId: string) {
+  // 复核保存后刷新同一运行，保留当前结果页，避免回到第一页重新翻找
+  await openRun({ id: runId } as RagEvalRun, true)
+  msg.value = '人工评分已保存，裁判一致性已重算'
 }
 function judgeTagClass(v: unknown): string {
   if (typeof v !== 'number') return ''
@@ -621,45 +672,14 @@ function judgeTagClass(v: unknown): string {
   if (v >= 3) return 'pending'
   return 'bad'
 }
-function citationText(ans: any): string {
-  const c = ans?.citation
-  if (!c || !c.present) return '未引用'
-  const idx = (c.indices || []).join('、')
-  const invalid = (c.invalid || []).length
-  return invalid ? `引用[${idx}]（含${invalid}个无效编号）` : `引用[${idx}]`
-}
-function cancelHumanScore() {
-  editingResultId.value = null
-  humanScoreForm.value = { score: '', judge: '', reason: '' }
-}
-async function submitHumanScore(r: RagEvalResult) {
-  const s = Number(humanScoreForm.value.score)
-  if (!Number.isInteger(s) || s < 0 || s > 5) {
-    error.value = '请输入 0-5 的整数分'
-    return
-  }
-  try {
-    await setEvalResultHumanScore(r.id, {
-      score: s,
-      judge: humanScoreForm.value.judge || '',
-      reason: humanScoreForm.value.reason || '',
-    })
-    const runId = activeRun.value?.id || r.run_id
-    editingResultId.value = null
-    humanScoreForm.value = { score: '', judge: '', reason: '' }
-    await openRun({ id: runId } as RagEvalRun)
-    msg.value = '人工评分已保存，裁判一致性已重算'
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '评分失败'
-  }
-}
 
-async function openRun(r: RagEvalRun) {
+async function openRun(r: RagEvalRun, keepResultPage = false) {
   stopPoll()
   try {
     const data = await getEvalRun(r.id)
     activeRun.value = data.run
     results.value = data.results
+    if (!keepResultPage) resultPage.value = 1
     compareRunId.value = ''
     compareRun.value = null
     if (data.run.status === 'running' || data.run.status === 'pending') startPoll(data.run.id)
@@ -993,7 +1013,7 @@ onMounted(loadSets)
       <table class="table">
         <thead><tr><th>状态</th><th>top_k</th><th>模式 / 口径</th><th>模型（生成 / 评测）</th><th>配置版本</th><th>hit@3 off → on</th><th>MRR off → on</th><th>时间</th><th></th></tr></thead>
         <tbody>
-          <tr v-for="r in runs" :key="r.id">
+          <tr v-for="r in pagedRuns" :key="r.id">
             <td>
               <span class="tag" :class="r.status === 'done' ? 'ok' : r.status === 'failed' ? 'bad' : 'pending'">
                 {{ STAGE_LABELS[r.status] || r.status }}
@@ -1014,6 +1034,11 @@ onMounted(loadSets)
           <tr v-if="!runs.length"><td colspan="9" class="muted">暂无运行记录</td></tr>
         </tbody>
       </table>
+      <div class="pager">
+        <button class="mini" :disabled="runPage <= 1" @click="gotoRunPage(runPage - 1)">上一页</button>
+        <span class="muted">第 {{ runPage }} / {{ runPageCount }} 页 · 共 {{ runs.length }} 条</span>
+        <button class="mini" :disabled="runPage >= runPageCount" @click="gotoRunPage(runPage + 1)">下一页</button>
+      </div>
     </section>
 
     <section v-if="activeRun" class="panel">
@@ -1026,6 +1051,12 @@ onMounted(loadSets)
               {{ c.retrieval_mode || 'auto' }} · {{ c.parent_mode ? '家长索引' : '系统集合' }} · k{{ c.top_k }} · {{ c.created_at?.slice(5, 16).replace('T', ' ') }}
             </option>
           </select>
+          <template v-if="results.length">
+            <span class="tag pending">已复核 {{ reviewedCount }}/{{ results.length }}</span>
+            <label class="review-filter">
+              <input v-model="onlyUnreviewed" type="checkbox" @change="gotoResultPage(1)" /> 只看未复核
+            </label>
+          </template>
           <span class="tag" :class="activeRun.status === 'done' ? 'ok' : activeRun.status === 'failed' ? 'bad' : 'pending'">
             {{ STAGE_LABELS[activeRun.status] || activeRun.status }}
           </span>
@@ -1044,6 +1075,9 @@ onMounted(loadSets)
         验收闸门未通过：{{ (activeRun.metrics.gate.reasons || []).join('；') }}
       </div>
       <p v-else-if="activeRun.metrics?.gate?.gate === 'pass'" class="muted">验收闸门通过（冻结集/关键用例无回退，无依据回答率与异常率未超限）。</p>
+      <p v-if="activeRun.status === 'done' && !activeRun.answer_eval" class="muted">
+        本次运行未开启答案评测（纯检索 A/B）：逐条详情为检索视角；人工复核请选择开启答案评测的运行（如基线运行）。
+      </p>
       <div v-if="compareRun" class="compare-panel">
         <p class="muted">
           对比基准：{{ compareRun.retrieval_mode || 'auto' }} · k{{ compareRun.top_k }} ·
@@ -1070,6 +1104,7 @@ onMounted(loadSets)
         <div v-if="activeRun.metrics?.critical?.cases" class="metric"><span>关键用例 hit@3 (on)</span><b>{{ fixed(activeRun.metrics.critical?.['hit@3']) }}</b></div>
         <div v-if="activeRun.metrics?.frozen?.cases" class="metric"><span>冻结集 hit@3 (on)</span><b>{{ fixed(activeRun.metrics.frozen?.['hit@3']) }}</b></div>
         <div class="metric"><span>答案关键词命中（可答）</span><b>{{ pct(activeRun.metrics?.answer?.answerable?.keyword_hit ?? activeRun.metrics?.answer?.keyword_hit) }}</b></div>
+        <div v-if="(activeRun.metrics?.answer?.answerable?.keyword_hit_non_abstained ?? activeRun.metrics?.answer?.keyword_hit_non_abstained) != null" class="metric"><span>关键词命中（可答·剔除拒答）</span><b>{{ pct(activeRun.metrics?.answer?.answerable?.keyword_hit_non_abstained ?? activeRun.metrics?.answer?.keyword_hit_non_abstained) }}</b></div>
         <div v-if="activeRun.metrics?.answer?.unanswerable?.abstention_rate != null || activeRun.metrics?.answer?.unanswerable?.keyword_hit != null" class="metric"><span>不可答拒答率</span><b>{{ pct(activeRun.metrics.answer.unanswerable.abstention_rate ?? activeRun.metrics.answer.unanswerable.keyword_hit) }}</b></div>
         <div v-if="activeRun.metrics?.answer?.answerable?.citation_coverage != null" class="metric"><span>引用覆盖率（可答）</span><b>{{ pct(activeRun.metrics.answer.answerable.citation_coverage) }}</b></div>
         <div v-if="activeRun.metrics?.answer?.answerable?.invalid_citation_rate != null" class="metric"><span>无效引用率（可答）</span><b>{{ pct(activeRun.metrics.answer.answerable.invalid_citation_rate) }}</b></div>
@@ -1078,7 +1113,10 @@ onMounted(loadSets)
         <div class="metric"><span>忠实度</span><b>{{ fixed(activeRun.metrics?.answer?.faithfulness) }}</b></div>
         <div class="metric"><span>完整性</span><b>{{ fixed(activeRun.metrics?.answer?.completeness) }}</b></div>
         <div class="metric"><span>逻辑性</span><b>{{ fixed(activeRun.metrics?.answer?.logic) }}</b></div>
-        <div v-if="activeRun.metrics?.calibration?.pairs" class="metric"><span>裁判-人工 Kappa（{{ activeRun.metrics.calibration.pairs }} 对）</span><b :class="{ error: activeRun.metrics.calibration.kappa != null && activeRun.metrics.calibration.kappa < 0.6 }">{{ activeRun.metrics.calibration.kappa ?? '样本不足' }}</b></div>
+        <div v-if="activeRun.metrics?.calibration?.pairs" class="metric"><span>裁判-人工 Kappa（{{ activeRun.metrics.calibration.pairs }} 对，观察指标）</span><b>{{ activeRun.metrics.calibration.kappa ?? '样本不足' }}</b></div>
+        <div v-if="activeRun.metrics?.calibration?.within1_rate != null" class="metric"><span>±1 内一致率（SLA ≥85%）</span><b :class="{ error: activeRun.metrics.calibration.within1_rate < 0.85 }">{{ pct(activeRun.metrics.calibration.within1_rate) }}</b></div>
+        <div v-if="activeRun.metrics?.calibration?.severe_rate != null" class="metric"><span>严重分歧率 |Δ|≥3（SLA ≤5%）</span><b :class="{ error: activeRun.metrics.calibration.severe_rate > 0.05 }">{{ pct(activeRun.metrics.calibration.severe_rate) }}</b></div>
+        <div v-if="activeRun.metrics?.calibration?.exact_rate != null" class="metric"><span>严格一致率（SLA ≥60%）</span><b :class="{ error: activeRun.metrics.calibration.exact_rate < 0.6 }">{{ pct(activeRun.metrics.calibration.exact_rate) }}</b></div>
       </div>
       <p v-if="activeRun.metrics" class="muted">
         <template v-if="metricsOn?.answerable_cases != null">
@@ -1096,8 +1134,13 @@ onMounted(loadSets)
       <table class="table">
         <thead><tr><th>query</th><th>ranked</th><th>relevant</th><th>Bad Case</th><th>关键词</th><th>裁判分</th><th>人工复核</th><th>检索链</th><th></th></tr></thead>
         <tbody>
-          <tr v-for="r in results" :key="r.id">
-            <td>{{ r.query }}</td>
+          <tr v-for="r in pagedResults" :key="r.id">
+            <td>
+              <div>{{ r.query }}</div>
+              <div class="row-chips">
+                <span v-for="c in resultChips(r.metrics)" :key="c.text" class="chip" :class="c.cls">{{ c.text }}</span>
+              </div>
+            </td>
             <td class="muted">{{ r.ranked.join('、') || '-' }}</td>
             <td class="muted">{{ r.relevant.join('、') || '-' }}</td>
             <td><span class="tag" :class="r.bad_case_type === 'ok' ? 'ok' : 'bad'">{{ r.bad_case_type || '-' }}</span></td>
@@ -1110,57 +1153,35 @@ onMounted(loadSets)
               </div>
             </td>
             <td>
-              <span v-if="editingResultId === r.id" class="human-score-row">
-                <input v-model.number="humanScoreForm.score" type="number" min="0" max="5" placeholder="0-5" />
-                <input v-model="humanScoreForm.judge" placeholder="裁判" />
-                <button class="mini ok" @click="submitHumanScore(r)">保存</button>
-                <button class="mini ghost" @click="cancelHumanScore">取消</button>
-              </span>
-              <span v-else-if="r.human_score != null" class="tag ok">
+              <span v-if="r.human_score != null" class="tag ok">
                 人工 {{ r.human_score }} 分
                 <span v-if="r.human_judge" class="muted">（{{ r.human_judge }}）</span>
               </span>
-              <span v-else>
-                <button class="mini" @click="editingResultId = r.id">评分</button>
-              </span>
+              <span v-else class="muted">未复核</span>
             </td>
             <td class="muted ellipsis">{{ r.retrieval_summary }}</td>
-            <td><button class="mini" @click="toggleResultDetail(r)">{{ resultDetailId === r.id ? '收起' : '详情' }}</button></td>
+            <td><button class="mini" @click="openReview(r)">详情</button></td>
           </tr>
-          <tr v-for="r in results" :key="`${r.id}-detail`" v-show="resultDetailId === r.id" class="result-detail-row">
-            <td colspan="9">
-              <div class="result-detail">
-                <div class="detail-block">
-                  <b>裁判逐项评分（0-5）</b>
-                  <div class="judge-grid">
-                    <span v-for="key in judgeKeys" :key="key">
-                      {{ judgeShort[key] }}：
-                      <strong class="score-text" :class="judgeTagClass(r.metrics?.answer?.judge?.[key])">{{ fixed(r.metrics?.answer?.judge?.[key]) }}</strong>
-                    </span>
-                  </div>
-                  <p class="muted">裁判理由：{{ r.metrics?.answer?.judge?.reason || '无' }}</p>
-                </div>
-                <div class="detail-block">
-                  <b>生成回答</b>
-                  <p class="answer-text">{{ r.metrics?.answer?.answer || '（无回答）' }}</p>
-                  <p class="muted">
-                    {{ citationText(r.metrics?.answer) }}；关键词命中 {{ pct(r.metrics?.answer?.keyword_hit) }}；
-                    缺失关键词：{{ (r.metrics?.answer?.keyword_missing || []).join('、') || '无' }}
-                  </p>
-                </div>
-                <div class="detail-block">
-                  <b>检索判定</b>
-                  <p class="muted">检索命中：{{ r.ranked.join('、') || '无' }}；标注相关：{{ r.relevant.join('、') || '无（不可答/反例）' }}</p>
-                  <p class="muted">{{ r.retrieval_summary || '无检索诊断' }}</p>
-                </div>
-              </div>
-            </td>
-          </tr>
-          <tr v-if="!results.length"><td colspan="9" class="muted">暂无逐条结果（运行中或未完成）</td></tr>
+          <tr v-if="!reviewList.length"><td colspan="9" class="muted">{{ results.length ? '全部用例已完成复核（取消「只看未复核」查看全部）' : '暂无逐条结果（运行中或未完成）' }}</td></tr>
         </tbody>
       </table>
+      <div v-if="reviewList.length" class="pager">
+        <button class="mini" :disabled="resultPage <= 1" @click="gotoResultPage(resultPage - 1)">上一页</button>
+        <span class="muted">第 {{ resultPage }} / {{ resultPageCount }} 页 · 共 {{ reviewList.length }} 条</span>
+        <button class="mini" :disabled="resultPage >= resultPageCount" @click="gotoResultPage(resultPage + 1)">下一页</button>
+      </div>
     </section>
   </div>
+  <EvalResultReviewDialog
+    :visible="reviewOpen && !!activeRun"
+    :run="activeRun"
+    :results="reviewList"
+    :initial-index="reviewIndex"
+    :reviewed-count="reviewedCount"
+    :total-count="results.length"
+    @close="reviewOpen = false"
+    @saved="onReviewSaved"
+  />
   <ConfirmDialog
     :visible="!!pending"
     :title="pending?.title || ''"
@@ -1217,15 +1238,11 @@ onMounted(loadSets)
 .score-chip.ok { border-color: transparent; background: rgba(34,158,88,.12); color: #1c7d47; }
 .score-chip.pending { border-color: transparent; background: rgba(190,140,20,.14); color: #8a6413; }
 .score-chip.bad { border-color: transparent; background: rgba(200,60,50,.12); color: #a03028; }
-.score-text.ok { color: #1c7d47; }
-.score-text.pending { color: #8a6413; }
-.score-text.bad { color: #a03028; }
-.result-detail-row td { background: var(--surface-2, rgba(0,0,0,.02)); }
-.result-detail { display: grid; gap: 10px; padding: 4px 2px; }
-.detail-block b { display: block; font-size: 12px; margin-bottom: 5px; }
-.detail-block + .detail-block { border-top: 1px dashed var(--line); padding-top: 9px; }
-.judge-grid { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; }
-.answer-text { white-space: pre-wrap; font-size: 12.5px; line-height: 1.65; margin: 4px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.row-chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
+.chip { font-size: 10px; padding: 0 6px; border-radius: 5px; background: #f1f5f9; color: var(--ink-3); }
+.chip.crit { background: rgba(200,60,50,.1); color: #a03028; }
+.chip.warn { background: rgba(190,140,20,.12); color: #8a6413; }
+.review-filter { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-3); cursor: pointer; }
 .page-size { margin-left: 4px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: 11.5px; }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 10px; }
 .warn { color: #b45309; background: #fffbeb; padding: 9px 12px; border-radius: 9px; font-size: 12px; margin-bottom: 10px; }
@@ -1247,9 +1264,6 @@ onMounted(loadSets)
 .error { color: #b91c1c; background: #fef2f2; padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
 .ok { color: #047857; background: var(--success-soft); padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; }
 .ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.human-score-row { display: flex; gap: 6px; align-items: center; font-size: 12px; }
-.human-score-row input[type='number'] { width: 44px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 12px; }
-.human-score-row input:not([type='number']) { width: 64px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: 12px; }
 .field-hint { margin: 8px 0 4px; font-size: 11.5px; color: var(--ink-3); line-height: 1.7; background: #f8fafc; border-radius: 8px; padding: 8px 10px; }
 .field-hint b { color: var(--ink-2); }
 .import-box { border: 1px dashed var(--line); border-radius: 12px; padding: 12px; margin: 10px 0 14px; background: var(--surface); }

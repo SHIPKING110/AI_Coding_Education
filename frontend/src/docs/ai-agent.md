@@ -189,6 +189,38 @@
 
 ## 十二、一次对话的时序
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant F as 前端（SSE）
+    participant A as FastAPI
+    participant I as 意图分类
+    participant R as RAG 检索
+    participant P as 规划器 / 工具
+    participant M as 记忆
+    participant L as ChatOpenAI
+    U->>F: 发送消息
+    F->>A: POST /chat（SSE 流式）
+    A->>I: 意图分类
+    I-->>A: 闲聊 / 知识 / 任务型
+    opt 需要知识
+        A->>R: retrieve（多跳自动拆分子查询）
+        R-->>A: top_k 文档块 + trace
+    end
+    opt 任务型
+        A->>P: bind_tools 规划与执行
+        P-->>A: 工具结果 / 过程回调
+    end
+    A->>M: 注入短期 + 摘要 + 长期记忆
+    A->>L: 组装提示词并流式生成
+    L-->>F: token 逐块推送
+    A->>A: usage_meter 记账 + span 落库
+    Note over M: 会话结束后异步蒸馏长期记忆
+```
+
+文本版步骤：
+
 ```text
 用户消息
   → 意图分类

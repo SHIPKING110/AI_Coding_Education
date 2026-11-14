@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, onUpdated, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -45,6 +45,7 @@ import {
   type KnowledgeDoc,
 } from '@/api/knowledge'
 import { renderMarkdown } from '@/utils/markdown'
+import { observeMermaid, renderMermaidNodes } from '@/utils/mermaid'
 import {
   createCustomAgent, createMcp, createSkill, deleteCustomAgent, deleteMcp, deleteSkill,
   collectMcp, collectSkill, uncollectMcp, uncollectSkill, listPlazaMcps, listPlazaSkills, publishMcp, publishSkill, unpublishMcp, unpublishSkill,
@@ -2195,40 +2196,16 @@ function back() {
   router.back()
 }
 
-/* —— Mermaid 懒加载渲染：CDN 按需加载，失败则保留源码预览 —— */
-let mermaidLoaded = false
-function ensureMermaid(): Promise<boolean> {
-  if (mermaidLoaded) return Promise.resolve(true)
-  if ((window as unknown as { mermaid?: unknown }).mermaid) {
-    mermaidLoaded = true
-    return Promise.resolve(true)
-  }
-  return new Promise((resolve) => {
-    const s = document.createElement('script')
-    s.src = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js'
-    s.onload = () => { mermaidLoaded = true; resolve(true) }
-    s.onerror = () => resolve(false)
-    document.head.appendChild(s)
-  })
-}
-async function renderMermaid() {
-  const els = chatEl.value?.querySelectorAll('.mermaid-render') ?? []
-  if (!els.length) return
-  const ok = await ensureMermaid()
-  if (!ok) return
-  const mm = (window as unknown as { mermaid?: { initialize?: (o: unknown) => void; run?: (o: unknown) => Promise<void> } }).mermaid
-  try {
-    mm?.initialize?.({ startOnLoad: false, theme: 'neutral' })
-    await mm?.run?.({ nodes: [...els] as unknown as Element[] })
-    els.forEach((el) => {
-      const html = (el as HTMLElement).innerHTML
-      if (html.includes('mermaid-render') || !html.trim()) return
-      const box = el.closest('.md-mermaid')
-      box?.classList.add('rendered')
-    })
-  } catch { /* 保留源码 */ }
-}
-watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid()) })
+/* —— Mermaid 渲染：本地打包懒加载（见 utils/mermaid）；MutationObserver 兜底一切 DOM 时序 —— */
+watch(
+  [messages, streamBuf],
+  () =>
+    void nextTick().then(() => {
+      observeMermaid(chatEl.value)
+      void renderMermaidNodes(chatEl.value)
+    }),
+  { deep: true },
+)
 </script>
 
 <template>
@@ -4130,7 +4107,10 @@ watch([messages, streamBuf], () => { void nextTick().then(() => renderMermaid())
 .bubble :deep(.md-mermaid pre) { background: #f8fafc; border: 1px dashed var(--brand); border-radius: 8px; padding: 10px; font-size: 11.5px; overflow-x: auto; }
 .bubble :deep(.md-mermaid.rendered pre.mermaid-src) { display: none; }
 .bubble :deep(.mermaid-render) { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow-x: auto; }
+.bubble :deep(.mermaid-render:empty) { display: none; }
 .bubble :deep(.mermaid-render svg) { max-width: 100%; height: auto; }
+.bubble :deep(.md-mermaid-error) { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #a03028; }
+.bubble :deep(.md-mermaid-retry) { padding: 3px 10px; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; font-size: 11.5px; cursor: pointer; }
 .bubble :deep(.md-code-wrap) { margin: 8px 0; border-radius: var(--radius-sm); overflow: hidden; border: 1px solid #1e293b; }
 .bubble :deep(.md-code-head) { display: flex; align-items: center; justify-content: space-between; background: #1e293b; color: #94a3b8; font-size: 11px; padding: 4px 10px; }
 .bubble :deep(.md-code-head .md-copy) { float: none; background: transparent; color: #e2e8f0; border-color: #475569; }

@@ -252,6 +252,45 @@ def cohen_kappa(
     return round((po - pe) / (1.0 - pe), 4)
 
 
+# —— 人工校准 SLA（ADR-0027）——
+# 6 档密集评分下二次加权 Kappa 对少量严重分歧过于敏感（5 分档集中导致期望一致度
+# 接近 0.83），单用 0.6 门槛会把“总体高度一致、仅个别口径分歧”误判为不可信。
+# 生产验收改为四指标组合，Kappa 保留为观察/趋势指标。
+CALIB_MIN_PAIRS = 10        # 少于该样本对数不做 SLA 判定
+CALIB_SEVERE_MAX = 0.05     # 严重分歧率（|Δ|≥3）上限 5%
+CALIB_WITHIN1_MIN = 0.85    # ±1 内一致率下限 85%
+CALIB_EXACT_MIN = 0.6       # 严格一致率下限 60%
+CALIB_BIAS_MAX = 0.3        # 系统偏差上限 |LLM均值 − 人工均值|
+
+
+def calibration_sla(report: dict) -> dict:
+    """按四指标组合判定校准 SLA；样本不足返回 skip。
+
+    输入为 calibration_from_pairs 的产物（含 exact_rate/within1_rate/
+    severe_rate/bias）。Kappa 仅记录，不参与判定。
+    """
+    pairs = int(report.get("pairs") or 0)
+    if pairs < CALIB_MIN_PAIRS:
+        return {"passed": None, "reasons": [f"人工样本 {pairs} 对 < {CALIB_MIN_PAIRS} 对，无法判定"]}
+    reasons: list[str] = []
+    if float(report.get("severe_rate") or 0.0) > CALIB_SEVERE_MAX:
+        reasons.append(
+            f"严重分歧率 {round(float(report['severe_rate']) * 100, 1)}% 超过 {int(CALIB_SEVERE_MAX * 100)}%"
+            f"（|Δ|≥3 需逐条仲裁归因）"
+        )
+    if float(report.get("within1_rate") or 0.0) < CALIB_WITHIN1_MIN:
+        reasons.append(
+            f"±1 内一致率 {round(float(report['within1_rate']) * 100, 1)}% 低于 {int(CALIB_WITHIN1_MIN * 100)}%"
+        )
+    if float(report.get("exact_rate") or 0.0) < CALIB_EXACT_MIN:
+        reasons.append(
+            f"严格一致率 {round(float(report['exact_rate']) * 100, 1)}% 低于 {int(CALIB_EXACT_MIN * 100)}%"
+        )
+    if abs(float(report.get("bias") or 0.0)) > CALIB_BIAS_MAX:
+        reasons.append(f"系统偏差 {report.get('bias')} 超过 ±{CALIB_BIAS_MAX}")
+    return {"passed": not reasons, "reasons": reasons}
+
+
 def calibration_from_pairs(
     pairs: list[dict], *, dimension: str = "correctness", weights: str = "quadratic",
 ) -> dict:
@@ -260,8 +299,9 @@ def calibration_from_pairs(
     pairs 每条形如：
         {"llm": {"correctness": 4, ...} | None, "human_score": 4 | None}
     只在两边都有整数分的样本上计算 Kappa，同时给出各档分布和平均绝对差，
-    便于判断是“系统性偏高”还是“随机不一致”。企业上线门槛通常要求
-    quadratic kappa ≥ 0.6（substantial agreement）。
+    便于判断是“系统性偏高”还是“随机不一致”。验收口径见 ADR-0027：
+    四指标 SLA（严重分歧率/±1 一致率/严格一致率/偏差）做闸门，
+    Kappa 保留为观察指标。
     """
     llm_vals: list[int] = []
     human_vals: list[int] = []
@@ -282,7 +322,7 @@ def calibration_from_pairs(
         return {"pairs": 0, "kappa": None}
     kappa = cohen_kappa(llm_vals, human_vals, weights=weights)
     mean_diff = round(sum(llm_vals) / n - sum(human_vals) / n, 2)
-    return {
+    report = {
         "pairs": n,
         "kappa": kappa,
         "weights": weights,
@@ -291,8 +331,13 @@ def calibration_from_pairs(
         "llm_mean": round(sum(llm_vals) / n, 2),
         "human_mean": round(sum(human_vals) / n, 2),
         "bias": mean_diff,  # 正数表示 LLM 系统性偏高
-        "trusted": kappa is not None and kappa >= 0.6,
+        "exact_rate": round(sum(1 for d in abs_diffs if d == 0) / n, 4),
+        "within1_rate": round(sum(1 for d in abs_diffs if d <= 1) / n, 4),
+        "severe_rate": round(sum(1 for d in abs_diffs if d >= 3) / n, 4),
+        "trusted": kappa is not None and kappa >= 0.6,  # 兼容旧字段：仅作观察
     }
+    report["sla"] = calibration_sla(report)
+    return report
 
 
 __all__ = [
@@ -307,4 +352,5 @@ __all__ = [
     "tool_scores",
     "cohen_kappa",
     "calibration_from_pairs",
+    "calibration_sla",
 ]
