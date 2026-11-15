@@ -30,6 +30,11 @@ jobs:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
       SECRET_KEY: ci-only-secret-key-0123456789abcdef0123456789abcdef
       DEBUG: "false"
+      # 与开发机 .env 对齐的「已配置 LLM」假凭据：多数 AI 链路测试 mock 了生成函数，
+      # 但入口的模型解析需要存在配置（否则走 LLMConfigError 分支）
+      LLM_MODEL: ci-dummy-model
+      LLM_API_KEY: ci-dummy-key
+      LLM_BASE_URL: http://127.0.0.1:9/v1
     defaults:
       run:
         working-directory: backend
@@ -38,8 +43,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: 安装依赖（与生产镜像同构：不含 ai extras）
-        run: uv sync --frozen
+      - name: 安装依赖（含 ai extras：测试套件覆盖真实 LLM 代码路径，需 langchain 可导入）
+        run: uv sync --frozen --extra ai
       - name: 空库迁移重放（ADR-0029 基线）
         run: |
           uv run alembic upgrade head
