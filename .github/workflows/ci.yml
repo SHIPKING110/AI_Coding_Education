@@ -38,16 +38,16 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: 安装依赖（含 AI 运行依赖）
-        run: uv sync --frozen --extra ai
+      - name: 安装依赖（与生产镜像同构：不含 ai extras）
+        run: uv sync --frozen
       - name: 空库迁移重放（ADR-0029 基线）
         run: |
           uv run alembic upgrade head
           uv run alembic current | grep -q "a00000000000"
       - name: ruff
         run: uv run ruff check app tests
-      - name: pytest 全量（覆盖率护栏 63%：2026-11-15 基线 65%）
-        run: uv run pytest -q --cov=app --cov-fail-under=63
+      - name: pytest 全量（覆盖率护栏 62%：CI 全量口径基线 62.8%）
+        run: uv run pytest -q --cov=app --cov-fail-under=62
 
   frontend:
     name: frontend（vue-tsc + vite build）

@@ -13,18 +13,20 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
-      - name: Install minimal deps (metrics are dependency-free)
-        run: pip install pytest
+          enable-cache: true
+      # 评测指标/纯函数测试需要项目完整依赖（rag_evaluation 会 import 应用模块），
+      # 与 ci.yml 同构：不含 ai extras（与生产镜像一致）。
+      - name: 安装依赖
+        run: uv sync --frozen
       - name: Eval metrics unit tests
-        run: python -m pytest tests/test_eval_metrics.py -q
+        run: uv run python -m pytest tests/test_eval_metrics.py -q
       - name: Parent service pure-function tests (risk words, no DB)
-        run: python -m pytest tests/test_parent_service.py -q -k "risk_word or default_when_empty"
+        run: uv run python -m pytest tests/test_parent_service.py -q -k "risk_word or default_when_empty"
       - name: Compile check (syntax gate for eval + retrieval + planner)
         run: >-
-          python -m py_compile
+          uv run python -m py_compile
           app/services/rag.py app/services/llm.py app/services/rag_judge.py
           app/services/agent_planner.py app/services/agent_tools.py
           app/crud/parent_service.py app/crud/knowledge.py
