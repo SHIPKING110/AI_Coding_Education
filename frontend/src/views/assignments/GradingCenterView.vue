@@ -7,6 +7,7 @@
  * 默认仅返回有待批改的作业，按待批改数 + 最新提交时间排序）。
  */
 import { computed, onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 import { useRouter } from 'vue-router'
 
 import { listGradingCenter, type GradingCenterItem } from '@/api/assignment'
@@ -36,8 +37,8 @@ async function load() {
     })
     items.value = r.items
     total.value = r.total
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '加载批改中心失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '加载批改中心失败')
   } finally {
     loading.value = false
   }

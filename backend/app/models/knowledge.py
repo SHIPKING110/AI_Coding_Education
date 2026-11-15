@@ -22,6 +22,8 @@ class KnowledgeDocument(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     visibility: Mapped[str] = mapped_column(String(16), default="private", index=True)
     enabled: Mapped[bool] = mapped_column(default=True, server_default="true", index=True)
+    # 家长版可见：仅该 flag 为 true 的文档参与家长端 RAG 检索（白名单制，默认隐藏）
+    visible_to_parents: Mapped[bool] = mapped_column(default=False, server_default="false", index=True)
     file_name: Mapped[str] = mapped_column(String(255), default="")
     file_path: Mapped[str] = mapped_column(String(512), default="")
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)

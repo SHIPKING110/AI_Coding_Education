@@ -4,6 +4,7 @@
  * scene: feedback 课后反馈 / report 报告总结 / evaluation 学员评估。
  */
 import { computed, nextTick, ref, watch } from 'vue'
+import { apiErrorDetail, apiErrorStatus } from '@/utils/errors'
 
 import PlaceholderBar from '@/components/PlaceholderBar.vue'
 import { EVALUATION_PLACEHOLDERS, FEEDBACK_PLACEHOLDERS, REPORT_PLACEHOLDERS, type PlaceholderDef } from '@/components/placeholders'
@@ -191,9 +192,9 @@ async function save() {
       try {
         await updatePromptTemplate(editing.value.id, { name, content })
         formNotice.value = '已保存修改'
-      } catch (e: any) {
-        const status = e?.response?.status
-        const detail = e?.response?.data?.detail || ''
+      } catch (e: unknown) {
+        const status = apiErrorStatus(e)
+        const detail = apiErrorDetail(e, '')
         // 非管理员编辑系统/全校模板被 403：自动降级为新建个人副本，保证“默认模板也能改”
         if (status === 403 && editing.value.scope !== 'personal') {
           const copy = await createPromptTemplate({
@@ -216,8 +217,8 @@ async function save() {
     }
     await load()
     emit('changed')
-  } catch (e: any) {
-    formError.value = e?.response?.data?.detail || '保存失败'
+  } catch (e: unknown) {
+    formError.value = apiErrorDetail(e, '保存失败')
   } finally {
     saving.value = false
   }
@@ -231,8 +232,8 @@ async function remove(t: PromptTemplateOut) {
     if (editingId.value === t.id) cancelEdit()
     await load()
     emit('changed')
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '删除失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '删除失败')
   }
 }
 
@@ -242,8 +243,8 @@ async function togglePublish(t: PromptTemplateOut) {
     else await publishPromptTemplate(t.id)
     await load()
     emit('changed')
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '操作失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '操作失败')
   }
 }
 

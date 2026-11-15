@@ -8,26 +8,44 @@ uv.lock.cache/
 
 # ç¯å¢ƒå˜é‡ï¼ˆå«å¯†é’¥ï¼Œå‹¿æäº¤ï¼‰
 backend/.env
+.env
+.env.prod
+.env.local
 
 # Node
 node_modules/
 dist/
 *.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 *.local
 
 # è¿è¡Œæ—¶äº§ç‰©
 *.log
 backend/uploads/
 backend/media/
+uploads/
+backend/scripts/_tmp_probe.py
 
 # IDE / ç³»ç»Ÿ
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-# ±¾µØ´óÄ£ĞÍÈ¨ÖØÓëÏòÁ¿¿â£¨Ìå»ı´ó£¬°´Ğè±¾µØÏÂÔØ£©
+
+# æœ¬åœ°å¤§æ¨¡å‹æƒé‡ä¸å‘é‡åº“ï¼ˆä½“ç§¯å¤§ï¼ŒæŒ‰éœ€æœ¬åœ°ä¸‹è½½ï¼‰
 backend/models/
 backend/data/
 
-# Éú²ú»·¾³ÅäÖÃ£¨º¬ÃÜÂë£¬ÇĞÎğÌá½»£©
-.env.prod
+# æ•°æ®åº“å¤‡ä»½ï¼ˆå«å­¦å‘˜ä¸ªäººä¿¡æ¯ï¼Œä¸¥ç¦å…¥åº“ï¼›å¤‡ä»½æµç¨‹è§ DEPLOY.mdï¼‰
+backups/
+*.backup
+*.dump
+
+# æ‰“åŒ…äº§ç‰©
+backend/seed_skills/*.zip
+# æµ‹è¯•/è¦†ç›–ç‡ä¸´æ—¶äº§ç‰©
+backend/.coverage
+backend/cov_*.txt
+frontend/tmp_*.txt
+frontend/dist_sum.json

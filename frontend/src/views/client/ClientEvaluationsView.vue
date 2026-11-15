@@ -66,13 +66,6 @@ function statNum(ev: ClientEvaluationOut | null | undefined, key: string): numbe
   return num(s[key])
 }
 
-function fmtDate(iso: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-}
-
 function publishedKey(ev: ClientEvaluationOut | null | undefined): string {
   if (!ev) return ''
   if (ev.published_at) return ev.published_at.slice(0, 10)

@@ -6,7 +6,8 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import StudentFilter, { type StudentFilterValue } from '@/components/StudentFilter.vue'
 import { pinyinInitials } from '@/utils/pinyin'
-import { listCampusesApi, listTeachersApi, loginApi, registerApi, resetUserPasswordApi } from '@/api/auth'
+import { apiErrorDetail } from '@/utils/errors'
+import { listCampusesApi, listTeachersApi, registerApi, resetUserPasswordApi } from '@/api/auth'
 import {
   adjustLessonBalance,
   createStudent,
@@ -186,8 +187,8 @@ async function openRefund(s: StudentOut) {
     refundPreview.value = data.items
     refundTotal.value = data.total_amount
     refundLessons.value = data.total_lessons
-  } catch (e: any) {
-    refundError.value = e?.response?.data?.detail || '无法计算退费明细'
+  } catch (e: unknown) {
+    refundError.value = apiErrorDetail(e, '无法计算退费明细')
   } finally {
     refundLoading.value = false
   }
@@ -205,8 +206,8 @@ async function submitRefund() {
     window.alert(`退费完成，合计 ¥${Number(res.total_amount).toFixed(2)}（${res.total_lessons} 课时）`)
     showRefund.value = false
     await load()
-  } catch (e: any) {
-    refundError.value = e?.response?.data?.detail || '退费失败'
+  } catch (e: unknown) {
+    refundError.value = apiErrorDetail(e, '退费失败')
   } finally {
     refundSubmitting.value = false
   }
@@ -360,8 +361,8 @@ async function submitRenew() {
     showRenew.value = false
     if (viewMode.value === 'collection') await loadCollection()
     else await load()
-  } catch (e: any) {
-    renewError.value = e?.response?.data?.detail || '续费失败'
+  } catch (e: unknown) {
+    renewError.value = apiErrorDetail(e, '续费失败')
   } finally {
     renewSubmitting.value = false
   }
@@ -371,8 +372,8 @@ async function markFollowUp(s: StudentOut, status: string) {
   try {
     await updateStudentFollowUp(s.id, { follow_up_status: status })
     await loadCollection()
-  } catch (e: any) {
-    collectionError.value = e?.response?.data?.detail || '更新跟进状态失败'
+  } catch (e: unknown) {
+    collectionError.value = apiErrorDetail(e, '更新跟进状态失败')
   }
 }
 
@@ -515,7 +516,7 @@ const studentUserLabel = computed(() => {
   return u ? `${u.name}（登录名：${u.username}）` : s.student_user_id.slice(0, 8)
 })
 
-// —— 新客户账号创建（默认密码 123456）——
+// —— 新客户账号创建（服务端生成随机临时密码，首次登录强制改密）——
 const showCreateParent = ref(false)
 const createParentUsername = ref('')
 const creatingParent = ref(false)
@@ -527,15 +528,15 @@ const createStudentError = ref('')
 // 账号创建成功回执（显示真实登录名，已用该值调过登录校验）
 const createOkMsg = ref('')
 
-// —— 管理员重置已绑定账号密码（默认 123456）——
+// —— 管理员重置已绑定账号密码（重置后对方登录需强制改密）——
 const resetTarget = ref<{ kind: 'parent' | 'student'; id: string; label: string } | null>(null)
-const resetNewPw = ref('123456')
+const resetNewPw = ref('')
 const resetMsg = ref('')
 const resetSubmitting = ref(false)
 
 function openCreateParentForm() {
   showCreateParent.value = !showCreateParent.value
-  // 家长账号：登录名默认=学员电话号码，密码默认 123456
+  // 家长账号：登录名默认=学员电话号码；密码由服务端生成随机临时密码
   createParentUsername.value = showCreateParent.value ? (form.value.phone || '').trim() : ''
   createParentError.value = ''
 }
@@ -605,21 +606,16 @@ async function createParentAccount() {
   }
   creatingParent.value = true
   try {
-    const user = await registerApi({ role: 'parent', username, password: '123456', name })
-    try {
-      await loginApi({ username: user.username, password: '123456' })
-    } catch {
-      createParentError.value = `账号已创建（${user.username}），但登录校验失败，请检查密码或联系管理员`
-      return
-    }
+    const user = await registerApi({ role: 'parent', username, name })
+    const tempPw = user.initial_password || ''
     await loadParentUsers()
     bindParent(user.id)
     showCreateParent.value = false
     createParentError.value = ''
-    batchDone.value = `家长账号 ${user.username} 创建成功，可用该登录名 + 密码 123456 登录`
-    createOkMsg.value = `家长账号 ${user.username} 创建并绑定成功，可用该登录名 + 密码 123456 登录`
-  } catch (e: any) {
-    if (e?.response?.data?.detail === 'Username already exists') {
+    batchDone.value = `家长账号 ${user.username} 创建成功，初始密码：${tempPw}（首次登录需修改）`
+    createOkMsg.value = `家长账号 ${user.username} 创建并绑定成功，初始密码：${tempPw}（首次登录需修改）`
+  } catch (e: unknown) {
+    if (apiErrorDetail(e, '') === 'Username already exists') {
       // 登录名已存在：可能是删除学员后残留的 User 行，直接复用绑定（旧账号不再占着）
       try {
         const found = await listUsersApi({ role: 'parent', keyword: username, limit: 10 })
@@ -635,7 +631,7 @@ async function createParentAccount() {
       }
       createParentError.value = '该登录名已被占用，请换一个'
     } else {
-      createParentError.value = e?.response?.data?.detail || '创建失败，请重试'
+      createParentError.value = apiErrorDetail(e, '创建失败，请重试')
     }
   } finally {
     creatingParent.value = false
@@ -656,22 +652,16 @@ async function createStudentAccount() {
   }
   creatingStudentUser.value = true
   try {
-    const user = await registerApi({ role: 'student', username, password: '123456', name })
-    // 创建成功后用真实 username 调一次登录校验：确保该登录名可用于登录（token 丢弃，不切换会话）
-    try {
-      await loginApi({ username: user.username, password: '123456' })
-    } catch {
-      createStudentError.value = `账号已创建（${user.username}），但登录校验失败，请检查密码或联系管理员`
-      return
-    }
+    const user = await registerApi({ role: 'student', username, name })
+    const tempPw = user.initial_password || ''
     await loadStudentUsers()
     bindStudentUser(user.id)
     showCreateStudent.value = false
     createStudentError.value = ''
-    batchDone.value = `学员账号 ${user.username} 创建成功，可用该登录名 + 密码 123456 登录`
-    createOkMsg.value = `学员账号 ${user.username} 创建并绑定成功，可用该登录名 + 密码 123456 登录`
-  } catch (e: any) {
-    if (e?.response?.data?.detail === 'Username already exists') {
+    batchDone.value = `学员账号 ${user.username} 创建成功，初始密码：${tempPw}（首次登录需修改）`
+    createOkMsg.value = `学员账号 ${user.username} 创建并绑定成功，初始密码：${tempPw}（首次登录需修改）`
+  } catch (e: unknown) {
+    if (apiErrorDetail(e, '') === 'Username already exists') {
       // 登录名已存在：可能是删除学员后残留的 User 行，直接复用绑定（旧账号不再占着）
       try {
         const found = await listUsersApi({ role: 'student', keyword: username, limit: 10 })
@@ -687,7 +677,7 @@ async function createStudentAccount() {
       }
       createStudentError.value = '该登录名已被占用，请换一个'
     } else {
-      createStudentError.value = e?.response?.data?.detail || '创建失败，请重试'
+      createStudentError.value = apiErrorDetail(e, '创建失败，请重试')
     }
   } finally {
     creatingStudentUser.value = false
@@ -696,15 +686,15 @@ async function createStudentAccount() {
 
 function openReset(kind: 'parent' | 'student', id: string, label: string) {
   resetTarget.value = { kind, id, label }
-  resetNewPw.value = '123456'
+  resetNewPw.value = ''
   resetMsg.value = ''
 }
 
 async function confirmReset() {
   if (!resetTarget.value) return
   const pw = resetNewPw.value.trim()
-  if (pw.length < 6) {
-    resetMsg.value = '密码至少 6 位'
+  if (pw.length < 8) {
+    resetMsg.value = '密码至少 8 位，且需同时包含字母和数字'
     return
   }
   resetSubmitting.value = true
@@ -715,8 +705,8 @@ async function confirmReset() {
     setTimeout(() => {
       resetTarget.value = null
     }, 900)
-  } catch (e: any) {
-    resetMsg.value = e?.response?.data?.detail || '重置失败，请重试'
+  } catch (e: unknown) {
+    resetMsg.value = apiErrorDetail(e, '重置失败，请重试')
   } finally {
     resetSubmitting.value = false
   }
@@ -762,11 +752,6 @@ async function load() {
   } finally {
     loading.value = false
   }
-}
-
-function onSearch() {
-  page.value = 1
-  load()
 }
 
 /** 统一筛选变化（来自复用组件的联动值）：回到第一页并刷新 */
@@ -936,8 +921,8 @@ async function submit() {
     }
     showForm.value = false
     await load()
-  } catch (e: any) {
-    formError.value = e?.response?.data?.detail || '保存失败'
+  } catch (e: unknown) {
+    formError.value = apiErrorDetail(e, '保存失败')
   }
 }
 
@@ -994,8 +979,8 @@ async function submitStop() {
     })
     showStop.value = false
     await load()
-  } catch (e: any) {
-    formError.value = e?.response?.data?.detail || '停课失败'
+  } catch (e: unknown) {
+    formError.value = apiErrorDetail(e, '停课失败')
   } finally {
     stopSubmitting.value = false
   }
@@ -1086,10 +1071,12 @@ const filteredCollectionStudents = computed(() =>
     : collectionStudents.value,
 )
 
-/** 一键补建学员账号：登录名默认姓名首字母+电话，显示名取学员姓名，密码 123456，成功后就地回填绑定 */
+/** 一键补建学员账号：登录名默认姓名首字母+电话，显示名取学员姓名，初始密码由服务端生成，成功后就地回填绑定 */
 const batchCreating = ref(false)
 const batchError = ref('')
 const batchDone = ref('')
+// 批量补建时收集服务端返回的初始密码，便于管理员一次性告知家长
+const batchTempPasswords = ref<string[]>([])
 
 function defaultStudentUsername(s: StudentOut): string {
   const phone = (s.phone || '').trim()
@@ -1105,15 +1092,18 @@ async function ensureStudentAccount(s: StudentOut): Promise<boolean> {
     return false
   }
   try {
-    const user = await registerApi({ role: 'student', username, password: '123456', name: s.name })
+    const user = await registerApi({ role: 'student', username, name: s.name })
+    if (user.initial_password) {
+      batchTempPasswords.value.push(`${s.name}（${user.username}）：${user.initial_password}`)
+    }
     await updateStudent(s.id, { student_user_id: user.id })
     s.student_user_id = user.id
     return true
-  } catch (e: any) {
+  } catch (e: unknown) {
     batchError.value =
-      e?.response?.data?.detail === 'Username already exists'
+      apiErrorDetail(e, '') === 'Username already exists'
         ? `「${s.name}」默认登录名 ${username} 已被占用，请手动处理`
-        : e?.response?.data?.detail || `「${s.name}」账号创建失败`
+        : apiErrorDetail(e, `「${s.name}」账号创建失败`)
     return false
   }
 }
@@ -1129,6 +1119,7 @@ async function createMissingAccount(s: StudentOut) {
 async function batchCreateMissingAccounts() {
   batchError.value = ''
   batchDone.value = ''
+  batchTempPasswords.value = []
   const targets = collectionStudents.value.filter((s) => !s.student_user_id)
   if (targets.length === 0) {
     batchDone.value = '当前名单学员均已绑定学员账号'
@@ -1143,7 +1134,10 @@ async function batchCreateMissingAccounts() {
       else break
     }
     if (okCount > 0) {
-      batchDone.value = `已补建 ${okCount} 个学员账号（登录名姓名首字母+电话，密码 123456）`
+      batchDone.value =
+        `已补建 ${okCount} 个学员账号（登录名姓名首字母+电话），初始密码：` +
+        batchTempPasswords.value.join('；') +
+        '（首次登录需修改）'
       await loadCollection()
     }
   } finally {
@@ -1155,11 +1149,6 @@ function statusInfo(s: StudentOut): { label: string; cls: string } {
   if (s.status === 'stopped') return { label: '已停课', cls: 'stopped' }
   if (s.status === 'archived') return { label: '已归档', cls: 'archived' }
   return { label: '在读', cls: 'active' }
-}
-
-function teacherNameById(id: string | null | undefined): string {
-  if (!id) return ''
-  return teacherOptions.value.find((t) => t.id === id)?.name || ''
 }
 
 watch([keyword, campusFilter, statusFilter, lessonMin, lessonMax, classTeacherId, classId], () => {
@@ -1236,7 +1225,7 @@ onMounted(async () => {
           </button>
         </template>
         <template v-else>
-          <button class="btn primary" :disabled="batchCreating" title="为当前名单中未绑定学员账号的学员一键补建（登录名姓名首字母+电话，密码 123456）" @click="batchCreateMissingAccounts">
+          <button class="btn primary" :disabled="batchCreating" title="为当前名单中未绑定学员账号的学员一键补建（登录名姓名首字母+电话，初始密码自动生成）" @click="batchCreateMissingAccounts">
             {{ batchCreating ? '补建中…' : '一键补建学员账号' }}
           </button>
           <button class="btn ghost" @click="backToStudents">
@@ -1339,7 +1328,7 @@ onMounted(async () => {
               </td>
               <td class="ops">
                 <button class="op-btn primary" @click="guard('student_refund', () => openRenew(s))">续费</button>
-                <button v-if="!s.student_user_id" class="op-btn ok" title="按默认规则补建：登录名姓名首字母+电话，密码 123456" @click="createMissingAccount(s)">补建账号</button>
+                <button v-if="!s.student_user_id" class="op-btn ok" title="按默认规则补建：登录名姓名首字母+电话，初始密码自动生成" @click="createMissingAccount(s)">补建账号</button>
                 <button v-if="s.follow_up_status === 'pending'" class="op-btn ok" @click="guard('student_stop', () => markFollowUp(s, 'renewed'))">标已续费</button>
                 <button v-if="s.follow_up_status === 'pending'" class="op-btn warn" @click="guard('student_stop', () => markFollowUp(s, 'stopped'))">标已停课</button>
                 <button v-if="s.follow_up_status !== 'pending'" class="op-btn" @click="guard('student_stop', () => markFollowUp(s, 'pending'))">恢复待跟进</button>
@@ -1567,7 +1556,7 @@ onMounted(async () => {
                 </div>
                 <div class="user-create">
                   <button v-if="!showCreateParent" class="create-account-btn" type="button" @click="openCreateParentForm">
-                    ＋ 没有该账号？新建家长账号（登录名默认学员电话号码，密码 123456）
+                    ＋ 没有该账号？新建家长账号（登录名默认学员电话号码，初始密码自动生成）
                   </button>
                   <div v-else class="create-form">
                     <div class="cf-row">
@@ -1575,7 +1564,7 @@ onMounted(async () => {
                       <span class="cf-note">登录名：{{ createParentUsername.trim() || '（待生成）' }}（创建后即为登录账号，请核对）</span>
                       <span class="cf-note">显示名：{{ parentUserSearch.trim() || form.name.trim() + '的家长' || '（先输入姓名）' }}</span>
                     </div>
-                    <p class="cf-note">密码默认 123456，创建后请及时告知家长</p>
+                    <p class="cf-note">初始密码创建后一次性显示，请及时告知家长，首次登录将强制修改</p>
                     <p v-if="createParentError" class="cf-error">{{ createParentError }}</p>
                     <div class="cf-actions">
                       <button class="cf-btn ghost" type="button" @click="showCreateParent = false">取消</button>
@@ -1617,7 +1606,7 @@ onMounted(async () => {
                 </div>
                 <div class="user-create">
                   <button v-if="!showCreateStudent" class="create-account-btn" type="button" @click="openCreateStudentForm">
-                    ＋ 没有该账号？新建学员账号（登录名默认姓名首字母+电话，密码 123456）
+                    ＋ 没有该账号？新建学员账号（登录名默认姓名首字母+电话，初始密码自动生成）
                   </button>
                   <div v-else class="create-form">
                     <div class="cf-row">
@@ -1651,7 +1640,7 @@ onMounted(async () => {
     <div v-if="resetTarget" class="reset-modal" @click.self="resetTarget = null">
       <div class="reset-card">
         <h4>重置{{ resetTarget.label }}密码</h4>
-        <p class="rm-sub">重置后请及时告知对方新密码。新客户默认密码为 123456。</p>
+        <p class="rm-sub">重置后对方首次登录需强制改密，请及时告知临时密码。新客户初始密码由系统自动生成。</p>
         <label>
           新密码
           <input v-model="resetNewPw" type="text" placeholder="新密码（至少 6 位）" />

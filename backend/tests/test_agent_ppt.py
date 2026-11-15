@@ -45,12 +45,12 @@ def test_build_ppt_with_real_data():
         client = TestClient(app)
         r = client.post(
             "/api/auth/register",
-            json={"role": "teacher", "username": f"ppt-{uuid.uuid4().hex[:8]}", "password": "123456", "name": "t"},
+            json={"role": "teacher", "username": f"ppt-{uuid.uuid4().hex[:8]}", "password": "12345678a", "name": "t"},
         )
         assert r.status_code == 201, r.text
         login = client.post(
             "/api/auth/login",
-            json={"username": r.json()["username"], "password": "123456"},
+            json={"username": r.json()["username"], "password": "12345678a"},
         )
         headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
         # 建一份带统计快照的季度报告
@@ -71,10 +71,12 @@ def test_build_ppt_with_real_data():
             rep_id = str(rep.id)
         conv = client.post(
             "/api/agents/conversations",
-            json={"agent_id": "report_ppt", "context_ref": {"kind": "report", "id": rep_id, "title": "Q3"},
+            # 内置「report_ppt」Agent 已下线，PPT 生成统一由通用助手 + ppt-master Skill 承担
+            json={"agent_id": "assistant", "context_ref": {"kind": "report", "id": rep_id, "title": "Q3"},
                   "title": "Q3 总结"},
             headers=headers,
         ).json()
+        assert conv.get("id"), conv
         outline = [
             {"id": "p1", "title": "封面", "kind": "prose", "note": "2026 Q3 教学总结"},
             {"id": "p2", "title": "核心指标", "kind": "stats"},

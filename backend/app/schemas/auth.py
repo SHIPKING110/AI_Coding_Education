@@ -3,19 +3,32 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.security import validate_password_strength
 from app.models.user import Role
+
+
+def _validate_password(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return validate_password_strength(value)
 
 
 class RegisterIn(BaseModel):
     role: Role = Field(default=Role.PARENT)
     username: str = Field(min_length=3, max_length=64)
-    password: str = Field(min_length=6, max_length=128)
+    # 管理员/教务代建账号时可不传：服务端生成随机临时密码，响应一次性返回 initial_password
+    password: str | None = Field(default=None, max_length=128)
     name: str = Field(min_length=1, max_length=64)
     phone: str | None = Field(default=None, max_length=20)
     campus: str | None = Field(
         default=None, max_length=64, description="所属校区（如 一校/二校/三校）"
     )
     title: str | None = Field(default=None, max_length=64, description="职务标签（如 主教/助教）")
+
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, v):
+        return _validate_password(v)
 
 
 class LoginIn(BaseModel):
@@ -43,6 +56,10 @@ class UserOut(BaseModel):
     base_salary: str | None = None
     status: str
     created_at: datetime
+    # 强制改密标记：为 True 时前端弹出强制改密弹窗（后端同步拦截其他接口）
+    must_change_password: bool = False
+    # 仅注册响应使用：代建账号时服务端生成的随机临时密码（一次性返回，不落库明文）
+    initial_password: str | None = None
 
     @field_validator("base_salary", mode="before")
     @classmethod
@@ -62,8 +79,13 @@ class UserUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=64, description="职务标签；变更时自动套用该职务预设权限")
     teacher_level_id: str | None = Field(default=None, description="教师级别id")
     base_salary: str | None = Field(default=None, description="基本工资，为空取职务工资")
-    password: str | None = Field(default=None, min_length=6, max_length=128)
+    password: str | None = Field(default=None, max_length=128)
     status: str | None = None
+
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, v):
+        return _validate_password(v)
 
 
 class UserSelfUpdate(BaseModel):
@@ -78,10 +100,20 @@ class ChangePasswordIn(BaseModel):
     """本人修改密码：校验原密码后设置新密码。"""
 
     old_password: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def _check_password(cls, v):
+        return _validate_password(v)
 
 
 class AdminPasswordResetIn(BaseModel):
     """管理员重置他人账号密码（家长/学员/教师等）。"""
 
-    new_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def _check_password(cls, v):
+        return _validate_password(v)

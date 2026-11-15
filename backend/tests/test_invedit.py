@@ -49,10 +49,10 @@ def _register(client, role, tag):
     username = f"{tag}-{role}-{uuid.uuid4().hex[:5]}"
     r = client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
     assert r.status_code == 201, r.text
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     tok = {"Authorization": f"Bearer {login.json()['access_token']}"}
     me = client.get("/api/auth/me", headers=tok).json()
     return tok, me["id"]

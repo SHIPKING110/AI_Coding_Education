@@ -284,6 +284,7 @@ def create_teacher_level(
     _: User = Depends(require_teacher_permission("settings_manage")),
 ) -> dict:
     from sqlalchemy import select as _select
+
     from app.models.business import TeacherLevel as _TL
     if db.scalar(_select(_TL.id).where(_TL.name == payload.name.strip())):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="级别名称已存在")
@@ -324,6 +325,7 @@ def delete_teacher_level(
     _: User = Depends(require_teacher_permission("settings_manage")),
 ) -> dict:
     from sqlalchemy import select as _select
+
     from app.models.business import TeacherLevel as _TL
     from app.models.user import User as _U
     row = db.get(_TL, level_id)
@@ -379,6 +381,7 @@ def list_posts(
     _: User = Depends(get_current_user),
 ) -> dict:
     from sqlalchemy import select as _select
+
     from app.models.job_title import JobTitle as _JT
     rows = list(db.scalars(_select(_JT).order_by(_JT.name)).all())
     return {"items": [{"id": str(r.id), "name": r.name, "base_salary": str(r.base_salary or 0)} for r in rows]}
@@ -391,6 +394,7 @@ def create_post(
     _: User = Depends(require_teacher_permission("settings_manage")),
 ) -> dict:
     from sqlalchemy import select as _select
+
     from app.models.job_title import JobTitle as _JT
     name = payload.name.strip()
     if db.scalar(_select(_JT.id).where(_JT.name == name)):
@@ -478,7 +482,8 @@ def auto_compute_payroll(
 
     from app.api.routers.trials import compute_payroll_stats
     from app.models.business import PayrollEntry as _PE
-    from app.models.user import Role as _Role, User as _U
+    from app.models.user import Role as _Role
+    from app.models.user import User as _U
 
     users = list(db.scalars(_select(_U).where(_U.role.in_([_Role.STAFF.value, _Role.TEACHER.value]))).all())
     existing = {
@@ -511,6 +516,7 @@ def list_payroll(
     user: User = Depends(get_current_user),
 ) -> dict:
     from sqlalchemy import select as _select
+
     from app.models.business import PayrollEntry as _PE
     from app.models.permission import check as _perm_check
     from app.models.user import Role as _Role
@@ -559,7 +565,9 @@ def workbench_overview(
 ) -> dict:
     """教务工作台：一线人员薪资总览（基本工资+各项提成），默认当月。"""
     from datetime import datetime as _dt
+
     from sqlalchemy import select as _select
+
     from app.models.business import PayrollEntry as _PE
     from app.models.permission import check as _perm_check
     from app.models.user import Role as _Role

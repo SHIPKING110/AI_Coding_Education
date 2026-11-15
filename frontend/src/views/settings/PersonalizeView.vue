@@ -4,10 +4,11 @@
  * 权限默认给管理员（后端 PUT 仅 admin）。
  */
 import { computed, onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import { getSystemSettings, updateSystemSettings, uploadSettingImage } from '@/api/system'
+import { getSystemSettings, uploadSettingImage } from '@/api/system'
 import { DESKTOP_BGS, LOGIN_THEMES, SIDEBAR_THEMES, UI_THEMES, useThemeStore } from '@/stores/theme'
 import BrandLogo from '@/components/BrandLogo.vue'
 import { LOGO_ICONS } from '@/components/brandLogos'
@@ -39,6 +40,9 @@ const NAV_MODULES = [
   { to: '/reports', label: '报告·总结' },
   { to: '/evaluations', label: '学员评估' },
   { to: '/agents', label: 'Agent 工作台' },
+  { to: '/rag/overview', label: '后台管理' },
+  { to: '/usage', label: '用量与成本' },
+  { to: '/service', label: '教学服务' },
   { to: '/assignments', label: 'AI 习题' },
   { to: '/finance', label: '财务管理' },
 ]
@@ -79,8 +83,8 @@ async function onBgFile(e: Event) {
   try {
     customBg.value = await uploadSettingImage(file)
     desktopBg.value = '__custom__'
-  } catch (err: any) {
-    uploadError.value = err?.response?.data?.detail || '上传失败'
+  } catch (err: unknown) {
+    uploadError.value = apiErrorDetail(err, '上传失败')
   } finally {
     uploading.value = false
     if (bgFileInput.value) bgFileInput.value.value = ''
@@ -94,8 +98,8 @@ async function onLogoFile(e: Event) {
   uploadError.value = ''
   try {
     loginLogo.value = await uploadSettingImage(file)
-  } catch (err: any) {
-    uploadError.value = err?.response?.data?.detail || '上传失败'
+  } catch (err: unknown) {
+    uploadError.value = apiErrorDetail(err, '上传失败')
   } finally {
     uploading.value = false
     if (logoFileInput.value) logoFileInput.value.value = ''
@@ -162,8 +166,8 @@ async function save() {
     resultOk.value = true
     resultMsg.value = '个性化设置已保存，全局生效（含登录页与各端桌面背景）。'
     showResult.value = true
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '保存失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '保存失败')
     resultOk.value = false
     resultMsg.value = error.value
     showResult.value = true
@@ -196,12 +200,15 @@ onMounted(load)
           <button
             v-for="t in LOGIN_THEMES"
             :key="t.key"
-            class="swatch"
+            class="swatch wide"
             :class="{ active: loginTheme === t.key }"
             @click="loginTheme = t.key"
           >
-            <span class="swatch-preview" :class="`login-prev-${t.key}`">登</span>
+            <span class="login-prev" :class="`login-prev-${t.key}`" aria-hidden="true">
+              <i v-for="n in 4" :key="n" />
+            </span>
             <span>{{ t.label }}</span>
+            <small>{{ t.desc }}</small>
           </button>
         </div>
       </section>
@@ -501,17 +508,62 @@ h1 {
   color: #fff;
   font-weight: 700;
 }
-.login-prev-default,
-.login-prev-dark {
-  background: #0f172a;
+/* ---- 登录主题迷你场景预览（74×48） ---- */
+.login-prev {
+  position: relative;
+  width: 74px;
+  height: 48px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  display: block;
 }
-.login-prev-light {
-  background: #eef2f7;
-  color: var(--ink-2);
+.login-prev i {
+  position: absolute;
+  display: block;
 }
-.login-prev-poster {
-  background: #123524;
+/* 积木工坊 */
+.login-prev-default { background: #eef3f2; }
+.login-prev-default i:nth-child(1) { left: 8px; top: 9px; width: 26px; height: 7px; border-radius: 2px; background: #ffab4d; }
+.login-prev-default i:nth-child(2) { left: 14px; top: 20px; width: 32px; height: 7px; border-radius: 2px; background: #7cc4ff; }
+.login-prev-default i:nth-child(3) { left: 10px; top: 31px; width: 24px; height: 7px; border-radius: 2px; background: #c39bff; }
+.login-prev-default i:nth-child(4) {
+  right: 9px; top: 8px; width: 20px; height: 32px; border-radius: 5px;
+  background: #fff; box-shadow: 0 2px 4px rgba(20, 41, 63, 0.18); border: 1px solid #e2e9e7;
 }
+/* 代码夜色 */
+.login-prev-dark { background: #0e1520; }
+.login-prev-dark i:nth-child(1) { inset: 7px 8px; background: #101826; border: 1px solid #22314c; border-radius: 5px; }
+.login-prev-dark i:nth-child(2) { left: 13px; top: 16px; width: 28px; height: 4px; border-radius: 2px; background: #9ece6a; }
+.login-prev-dark i:nth-child(3) { left: 13px; top: 24px; width: 36px; height: 4px; border-radius: 2px; background: #6ea8fe; }
+.login-prev-dark i:nth-child(4) { left: 13px; top: 32px; width: 20px; height: 4px; border-radius: 2px; background: #e8b96b; }
+/* 像素乐园 */
+.login-prev-light { background: linear-gradient(180deg, #a9dcff 0%, #cfeaff 46%, #eaf6ff 100%); }
+.login-prev-light i:nth-child(1) { right: 9px; top: 7px; width: 9px; height: 9px; background: #ffd23f; }
+.login-prev-light i:nth-child(2) { left: 7px; top: 9px; width: 14px; height: 5px; background: #fff; box-shadow: 4px 3px 0 #fff; }
+.login-prev-light i:nth-child(3) {
+  left: 8px; bottom: 12px; width: 14px; height: 8px; background: #a9dd94; border-radius: 3px 3px 0 0;
+  box-shadow: 22px -3px 0 #bfe8ad, 40px 1px 0 #a9dd94;
+}
+.login-prev-light i:nth-child(4) {
+  left: 0; bottom: 0; width: 100%; height: 9px; background: #6bcb5f; border-top: 3px solid #8ee07f;
+  box-shadow: inset 0 -3px 0 #4fae45;
+}
+.login-prev-light::after {
+  content: '';
+  position: absolute;
+  left: 8px; bottom: 11px; width: 7px; height: 2px;
+  background: #ffd84d;
+  box-shadow: 9px 0 0 #9be15d, 18px 0 0 #6ec1ff, 27px 0 0 #c39bff, 36px 0 0 #ff8a7a;
+}
+/* 品牌海报 */
+.login-prev-poster { background: radial-gradient(circle at 25% 30%, #14503a 0%, #0a2b22 72%); }
+.login-prev-poster i:nth-child(1) {
+  left: 8px; top: 12px; width: 26px; height: 5px; border-radius: 2px; background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 9px 0 rgba(255, 255, 255, 0.5), 0 18px 0 rgba(143, 212, 174, 0.6);
+}
+.login-prev-poster i:nth-child(2) { right: 8px; top: 8px; width: 22px; height: 32px; border-radius: 5px; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3); }
+.login-prev-poster i:nth-child(3) { left: 38px; bottom: 5px; width: 13px; height: 13px; border: 1.5px solid rgba(143, 212, 174, 0.5); border-radius: 4px; transform: rotate(8deg); }
 .swatch-preview.custom {
   background: var(--surface-alt);
   color: var(--ink-3);

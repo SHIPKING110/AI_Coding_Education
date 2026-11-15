@@ -104,7 +104,7 @@ def test_run_query_and_scope(monkeypatch):
             ok = agent_sql.run_query(
                 s, teacher, f"select status from schedules where teacher_id = '{teacher.id}'"
             )
-            assert ok.get("row_count") == 1 and ok["rows"][0][0] == "COMPLETED", ok
+            assert ok.get("row_count") == 1 and ok["rows"][0][0] == "completed", ok
             # 写操作被拒
             bad = agent_sql.run_query(s, teacher, "select 1; drop table students")
             assert "错误" in bad

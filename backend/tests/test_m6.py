@@ -9,7 +9,7 @@
 """
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -73,10 +73,10 @@ def _register(client, role, tag):
     username = f"{tag}-{uuid.uuid4().hex[:8]}"
     r = client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
     assert r.status_code == 201, r.text
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
 
@@ -149,7 +149,7 @@ def test_evaluation_crud_publish_and_client_visibility(client, admin_token, teac
     _publish_feedback(client, teacher_token, sched, student_id)
 
     start = date(2026, 8, 1)
-    end = date(2026, 10, 31)
+    end = date.today() + timedelta(days=7)
     ev = client.post(
         "/api/evaluations",
         json={
@@ -214,7 +214,7 @@ def test_evaluation_material_ai_and_ppt(client, admin_token, teacher_token, monk
     )
     _publish_feedback(client, teacher_token, sched, student_id)
     start = date(2026, 8, 1)
-    end = date(2026, 10, 31)
+    end = date.today() + timedelta(days=7)
 
     preview = client.get(
         "/api/evaluations/material/preview",
@@ -289,7 +289,7 @@ def test_evaluation_pdf_export(client, admin_token, teacher_token):
         client, admin_token, teacher_token
     )
     start = date(2026, 8, 1)
-    end = date(2026, 10, 31)
+    end = date.today() + timedelta(days=7)
     ev = client.post(
         "/api/evaluations",
         json={
@@ -373,7 +373,7 @@ def test_class_parent_ppt(client, admin_token, teacher_token, monkeypatch, test_
     assert assigned.status_code == 200, assigned.text
 
     start = date(2026, 8, 1)
-    end = date(2026, 10, 31)
+    end = date.today() + timedelta(days=7)
     fake_content = {
         "title": "评估班 阶段学习汇报家长会",
         "class_summary": "本班整体表现出色",
@@ -709,7 +709,7 @@ def test_class_roster_and_student_teacher_filter(client, admin_token, teacher_to
     assert assigned.status_code == 200
 
     start = date(2026, 8, 1)
-    end = date(2026, 10, 31)
+    end = date.today() + timedelta(days=7)
 
     # 名单：两名学员，均未生成
     r = client.get(

@@ -4,6 +4,73 @@
 
 ## 进行中
 
+- [x] **WS6 上线检查单（2026-11-15，完成）**
+  - [x] 新增 `docs/release-checklist.md`：三道闸（CI/评测/备份）→ 发布窗口（stamp/环境变量/启动观察）→ 发版后 15 分钟验证 → 回滚预案 → 发布记录模板
+  - [x] `DEPLOY.md` 修正三处过时内容：§3 迁移流程（stamp + SCHEMA_ENSURE_MODE）、§5 备份脚本化、§6/§7 checklist 与回滚规则
+  - [x] CI 后端闸修正：全量 ruff 202 问题清零（47 自动化 + 手工清尾），揪出 2 个潜在 bug（finance.py 缺 status import、report.py 重复键）；E501 显式豁免；新增 .gitattributes（LF 归一）；169 例回归通过
+
+- [x] **WS5 性能体检（2026-11-15，完成）**
+  - [x] 前端包体：FinanceView echarts 全量引入改按需（路由 chunk 601KB→34KB）；首屏 index 稳定 188KB；Mermaid 家族已按需
+  - [x] 后端索引盘点：热点表（schedules/feedbacks/assignments/orders）索引已覆盖，现规模无需新增
+  - [ ] 持续项：接口 P95 基线待生产观测接入后定阈值
+
+- [x] **WS4 文档治理（2026-11-15，完成）**
+  - [x] ADR 索引重建：`docs/adr/README.md` 全量 27 条（原来仅 8 条），修复 0015-0018 BOM 标题缺失
+  - [x] API 总览：`scripts/gen_api_overview.py` 从 OpenAPI 生成 `docs/api-overview.md`（403 端点，按前缀分组）
+  - [x] README 文档导航挂链（API 总览 + 加固计划）
+
+- [x] **WS3 测试体系（2026-11-15，完成）**
+  - [x] **前端 Vitest 基建**：Vitest 3 + @vue/test-utils + happy-dom；`npm run test` 接入 CI；首批 4 个 spec 21 例全绿（date/errors/pinyin/toast）
+  - [x] **后端覆盖率基线**：分块跑全量 358 过/1 跳，覆盖率 **65%**；补测 `test_knowledge_crud.py` 9 例（knowledge.py 31%→72%）+ `test_retrieval_config_crud.py` 6 例（retrieval_config.py 46%→89%）
+  - [x] **覆盖率护栏**：CI pytest 加 `--cov-fail-under=63`（只升不降）
+  - [ ] **持续项**：Agent/LLM 低覆盖模块（agent_eval_runner 12% 等）靠 mock 逐步补
+
+- [x] **WS2 前端质量基线（2026-11-15，完成）**
+  - [x] **ESLint 落地**：ESLint 9 flat config（js recommended + typescript-eslint recommended + vue essential）；存量债（any/unused-vars）降级 warn；基线 **0 error / 239 warning**；`npm run lint` 已接入 CI（error 阻断）
+  - [x] **仓库卫生**：移除误提交 tsc 产物（vite.config.js/.d.ts、tsbuildinfo）并补 .gitignore；tsconfig.node.json 产物/缓存改落 node_modules/.tmp（修复 TS6310）；一次性 cjs 脚本移入 frontend/scripts/
+  - [x] **any 收敛第一批**：`src/api/ragAdmin.ts` 全量类型化（12 个接口，评测指标收口 EvalMetricsBag）；any 214 → 194；消费端零改动
+  - [x] **any 收敛第二批（4 视图清零）**：新增 `utils/errors.ts#apiErrorDetail` 统一错误提取 + `listUsersApi` 补 `campus` 类型；`InvitationsPanel`(20→0)/`AssignmentsView`(17→0)/`SubmissionGradingView`(15→0，新增 `JudgeResult` 收口)/`SettingsView`(15→0)；any 194 → **128**（累计 −86），warning 149 总量、error 恒 0
+  - [x] **any 收敛第三批（4 视图清零）**：`FeedbackView`(13→0)/`SummaryView`(10→0)/`StudentsView`(10→0)/`RagEvalView`(8→0)；顺带清理 dead code（isPending/openBatch/teacherNameById 等）；any 128 → **86**（累计 −128），warning 104 总量、error 恒 0
+  - [x] **any/unused 全量清零（第四批扫尾）**：21 文件 catch 统一收敛 + 8 视图类型化 + ~12 处 dead code 清理；修复 2 个被 any 掩盖的潜在 bug；终态 **any 214→0、unused 25→0、0 error 0 warning**；规则已从 warn 提级 **error**（CI 阻断新债）
+  - [x] **WS2 完成**：ESLint 体系 + 类型债清零 + 规则提级；全部验证通过（eslint/vue-tsc/build）
+
+- [ ] **M-B 工程与交付 · WS1（2026-11-15 进行中）**
+  - [x] **Alembic re-baseline（1.1，ADR-0029）**：以 ORM 模型为唯一事实源重建基线 `a00000000000_baseline_full_schema`（`down_revision=None`，`upgrade()` 探测 users 表幂等）；旧 67 个迁移移入 `alembic/legacy_versions/` 仅留档；验收：空库 `upgrade head` 一次成功、对基线库 `--autogenerate` 零 diff、开发库已 stamp 到基线
+  - [x] **容器入口迁移（1.2）**：`backend/entrypoint.sh`（`alembic upgrade head` → exec uvicorn，旧库未 stamp 时告警继续）+ Dockerfile ENTRYPOINT；待 8080 发布窗口验证
+  - [x] **备份与演练手册（1.4）**：`scripts/backup.sh`（pg_dump custom + uploads 归档 + 校验 + 30 天保留）、`scripts/restore_drill.md`（季度演练手册）；待服务器定时任务接入 + 首次演练
+  - [x] **CI 工作流（1.5）**：`.github/workflows/ci.yml`（后端 ruff + 空库迁移重放 + pytest 全量[PG16 service]、前端 build、Docker 构建冒烟）；待推送后首次绿灯验证
+  - [x] **schema_ensure 降级（1.3，代码完成）**：新增 `SCHEMA_ENSURE_MODE`（auto/verify/off，默认 auto 兼容过渡）；verify 模式只读比对（缺表/缺列仅告警、零 DDL）；`tests/test_schema_mode.py` 3 例；8080 完成基线 stamp 后切 verify
+  - [ ] **待办**：8080 生产库 `alembic stamp a00000000000`（发布窗口，先快照 diff 零漂移再 stamp）；备份定时任务接入；CI 首次绿灯
+  - 计划与验收口径见 `docs/plan/architecture-v2-hardening.md`
+
+- [x] **M-A 安全合规基线 · 批次一（2026-11-15，完成）**
+  - [x] **注册收紧（0.1）**：`POST /auth/register` 改为「登录态感知」——未登录默认拒绝（`ALLOW_SELF_REGISTRATION=false`；开启时仅家长/学员自助）；管理员可建任意角色、教务仅家长/学员；空库引导允许创建初始管理员；测试进程内放行（生产镜像不含 pytest）
+  - [x] **密码策略 + 强制改密（0.2）**：新增 `validate_password_strength`（≥8 位、字母+数字、拒绝弱口令/高重复）；`users.must_change_password` 列（迁移 `c0ffee000061` + schema_ensure 兜底）；代建账号不传密码时服务端生成随机临时密码一次性返回（`initial_password`），管理员重置/代设密码后强制改密；`get_current_user` 对强制改密用户仅放行 `/auth/me` 与 `/auth/me/password`（其余 403 `password_change_required`）；前端 App 级 `ForcePasswordDialog` 强制弹窗
+  - [x] **登录/注册/刷新限速（0.3）**：登录 IP 30 次/5 分钟 + 账号 10 次/5 分钟双维度；注册 20 次/小时/IP；刷新 120 次/5 分钟/IP（nginx 层另有 auth_zone 限速兜底）
+  - [x] **Media 签名访问控制（0.4）**：`/uploads/` 静态服务改为 `SignedMediaFiles`（HMAC 签名 + 过期校验，未签名/篡改/过期 401）；API JSON 响应由中间件自动为 `/uploads/...` 补签名（前端零改动）；入库前剥离签名（反馈 media_urls、个性化设置）；新增 `POST /api/media/sign` 供前端运行时拼路径（PPT 下载）换取签名，7 处前端「href 直连」改为 `openMedia()`；修复 Windows 下 Starlette 路径反斜杠导致验签失败
+  - [x] **SECRET_KEY 强校验 + secretbox 版本化（0.5）**：`APP_ENV=prod` 时启动强校验（默认值/低熵/长度<32 拒绝启动）；secretbox 密文升级 `v1:` 前缀 + `SECRET_KEY_PREVIOUS` 旧密钥解密兼容（轮换不丢已加密模型 Key）
+  - [x] **安全响应头（0.7）**：后端中间件（nosniff/SAMEORIGIN/Referrer-Policy/Permissions-Policy）+ nginx 同名头 + `server_tokens off`；HSTS 留注释待 HTTPS
+  - [x] **仓库卫生**：`.gitignore` 由 GBK/UTF-8 混合编码修复为纯 UTF-8（同时解决 `uv run` 重新构建时报 UnicodeDecodeError 的问题）；补充 `backups/`、`*.backup`、`*.dump`、`.env*` 忽略项
+  - [x] **历史清洗工具（0.6，待人工执行）**：新增 `backend/scripts/purge_backups_from_history.ps1`（git-filter-repo 演练/执行/校验/强制推送指引；执行前需协调协作者并轮换凭据）
+  - [x] 验证（批次一）：新增 `tests/test_security_hardening.py` 20 例全绿；修复 6 个存量坏测试（m6 固定日期时间炸弹、rag 假件签名、eval 闸门口径、m3 媒体访问契约）+ 全量测试密码对齐新策略；后端全量回归 352 通过；前端 vue-tsc + vite build 通过
+  - [x] **审计日志（0.8）**：新增 `audit_logs` 表（迁移 `c0ffee000062`）与 `services/audit.py`（敏感字段脱敏、超长截断、写入失败绝不阻断业务）；已挂钩：注册建号/教师建号/改密/重置密码/教师编辑停用、教师权限与职务预设变更、系统设置变更、知识库文档删除；新增管理员查询接口 `GET /api/audit/logs`（动作/操作者/目标/时间筛选 + 分页）
+  - [x] **迁移对齐**：修复 `c0ffee000031` 非幂等问题（探测后建表）；开发库 `alembic stamp c0ffee000060 → upgrade head` 对齐到 062（生产库 052 漂移按 WS1 re-baseline 流程处理，勿直接 stamp）
+  - [x] 验证：新增 `tests/test_audit_log.py`（临时密码→强制改密门禁→改密放行端到端 + 四类审计留痕 + 脱敏断言 + 查询权限 3 例）；后端全量回归通过；前端 vue-tsc + vite build 通过
+  - [ ] **遗留跟进**：0.6 git 历史重写需用户确认后执行（脚本已备）；WS1 Alembic re-baseline（空库重放 + 现网快照双校验）按路线图排期；审计日志前端查看页可随 WS6 一并补
+
+- [x] **8080 部署核对与提交（2026-11-04，完成）**
+  - [x] **端口口径**：8080=docker-compose `web`(nginx)，`/api`、`/uploads` 反代 `backend` 容器（容器内 8000）；与开发 5173→8000 是两套独立环境。改代码后必须 `docker compose up -d --build` 才生效，仅 restart 不会更新源码
+  - [x] **三项已确认在 8080 生效**：后端容器关键文件与本地 sha256 一致；`/api/openapi.json` 含 `parent-embedding-config/index/rebuild`；构建产物含「家长客服专属」「页数对齐」「无法加载 SVG 源码」文案；index.html 引用最新 hash（构建于 11-04 00:03）
+  - [x] **“感觉没变化”排查口径**：优先 Ctrl+F5 强刷；PPT 页数对齐仅对新运行生效不追溯；家长 Embedding 未配置时本就显示“回退系统级”；Skill SVG 仅技能实际产出 .svg 才预览；设置页三项（对话/Embedding/Rerank）是后端直连所填 base_url，与 8080 无关
+  - [x] **提交**：`23ca26c`（三项+快捷术语+RAG 观测口径，44 files）与 `bb77cfc`（testout.txt / adr-0021.md 占位）已推送 `origin/chore/production-deploy`
+  - [x] **遗留**：8080 库 `alembic_version` 仍为 c0ffee000052（053 表已由启动 create_all 建好，不影响；重建镜像前可跑 `alembic upgrade head` 对齐）；仓库遗留 `testout.txt`（UTF-16 pytest 输出）与 0 字节占位 `docs/adr/adr-0021.md` **已于 2026-11-04 清理**
+
+- [x] **家长客服专属 Embedding / PPT 页数对齐 / Skill SVG 预览（2026-11-03，完成）**
+  - [x] **家长客服 Embedding**：新增 `system_parent_embedding_config` 单例表与 CRUD/接口；配置后家长 RAG 使用独立集合 `parent_knowledge__{fingerprint}`，只索引家长可见文档，后台按哈希增量重建父索引；未配置回退系统级。设置页「家长客服共享模型」新增 Embedding 行与索引状态/重建入口
+  - [x] **PPT 页数对齐**：无契约但已出片时按实际页数补写 run 指标并补任务契约；`build-ppt` 也写 run/契约；任务监控分母改为带目标页数的任务/运行并展示交付数，避免一直显示 0
+  - [x] **Skill SVG 预览**：`read_text_file` 白名单补 `.svg/.xml/.html/.htm/.css/.csv`；`read_skill_file`/预览接口在磁盘文件真实存在时允许读取（脚本新生成页面不回写 files 也不再误报）
+  - [x] 迁移：新增 `c0ffee000053_parent_embedding.py`；文档：ADR-0021 + CONTEXT 术语
+  - [x] 验证：`test_ppt_alignment/test_parent_service/test_agent_ops/test_agent_workbench` 全绿；前端 build 通过
 - [x] **报告总结 AI 后台任务 + 年度季度缺 Q1 修复（2026-09-20，完成）**
   - [x] **Q1 丢失根因**：后端区间查询默认 UTC，Q1 起始 `01-01 00:00+08` 存为 `12-31 16:00Z` 早于下界被丢弃；前端又按浏览器本地时区二次过滤年份。修复：crud 统一按北京时间解释 naive 入参（`BEIJING`），季度查询两侧放宽 1 天；前端按北京时间边界+容差过滤并 Q1→Q4 正序；新增 `test_yearly_includes_q1_boundary` 回归用例
   - [x] **AI 生成进度**：后端新增 `POST /{id}/ai-draft-jobs`（202 返回 job_id，后台线程执行）+ `GET /{id}/ai-draft-jobs/{job_id}` 轮询；同步 `ai-draft` 保留给测试/旧客户端。前端 SummaryView 与 ReportsView 提交即关弹窗，顶部任务条显示已用时（约 20-60 秒），完成后自动回填，localStorage 持久化支持刷新回来继续等

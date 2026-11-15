@@ -2,7 +2,7 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -46,6 +46,8 @@ class PermissionUpdate(BaseModel):
     package_off: bool | None = None
     assignment_ai: bool | None = None
     assignment_create: bool | None = None
+    agent_skill_import: bool | None = None
+    agent_doc_upload: bool | None = None
     order_visible: bool | None = None
     settings_manage: bool | None = None
     settings_tab_personalize: bool | None = None
@@ -69,6 +71,28 @@ class PermissionUpdate(BaseModel):
     nav_assignments: bool | None = None
     nav_finance: bool | None = None
     nav_settings: bool | None = None
+    nav_service: bool | None = None
+    rag_overview_view: bool | None = None
+    rag_assets_view: bool | None = None
+    rag_assets_reindex: bool | None = None
+    rag_assets_delete: bool | None = None
+    rag_assets_sweep: bool | None = None
+    rag_routes_view: bool | None = None
+    rag_routes_save: bool | None = None
+    rag_routes_test: bool | None = None
+    rag_eval_view: bool | None = None
+    rag_eval_set_create: bool | None = None
+    rag_eval_case_add: bool | None = None
+    rag_traces_view: bool | None = None
+    rag_runs_view: bool | None = None
+    rag_sessions_view: bool | None = None
+    rag_parent_sessions_view: bool | None = None
+    rag_settings_view: bool | None = None
+    rag_settings_save: bool | None = None
+    usage_view: bool | None = None
+    usage_price_create: bool | None = None
+    usage_budget_save: bool | None = None
+    usage_recon_upsert: bool | None = None
 
 
 def _row_out(teacher: User, row: TeacherPermission | None) -> dict:
@@ -113,7 +137,8 @@ def list_teacher_permissions(
 def update_teacher_permissions(
     teacher_id: uuid.UUID,
     payload: PermissionUpdate,
-    _: User = Depends(require_roles(Role.ADMIN)),
+    request: Request,
+    operator: User = Depends(require_roles(Role.ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     """设置某教师权限（仅传入字段生效）。"""
@@ -123,12 +148,24 @@ def update_teacher_permissions(
     if teacher is None or teacher.role != Role.TEACHER.value:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="教师不存在")
     row = get_or_create(db, teacher.id)
+    before = {k: getattr(row, k, None) for k in PERMISSION_KEYS}
     data = payload.model_dump(exclude_unset=True)
     for k, v in data.items():
         if k in PERMISSION_KEYS:
             setattr(row, k, v)
     db.commit()
     db.refresh(row)
+    from app.services import audit
+
+    after = {k: getattr(row, k, None) for k in PERMISSION_KEYS}
+    changed = audit.diff(before, after)
+    audit.record(
+        db, operator, "permissions.update",
+        target_type="user", target_id=str(teacher.id),
+        before={k: before.get(k) for k in changed},
+        after=changed,
+        request=request,
+    )
     return _row_out(teacher, row)
 
 
@@ -206,7 +243,8 @@ def create_job_title(
 def update_job_title(
     title_id: uuid.UUID,
     payload: JobTitleIn,
-    _: User = Depends(require_roles(Role.ADMIN)),
+    request: Request,
+    operator: User = Depends(require_roles(Role.ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
     """编辑职务预设（改名/改默认权限；不追溯已套用过的教师）。"""
@@ -215,6 +253,7 @@ def update_job_title(
     row = db.get(JobTitle, title_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="职务不存在")
+    before = {"name": row.name, "permissions": row.permissions}
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="职务名称不能为空")
@@ -228,6 +267,14 @@ def update_job_title(
         row.base_salary = _Dec(str(payload.base_salary))
     db.commit()
     db.refresh(row)
+    from app.services import audit
+
+    audit.record(
+        db, operator, "job_title.update",
+        target_type="job_title", target_id=str(title_id),
+        before=before, after={"name": row.name, "permissions": row.permissions},
+        request=request,
+    )
     return _title_out(row)
 
 
@@ -239,6 +286,7 @@ def delete_job_title(
 ) -> None:
     """å 删除职务预设（不影响已使用该职务名称的教师）。"""
     from sqlalchemy import select as _select
+
     from app.models.user import User as _U
     row = db.get(JobTitle, title_id)
     if row is None:

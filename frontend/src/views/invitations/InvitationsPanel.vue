@@ -10,6 +10,7 @@ import { listUsersApi } from '@/api/client'
 import { listSubjects } from '@/api/business'
 import { createSchedule, listSchedules, type ScheduleOut } from '@/api/schedule'
 import { listCampusesApi, listTeachersApi } from '@/api/auth'
+import { apiErrorDetail } from '@/utils/errors'
 import {
   INVITATION_STATUS_LABEL,
   createInvitation,
@@ -245,8 +246,8 @@ async function submitCreate() {
     }
     closeCreate()
     onFilter()
-  } catch (e: any) {
-    createError.value = e?.response?.data?.detail || (editing.value ? '更新邀约失败' : '新建邀约失败')
+  } catch (e: unknown) {
+    createError.value = apiErrorDetail(e, editing.value ? '更新邀约失败' : '新建邀约失败')
   } finally {
     creating.value = false
   }
@@ -288,8 +289,8 @@ async function removeInvite(inv: InvitationOut) {
     const r = await deleteInvitation(inv.id)
     flash(r.cleaned_student ? '已删除邀约记录，体验学员档案已同步清档' : '已删除邀约记录')
     onFilter()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '删除失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '删除失败')
   }
 }
 
@@ -297,8 +298,8 @@ async function makeTrialStudent(inv: InvitationOut) {
   try {
     await createTrialStudent(inv.id)
     load()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '建档失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '建档失败')
   }
 }
 
@@ -315,7 +316,7 @@ function openSched(inv: InvitationOut) {
   showSched.value = true
   listCampusesApi().then((c) => (schedCampuses.value = c)).catch(() => {})
   listTeachersApi({ limit: 500 })
-    .then((p) => (allTeachers.value = p.items.map((t) => ({ id: t.id, name: t.name, campus: (t as any).campus ?? null }))))
+    .then((p) => (allTeachers.value = p.items.map((t) => ({ id: t.id, name: t.name, campus: t.campus ?? null }))))
     .catch(() => {})
 }
 
@@ -362,8 +363,8 @@ async function submitSched() {
     })
     showSched.value = false
     load()
-  } catch (e: any) {
-    schedError.value = e?.response?.data?.detail || '排课失败'
+  } catch (e: unknown) {
+    schedError.value = apiErrorDetail(e, '排课失败')
   } finally {
     scheduling.value = false
   }
@@ -402,8 +403,8 @@ async function submitLink() {
     })
     showSched.value = false
     load()
-  } catch (e: any) {
-    schedError.value = e?.response?.data?.detail || '关联失败'
+  } catch (e: unknown) {
+    schedError.value = apiErrorDetail(e, '关联失败')
   } finally {
     linking.value = false
   }
@@ -423,8 +424,8 @@ async function setStatus(inv: InvitationOut, st: string) {
     }
     await updateInvitation(inv.id, { status: st })
     load()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '状态更新失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '状态更新失败')
   }
 }
 
@@ -449,8 +450,8 @@ async function submitSign() {
     await updateInvitation(signTarget.value.id, { status: 'signed' })
     showSign.value = false
     load()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '报名标记失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '报名标记失败')
   } finally {
     signing.value = false
   }
@@ -466,22 +467,26 @@ onMounted(async () => {
     }
   }
   try {
+    const emptyPage = { items: [], total: 0, limit: 0, offset: 0 }
     const [s, c, u, all, camps] = await Promise.all([
       listSubjects().catch(() => []),
-      listClasses({ limit: 500 }).catch(() => ({ items: [] })),
-      listUsersApi({ role: 'teacher' }).catch(() => ({ items: [] as any[] })),
-      listUsersApi({ limit: 500 }).catch(() => ({ items: [] as any[] })),
+      listClasses({ limit: 500 }).catch(() => emptyPage),
+      listUsersApi({ role: 'teacher' }).catch(() => emptyPage),
+      listUsersApi({ limit: 500 }).catch(() => emptyPage),
       listCampusesApi().catch(() => [] as string[]),
     ])
-    subjects.value = (s as any[]) || []
-    classes.value = ((c as any)?.items || []) as any[]
-    const ulist = ((u as any)?.items || []) as any[]
-    teachers.value = ulist.map((x: any) => ({ id: x.id, name: x.name, campus: x.campus ?? null }))
-    const allUsers = (((all as any)?.items || []) as any[]).filter((x: any) =>
-      ['admin', 'staff', 'teacher'].includes(x.role),
-    )
-    inviters.value = allUsers.map((x: any) => ({ id: x.id, name: x.name, role: x.role, campus: x.campus ?? null }))
-    panelCampuses.value = (camps as string[]) || []
+    subjects.value = s.map((x) => ({ id: x.id, name: x.name }))
+    classes.value = (c.items || []).map((x) => ({
+      id: x.id,
+      name: x.name,
+      subject: x.subject ?? null,
+      teacher_id: x.teacher_id ?? null,
+    }))
+    teachers.value = (u.items || []).map((x) => ({ id: x.id, name: x.name, campus: x.campus ?? null }))
+    inviters.value = (all.items || [])
+      .filter((x) => ['admin', 'staff', 'teacher'].includes(x.role))
+      .map((x) => ({ id: x.id, name: x.name, role: x.role, campus: x.campus ?? null }))
+    panelCampuses.value = camps || []
   } catch {
     /* 基础资料加载失败不阻塞主流程 */
   }

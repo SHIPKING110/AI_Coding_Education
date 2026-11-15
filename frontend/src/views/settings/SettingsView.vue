@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { myPermissions } from '@/api/permissions'
+import { apiErrorDetail } from '@/utils/errors'
+import { getSystemSettings, updateSystemSettings } from '@/api/system'
 import { useAuthStore } from '@/stores/auth'
 import PersonalizeView from '@/views/settings/PersonalizeView.vue'
 import LLMConfigTab from '@/views/settings/LLMConfigTab.vue'
@@ -35,6 +38,7 @@ import {
   type TeacherLevelOut,
 } from '@/api/payroll'
 
+const route = useRoute()
 const activeTab = ref<'personalize' | 'business' | 'llm'>('personalize')
 
 // 设置 tab 可见与操作：教师按 settings_tab_* 键（settings_manage 为总开关）
@@ -48,6 +52,45 @@ const visibleTabs = computed(() => ({
   llm: canSet('settings_tab_model'),
   business: canSet('settings_tab_business'),
 }))
+
+// ---- 家长客服（配额/高风险词表/会话自动关闭阈值，落库单例行） ----
+const parentAnonLimit = ref('3')
+const parentDailyLimit = ref('50')
+const parentRiskWords = ref('')
+const parentQuickReplies = ref('')
+const parentOpenIdleHours = ref('24')
+const parentEscalatedIdleHours = ref('48')
+
+async function loadParentService() {
+  try {
+    const s = await getSystemSettings()
+    parentAnonLimit.value = String(s.parent_anon_daily_limit ?? 3)
+    parentDailyLimit.value = String(s.parent_daily_limit ?? 50)
+    parentRiskWords.value = (s.parent_risk_words ?? []).join('\n')
+    parentQuickReplies.value = (s.parent_quick_replies ?? []).join('\n')
+    parentOpenIdleHours.value = String(s.parent_open_idle_hours ?? 24)
+    parentEscalatedIdleHours.value = String(s.parent_escalated_idle_hours ?? 48)
+  } catch {
+    // 旧库无列时保持默认，不打断业务设置加载
+  }
+}
+
+async function saveParentService() {
+  try {
+    const toList = (t: string): string[] => t.split('\n').map((s) => s.trim()).filter(Boolean)
+    await updateSystemSettings({
+      parent_anon_daily_limit: Math.max(0, Math.min(1000, Number(parentAnonLimit.value) || 0)),
+      parent_daily_limit: Math.max(0, Math.min(1000, Number(parentDailyLimit.value) || 0)),
+      parent_risk_words: toList(parentRiskWords.value),
+      parent_quick_replies: toList(parentQuickReplies.value),
+      parent_open_idle_hours: Math.max(1, Math.min(720, Number(parentOpenIdleHours.value) || 24)),
+      parent_escalated_idle_hours: Math.max(1, Math.min(720, Number(parentEscalatedIdleHours.value) || 48)),
+    })
+    flash('家长客服设置已保存')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
+  }
+}
 
 // ---- 校区 ----
 const campuses = ref<CampusOut[]>([])
@@ -115,6 +158,7 @@ async function loadAll() {
     levels.value = lv
     posts.value = ps
     rules.value = rl
+    await loadParentService()
   } catch {
     error.value = '加载业务设置失败'
   }
@@ -128,8 +172,8 @@ async function addCampus() {
     newCampus.value = ''
     campuses.value = await listCampuses(true)
     flash('校区已新增')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '新增失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '新增失败'))
   }
 }
 
@@ -145,8 +189,8 @@ async function saveCampus() {
     editingCampus.value = null
     campuses.value = await listCampuses(true)
     flash('校区已更新')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
   }
 }
 
@@ -154,8 +198,8 @@ async function toggleCampus(c: CampusOut) {
   try {
     await updateCampus(c.id, { active: !c.active })
     campuses.value = await listCampuses(true)
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '操作失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '操作失败'))
   }
 }
 
@@ -167,8 +211,8 @@ async function moveCampus(i: number, delta: number) {
   try {
     campuses.value = await reorderCampuses(ids)
     flash('校区顺序已更新')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '排序失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '排序失败'))
   }
 }
 
@@ -184,8 +228,8 @@ async function addSubject() {
     newSubject.value = { name: '', per_session: '2', commission_rate: '' }
     subjects.value = await listSubjects(true)
     flash('科目已新增')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '新增失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '新增失败'))
   }
 }
 
@@ -211,8 +255,8 @@ async function saveSubject() {
     editingSubject.value = null
     subjects.value = await listSubjects(true)
     flash('科目已更新')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
   }
 }
 
@@ -220,8 +264,8 @@ async function toggleSubject(s: SubjectOut) {
   try {
     await updateSubject(s.id, { active: !s.active })
     subjects.value = await listSubjects(true)
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '操作失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '操作失败'))
   }
 }
 
@@ -236,9 +280,9 @@ async function saveFinance() {
     overdraftMax.value = out.overdraft_max ?? '10'
     financeNote.value = out.note || ''
     flash('财务设置已保存（新消耗按此比例记账，历史账本不变）')
-  } catch (e: any) {
+  } catch (e: unknown) {
     saveDialogOk.value = false
-    saveDialogMsg.value = e?.response?.data?.detail || '保存失败'
+    saveDialogMsg.value = apiErrorDetail(e, '保存失败')
     showSaveDialog.value = true
     return
   }
@@ -259,8 +303,8 @@ async function addLevel() {
     newLevel.value = { name: '', ratioPct: '10' }
     levels.value = await listTeacherLevels(true)
     flash('教师级别已新增')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '新增失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '新增失败'))
   }
 }
 
@@ -279,8 +323,8 @@ async function saveLevel() {
     editingLevel.value = null
     levels.value = await listTeacherLevels(true)
     flash('教师级别已更新（新增账本按新比例，历史账本不变）')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
   }
 }
 
@@ -290,8 +334,8 @@ async function removeLevel(l: TeacherLevelOut) {
     await deleteTeacherLevel(l.id)
     levels.value = await listTeacherLevels(true)
     flash('级别已删除')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '删除失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '删除失败'))
   }
 }
 
@@ -303,8 +347,8 @@ async function addPost() {
     newPost.value = { name: '', baseSalary: '' }
     posts.value = await listPosts()
     flash(out.hint || '职务已新增（权限默认全关，请到权限管理授权）')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '新增失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '新增失败'))
   }
 }
 
@@ -323,8 +367,8 @@ async function savePost() {
     editingPost.value = null
     posts.value = await listPosts()
     flash('职务工资已更新（与权限管理职务预设同源）')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
   }
 }
 
@@ -334,9 +378,9 @@ async function saveRules() {
       rules.value.map((r) => ({ key: r.key, label: r.label, amount: r.amount, unit: r.unit })),
     )
     flash('提成规则已保存（薪资核算按新单价）')
-  } catch (e: any) {
+  } catch (e: unknown) {
     saveDialogOk.value = false
-    saveDialogMsg.value = e?.response?.data?.detail || '保存失败'
+    saveDialogMsg.value = apiErrorDetail(e, '保存失败')
     showSaveDialog.value = true
     return
   }
@@ -353,7 +397,10 @@ onMounted(async () => {
       myPerms.value = {}
     }
     const first = (['personalize', 'llm', 'business'] as const).find((t) => visibleTabs.value[t])
-    if (first) activeTab.value = first
+    if (route.query.tab === 'llm' && visibleTabs.value.llm) activeTab.value = 'llm'
+    else if (first) activeTab.value = first
+  } else if (route.query.tab === 'llm') {
+    activeTab.value = 'llm'
   }
   await loadAll()
 })
@@ -389,6 +436,35 @@ onMounted(async () => {
     <LLMConfigTab v-else-if="activeTab === 'llm' && visibleTabs.llm" />
 
     <div v-else-if="visibleTabs.business" class="biz">
+      <!-- 家长客服 -->
+      <section class="card">
+        <h2>家长客服</h2>
+        <p class="muted">AI 客服配额只统计「AI 生成的回答」：查课时/课表等工具查询、寒暄与转人工不扣次数。匿名与「无课时/未绑定学员」使用体验额度；在读且有课时使用家长额度（0=不限）。所有身份另有突发频控，高风险词命中强制转人工；快捷回复供教师端一键插入；闲置超时自动结束会话。</p>
+        <div class="add-row">
+          <label class="field-inline">匿名/无课时 AI 日限额
+            <input v-model="parentAnonLimit" type="number" min="0" max="1000" step="1" class="inline-input num" />
+          </label>
+          <label class="field-inline">在读家长 AI 日限额
+            <input v-model="parentDailyLimit" type="number" min="0" max="1000" step="1" class="inline-input num" />
+          </label>
+          <label class="field-inline">普通会话闲置(h)
+            <input v-model="parentOpenIdleHours" type="number" min="1" max="720" step="1" class="inline-input num" />
+          </label>
+          <label class="field-inline">待接待闲置(h)
+            <input v-model="parentEscalatedIdleHours" type="number" min="1" max="720" step="1" class="inline-input num" />
+          </label>
+          <button class="btn primary sm" @click="saveParentService">保存家长客服设置</button>
+        </div>
+        <div class="add-row">
+          <label class="field-inline grow">高风险词（每行一个，命中转人工）
+            <textarea v-model="parentRiskWords" rows="4" class="inline-input grow" placeholder="退费&#10;安全&#10;投诉" />
+          </label>
+          <label class="field-inline grow">快捷回复（每行一条）
+            <textarea v-model="parentQuickReplies" rows="4" class="inline-input grow" placeholder="您好，已收到您的问题…&#10;退费流程说明…" />
+          </label>
+        </div>
+      </section>
+
       <!-- 校区 -->
       <section class="card">
         <h2>校区名称</h2>

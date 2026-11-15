@@ -1,0 +1,54 @@
+# RAG 评测数据导入格式说明
+
+## 适用范围
+本文件描述「后台管理 → 评测中心」中外部评测用例的批量导入格式。导入前请自行完成数据清洗与脱敏，系统不对导入内容做语义校验，仅按本格式做结构校验。
+
+## 合规与安全要求（导入前必读）
+1. **脱敏**：用例中的 `query`、`gt_answer`、`notes` 不得包含真实学员姓名、手机号、身份证号、家长联系方式、订单号、教师隐私等；请用占位符（如「学员A」「教师B」）或哈希化。
+2. **版权**：`relevant` 对应的文档标题必须是本系统内已接入的知识资产，不得导入第三方受版权保护的全文作为标准答案。
+3. **最小必要**：仅导入评测所需的字段，不要把业务库的原始记录整表导入。
+4. **审计**：每次导入会写入审计日志（操作者、数量、时间），请保留清洗脚本与原始数据以便追溯。
+
+## 支持格式
+- **JSONL**（推荐）：每行一个 JSON 对象。
+- **JSON 数组**：`[ {...}, {...} ]`。
+- **CSV**：首行表头，字段分隔符 `,`，文本含逗号请用双引号包裹；多值字段用 `;` 分隔。
+
+## 字段定义
+
+| 字段 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| `query` | 是 | string | 用户问题（评测输入）。 |
+| `relevant` | 否 | string[] / string | 应命中/相关文档标题（数组或用 `;` 分隔的字符串）。与知识资产中的文档标题一致，用于计算 hit@k / MRR / recall。 |
+| `answerability` | 否 | enum | `answerable` / `unanswerable` / `unlabeled`。显式声明可答性；留空时按 `relevant` 与备注文本推断。明确不可答的问题请标 `unanswerable`，会单独统计拒答率。 |
+| `split` | 否 | enum | `tuning`（调参集）/ `regression`（默认）/ `frozen`（冻结验收集，不参与调参，单独汇总）。 |
+| `business_criticality` | 否 | enum | `critical` / `important` / `normal`（默认）。关键用例单独汇总，验收时不看被平均值稀释的结果。 |
+| `gt_answer` | 否 | string | 标准答案（可选，用于答案质量评测）。 |
+| `gt_keywords` | 否 | string[] / string | 标准答案关键词（数组或 `;` 分隔），用于答案关键词命中率。 |
+| `query_type` | 否 | enum | `fact`（事实查询，默认） / `compare`（对比） / `howto`（操作指南） / `policy`（政策） |
+| `difficulty` | 否 | enum | `easy` / `normal`（默认） / `hard` |
+| `notes` | 否 | string | 备注（评测说明、来源、预期 Bad Case 类型等）。 |
+| `source` | 否 | string | 来源标识，默认 `import`；建议填清洗脚本名/批次号。 |
+
+> 说明：用户提到的「应命中文档」即本表的 `relevant`（相关文档标题）；「用户问题」即 `query`；「标准答案」即 `gt_answer`；「备注」即 `notes`；「分片生成」为系统内自动生成候选用例的辅助能力（`/generate`），不是导入字段。
+
+## 示例（JSONL）
+```jsonl
+{"query":"如何办理退费？","relevant":["退费政策文档"],"gt_answer":"请到前台提交退费申请，3-5个工作日到账。","gt_keywords":["前台","退费申请","3-5个工作日"],"query_type":"policy","difficulty":"normal","notes":"政策类标准用例","source":"batch-2026-06"}
+{"query":"Python 课每次消耗几课时？","relevant":["课时包说明"],"query_type":"fact","difficulty":"easy"}
+```
+
+## 示例（CSV）
+```csv
+query,relevant,gt_answer,gt_keywords,query_type,difficulty,notes,source
+"如何办理退费？","退费政策文档","请到前台提交退费申请","前台;退费申请;3-5个工作日","policy","normal","政策类标准用例","batch-2026-06"
+```
+
+## 校验规则
+1. `query` 必须非空；空行跳过。
+2. `relevant` 中的文档标题若在知识库中不存在，不会报错但评测时该用例的 hit@k 恒为 0（请先确认标题一致）。
+3. 单次导入上限 500 条；超出请分批。
+4. 导入不会覆盖已有用例，仅追加。
+
+## 评测成本
+评测运行时产生的 LLM 调用（生成回答、裁判打分）会归因到「用量与成本」模块 `rag_eval`，可在用量与成本仪表盘按模块筛选查看。

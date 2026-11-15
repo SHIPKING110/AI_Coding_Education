@@ -12,6 +12,7 @@ import {
   exportEvaluationPdf,
 } from '@/api/evaluation'
 import { cleanListishText } from '@/utils/text'
+import { openMedia } from '@/api/media'
 import { fmtCnDateKey, fmtCnPeriod } from '@/utils/date'
 
 export interface EvaluationLike {
@@ -194,10 +195,6 @@ const publishedText = computed(() => {
   if (!iso) return ''
   return fmtCnDateKey(iso)
 })
-
-function pptHref(): string {
-  return `/uploads/${ev.value?.ppt_url ?? ''}`
-}
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') emit('close')
@@ -403,8 +400,8 @@ onBeforeUnmount(() => {
               <a
                 v-if="showPpt && ev.ppt_url"
                 class="ppt-btn"
-                :href="pptHref()"
-                target="_blank"
+                href="#"
+                @click.prevent="openMedia(`/uploads/${ev.ppt_url}`)"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
                 下载家长会 PPT

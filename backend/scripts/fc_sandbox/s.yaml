@@ -1,0 +1,24 @@
+edition: 3.0.0
+name: skill-sandbox-app
+access: default
+
+services:
+  skill-sandbox:
+    component: fc3
+    props:
+      region: cn-hangzhou
+      functionName: skill-sandbox
+      runtime: python3.10
+      handler: index.handler
+      memorySize: 512
+      timeout: 60
+      code: ./
+      environmentVariables:
+        SANDBOX_TOKEN: ${env(SANDBOX_TOKEN)}
+      triggers:
+        - triggerName: http
+          triggerType: http
+          triggerConfig:
+            authType: anonymous
+            methods:
+              - POST

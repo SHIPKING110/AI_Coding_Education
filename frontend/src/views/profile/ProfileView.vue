@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import { changeMyPasswordApi, updateMeApi } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
@@ -64,8 +65,8 @@ async function saveInfo() {
     if (['parent', 'student'].includes(updated.role)) {
       client.loadMe(true).catch(() => {})
     }
-  } catch (e: any) {
-    saveErr.value = e?.response?.data?.detail || '保存失败，请重试'
+  } catch (e: unknown) {
+    saveErr.value = apiErrorDetail(e, '保存失败，请重试')
   } finally {
     saving.value = false
   }
@@ -96,8 +97,8 @@ async function changePassword() {
     await changeMyPasswordApi(oldPw, next)
     pwMsg.value = '密码修改成功 ✓ 下次登录请使用新密码'
     pwForm.value = { old: '', next: '', confirm: '' }
-  } catch (e: any) {
-    pwErr.value = e?.response?.data?.detail || '修改失败，请重试'
+  } catch (e: unknown) {
+    pwErr.value = apiErrorDetail(e, '修改失败，请重试')
   } finally {
     pwSaving.value = false
   }

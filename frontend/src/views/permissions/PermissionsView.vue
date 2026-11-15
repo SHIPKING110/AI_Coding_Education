@@ -6,9 +6,11 @@
  * 硬性规则不受开关影响：教师只能操作本人所带班级；只有空班级才能删除。
  */
 import { computed, onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import { useThemeStore } from '@/stores/theme'
 import { listCampusesApi } from '@/api/auth'
 import {
   applyTitleToTeacher,
@@ -52,6 +54,38 @@ const keyGroups = computed(() => {
     g.items.push({ key: k.key, label })
   }
   return groups
+})
+
+// 模块名 → 侧边栏路由，用于让权限卡片顺序与「模块上下排序 / 侧边栏」一致
+const MODULE_TO: Record<string, string> = {
+  学员管理: '/students',
+  招生邀约: '/invitations',
+  班级管理: '/classes',
+  教师管理: '/teachers',
+  设置: '/settings',
+  排课与考勤: '/schedules',
+  课时包: '/packages',
+  课后反馈: '/feedbacks',
+  '报告·总结': '/reports',
+  学员评估: '/evaluations',
+  Agent工作台: '/agents',
+  后台管理: '/rag/overview',
+  用量与成本: '/usage',
+  教学服务: '/service',
+  AI习题: '/assignments',
+  财务管理: '/finance',
+}
+const theme = useThemeStore()
+const navOrderMap = computed(() => new Map(theme.navOrder.map((t, i) => [t, i])))
+// 按导航顺序排序分组；未收录的按 5000，导航可见组永远沉底
+const orderedGroups = computed(() => {
+  const rank = (module: string): number => {
+    if (module === '导航可见') return 9999
+    const to = MODULE_TO[module]
+    if (to && navOrderMap.value.has(to)) return navOrderMap.value.get(to)!
+    return 5000
+  }
+  return [...keyGroups.value].sort((a, b) => rank(a.module) - rank(b.module))
 })
 
 const filtered = computed(() => {
@@ -139,8 +173,8 @@ async function quickApply() {
     const i = rows.value.findIndex((r) => r.teacher_id === updated.teacher_id)
     if (i >= 0) rows.value[i] = updated
     quickMsg.value = `已应用「${quickTitle.value}」`
-  } catch (e: any) {
-    quickMsg.value = e?.response?.data?.detail || '应用失败'
+  } catch (e: unknown) {
+    quickMsg.value = apiErrorDetail(e, '应用失败')
   }
 }
 
@@ -195,8 +229,8 @@ async function saveTitle() {
     syncMsg.value = ''
     if (saved && affected > 0) syncTarget.value = saved
     else if (saved) syncMsg.value = `职务「${savedName}」已保存，暂无在职教师使用`
-  } catch (e: any) {
-    titleError.value = e?.response?.data?.detail || '保存职务失败'
+  } catch (e: unknown) {
+    titleError.value = apiErrorDetail(e, '保存职务失败')
   } finally {
     titleSaving.value = false
   }
@@ -209,8 +243,8 @@ async function confirmDelTitle() {
     await deleteJobTitle(delTitle.value.id)
     delTitle.value = null
     titles.value = await listJobTitles()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '删除职务失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '删除职务失败')
   }
 }
 
@@ -227,8 +261,8 @@ async function confirmSync() {
     syncMsg.value = `「${res.title}」已同步到 ${res.synced} 名教师`
     syncTarget.value = null
     rows.value = await listTeacherPermissions()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '同步失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '同步失败')
     syncTarget.value = null
   }
 }
@@ -273,12 +307,15 @@ async function applyTitle() {
     const i = rows.value.findIndex((r) => r.teacher_id === updated.teacher_id)
     if (i >= 0) rows.value[i] = updated
     applyMsg.value = `已将「${applyTitleName.value}」应用到「${updated.teacher_name}」`
-  } catch (e: any) {
-    applyMsg.value = e?.response?.data?.detail || '应用失败'
+  } catch (e: unknown) {
+    applyMsg.value = apiErrorDetail(e, '应用失败')
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  if (!theme.loaded) void theme.load()
+  void load()
+})
 </script>
 
 <template>
@@ -358,7 +395,7 @@ onMounted(load)
             </div>
           </div>
           <p v-if="quickMsg" class="muted">{{ quickMsg }}</p>
-          <div v-for="g in keyGroups" :key="g.module" class="module-card">
+          <div v-for="g in orderedGroups" :key="g.module" class="module-card">
             <div class="module-title">
               <span class="module-dot" />
               {{ g.module }}

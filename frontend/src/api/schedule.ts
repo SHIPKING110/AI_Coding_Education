@@ -11,6 +11,7 @@ export interface ScheduleOut {
   end_time: string
   status: string
   is_trial: boolean
+  readonly?: boolean
   created_at: string
 }
 

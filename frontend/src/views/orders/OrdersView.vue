@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
+import { apiErrorDetail, apiErrorStatus } from '@/utils/errors'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -77,12 +78,11 @@ async function onConfirm() {
     }
     setTimeout(() => (msg.value = ''), 3000)
     await load()
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '操作失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '操作失败'))
   }
 }
 
-const hasFilters = computed(() => Boolean(keyword.value || campus.value || packageId.value || dateFrom.value || dateTo.value || statusFilter.value))
 
 function fmt(iso: string | null): string {
   if (!iso) return ''
@@ -107,11 +107,11 @@ async function load() {
     })
     items.value = data.items
     total.value = data.total
-  } catch (e: any) {
-    if (e?.response?.status === 403) {
+  } catch (e: unknown) {
+    if (apiErrorStatus(e) === 403) {
       error.value = '你没有权限查看订单管理'
     } else {
-      error.value = e?.response?.data?.detail || '加载订单失败'
+      error.value = apiErrorDetail(e, '加载订单失败')
     }
   } finally {
     loading.value = false

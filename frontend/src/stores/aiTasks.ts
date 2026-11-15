@@ -106,7 +106,7 @@ export const useAiTasksStore = defineStore('ai-tasks', {
         if (!t) continue
         this.register(t as AssignmentAiTaskOut | EvaluationAiDraftOut, prev.taskKind)
         if (t.status === 'pending' || t.status === 'running') anyRunning = true
-        else if (t.status === 'done') this.latestDone = { ...(t as any), taskKind: prev.taskKind }
+        else if (t.status === 'done') this.latestDone = { ...t, taskKind: prev.taskKind }
       }
       if (!anyRunning) this.stopPolling()
     },

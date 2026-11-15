@@ -1,3 +1,4 @@
+import json
 from asyncio import sleep
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -5,11 +6,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, Response
 
 from app.api import api_router
-from app.core.config import get_settings
+from app.core.config import get_settings, validate_startup_security
 from app.services.llm import LLMConfigError
 
 settings = get_settings()
@@ -32,19 +32,99 @@ async def _order_expiry_sweeper() -> None:
             continue
 
 
+async def _knowledge_sync_sweeper() -> None:
+    """后台增量同步：定期检测知识库源文件新增/变更，自动触发重索引流水线。
+
+    未变更的文档按内容哈希跳过（省 Token）；源文件丢失则清理向量防僵尸污染。
+    间隔由 KNOWLEDGE_SYNC_INTERVAL 控制（秒，<=0 关闭）。
+    """
+    import asyncio
+    from asyncio import sleep as _sleep
+
+    from app.services import rag as rag_svc
+
+    interval = int(getattr(settings, "KNOWLEDGE_SYNC_INTERVAL", 0) or 0)
+    if interval <= 0:
+        return
+    # 启动后先等一轮，避开启动高峰
+    await _sleep(min(interval, 120))
+    while True:
+        try:
+            await asyncio.to_thread(rag_svc.sync_changed_documents)
+        except Exception:
+            pass
+        try:
+            await _sleep(interval)
+        except Exception:
+            continue
+
+
+async def _usage_meter_sweeper() -> None:
+    """后台：每 6 小时检查月度预算；每天一次清理过期明细（先月度汇总再删，永久保留汇总）。"""
+    import asyncio
+    from datetime import datetime
+
+    from app.services import usage_meter
+
+    await sleep(90)  # 避开启动高峰
+    last_cleanup_day = ""
+    while True:
+        try:
+            await asyncio.to_thread(usage_meter.check_month_budget)
+        except Exception:
+            pass
+        today = datetime.now().date().isoformat()
+        if today != last_cleanup_day:
+            try:
+                await asyncio.to_thread(usage_meter.cleanup_expired)
+                last_cleanup_day = today
+            except Exception:
+                pass
+        try:
+            await sleep(6 * 3600)
+        except Exception:
+            continue
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     import asyncio
+    import logging
 
     from app.core.database import engine
-    from app.core.schema_ensure import ensure_business_schema
+    from app.core.schema_ensure import ensure_business_schema, verify_business_schema
 
-    ensure_business_schema(engine)
+    # 生产环境安全配置强校验：密钥等不合规直接拒绝启动（dev/test 仅告警）
+    validate_startup_security(settings)
+    _schema_mode = (settings.SCHEMA_ENSURE_MODE or "auto").strip().lower()
+    if _schema_mode == "auto":
+        ensure_business_schema(engine)
+    elif _schema_mode == "verify":
+        _issues = verify_business_schema(engine)
+        if _issues:
+            logging.getLogger("app.startup").warning(
+                "schema 校验发现 %d 处差异（请执行 alembic upgrade head）：%s",
+                len(_issues),
+                "；".join(_issues[:10]),
+            )
+    # Skill 适配脚本版本对齐（管理员/教师同一套自愈 + 出片质量，避免物化副本旧版本漂移）
+    try:
+        import asyncio as _aio
+
+        from app.services import skill_bundle as _bundle
+
+        await _aio.to_thread(_bundle.sync_ppt_adapter)
+    except Exception:
+        pass
     task = asyncio.create_task(_order_expiry_sweeper())
+    sync_task = asyncio.create_task(_knowledge_sync_sweeper())
+    usage_task = asyncio.create_task(_usage_meter_sweeper())
     try:
         yield
     finally:
         task.cancel()
+        sync_task.cancel()
+        usage_task.cancel()
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -67,6 +147,62 @@ app.add_middleware(
 app.include_router(api_router, prefix=settings.API_PREFIX)
 
 
+def _security_headers(response):
+    """基础安全响应头（nginx 侧另有同类配置；后端直连/开发环境同样生效）。"""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+    )
+    return response
+
+
+@app.middleware("http")
+async def _security_headers_mw(request: Request, call_next):
+    return _security_headers(await call_next(request))
+
+
+@app.middleware("http")
+async def _sign_media_urls_mw(request: Request, call_next):
+    """API JSON 响应中的 /uploads/... 统一补短期签名，前端与历史数据零改动。"""
+    response = await call_next(request)
+    ctype = response.headers.get("content-type", "")
+    if not (
+        request.url.path.startswith(settings.API_PREFIX)
+        and ctype.startswith("application/json")
+        and response.status_code < 400
+    ):
+        return response
+    from app.core.media import sign_urls_in_json
+
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers={
+                k: v
+                for k, v in response.headers.items()
+                if k.lower() not in ("content-length", "content-type")
+            },
+            media_type=ctype,
+        )
+    headers = {
+        k: v
+        for k, v in response.headers.items()
+        if k.lower() not in ("content-length", "content-type")
+    }
+    return JSONResponse(
+        content=sign_urls_in_json(payload),
+        status_code=response.status_code,
+        headers=headers,
+    )
+
+
+
 @app.middleware("http")
 async def _no_store_api_cache(request: Request, call_next):
     """管理端高频变更的基础资料（校区/科目等）禁止浏览器启发式缓存，避免排序调整后下拉仍显示旧顺序。"""
@@ -76,9 +212,13 @@ async def _no_store_api_cache(request: Request, call_next):
     return response
 
 # 素材静态服务（反馈照片/视频等，本地存储 OQ-04 决策）
+# 安全：所有文件必须携带短期签名（响应中间件自动为 API 返回的 /uploads/ URL 补签名），
+# 匿名直链 / 过期链接一律 401，杜绝学员照片、家长聊天截图被外链传播。
 _upload_dir = Path(settings.UPLOAD_DIR)
 _upload_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=str(_upload_dir)), name="uploads")
+from app.core.media import SignedMediaFiles  # noqa: E402  (依赖 settings 初始化)
+
+app.mount("/uploads", SignedMediaFiles(directory=str(_upload_dir)), name="uploads")
 
 
 @app.get(f"{settings.API_PREFIX}/health", tags=["system"])

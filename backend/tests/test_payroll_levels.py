@@ -45,10 +45,10 @@ def _register(client, role, tag):
     username = f"{tag}-{role}"
     r = client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
     assert r.status_code == 201, r.text
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     assert login.status_code == 200, login.text
     return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
@@ -73,7 +73,7 @@ def test_level_crud_and_guards(client, admin):
     # 新建教师挂级别 + 个人工资
     r = client.post(
         "/api/auth/teachers",
-        json={"username": "lv-teacher", "password": "123456", "name": "级别教师",
+        json={"username": "lv-teacher", "password": "12345678a", "name": "级别教师",
               "teacher_level_id": lid, "base_salary": "6000"},
         headers=admin,
     )
@@ -84,7 +84,6 @@ def test_level_crud_and_guards(client, admin):
     r = client.delete(f"/api/business/teacher-levels/{lid}", headers=admin)
     assert r.status_code == 400
     # 去掉教师级别后可删
-    tid = r.json() if False else None
     teachers = client.get("/api/auth/teachers", headers=admin).json()["items"]
     t = next(x for x in teachers if x["username"] == "lv-teacher")
     r = client.patch(f"/api/auth/teachers/{t['id']}", json={"teacher_level_id": ""}, headers=admin)
@@ -106,7 +105,7 @@ def test_posts_sync_and_payroll(client, admin):
                    json={"name": "教务专员X", "permissions": {}, "base_salary": "4800"}, headers=admin)
     assert r.status_code == 200 and r.json()["base_salary"] == "4800.00"
     # 在用职务不可删
-    r = client.post("/api/auth/teachers", json={"username": "post-teacher", "password": "123456",
+    r = client.post("/api/auth/teachers", json={"username": "post-teacher", "password": "12345678a",
                                                  "name": "职务教师", "title": "教务专员X"}, headers=admin)
     assert r.status_code == 201, r.text
     r = client.delete(f"/api/permissions/job-titles/{jt['id']}", headers=admin)

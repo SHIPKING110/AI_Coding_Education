@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
+from app.core.ratelimit import enforce
 from app.core.secretbox import decrypt_secret
 from app.crud import llm_config as crud
 from app.models.llm_config import LLM_MODULES
@@ -137,8 +138,16 @@ def test_config(
     """连通性检查：用该配置调一次最小对话，返回延迟；失败返回可读原因。"""
     from app.crud import llm_config as _crud
     from app.services import llm as llm_svc
+    from app.services import llm_context
 
     _require_role(user)
+    # 频率限制：检查会真实调用模型产生费用，按「用户 + 配置」做冷却，防止误连点/刷接口
+    enforce(
+        f"llm_test:{user.id}:{config_id}",
+        limit=1,
+        window=5.0,
+        message="检查过于频繁",
+    )
     cfg = _owned(db, config_id, user)
     resolved = _crud.ResolvedLLM(
         base_url=cfg.base_url,
@@ -147,10 +156,15 @@ def test_config(
         embed_model=cfg.embed_model,
         config_id=cfg.id,
         config_name=cfg.name,
+        owner_id=user.id,
+        module="config_test",
+        is_platform=False,
     )
     started = time.time()
     try:
-        reply = llm_svc.ping(resolved)
+        # 压入上下文：让记账（provider_host/model/归属）取本次被检查的配置，价格才能精确命中
+        with llm_context.use_llm(resolved):
+            reply = llm_svc.ping(resolved)
     except Exception as exc:
         return {"ok": False, "error": llm_svc.friendly_llm_error(exc)}
     return {"ok": True, "latency_ms": int((time.time() - started) * 1000), "reply": reply[:200]}

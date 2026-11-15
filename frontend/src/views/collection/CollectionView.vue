@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import PaginationBar from '@/components/PaginationBar.vue'
 import {
@@ -117,8 +118,8 @@ async function submitRenew() {
     await renewStudent(renewStudent_.value.id, payload)
     showRenew.value = false
     await load()
-  } catch (e: any) {
-    renewError.value = e?.response?.data?.detail || '续费入账失败'
+  } catch (e: unknown) {
+    renewError.value = apiErrorDetail(e, '续费入账失败')
   } finally {
     renewSubmitting.value = false
   }

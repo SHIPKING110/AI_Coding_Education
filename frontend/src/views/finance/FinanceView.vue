@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 const SalaryPanel = defineAsyncComponent(() => import('./SalaryPanel.vue'))
-import * as echarts from 'echarts'
+import * as echarts from 'echarts/core'
+import { BarChart, LineChart, type BarSeriesOption, type LineSeriesOption } from 'echarts/charts'
+import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+
+echarts.use([LineChart, BarChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
 import PageHead from '@/components/PageHead.vue'
 import OrdersView from '@/views/orders/OrdersView.vue'
@@ -47,13 +52,36 @@ const campus = ref('')
 const dateFrom = ref('')
 const dateTo = ref('')
 
-function defaultRange(days = 13) {
+function defaultRange(_days = 13) {
   const to = new Date()
-  const from = new Date()
-  from.setDate(from.getDate() - days)
-  const fmt = (d: Date) => d.toISOString().slice(0, 10)
+  const from = new Date(to.getFullYear(), to.getMonth(), 1)
+  const fmt = (d: Date) => {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
   dateFrom.value = fmt(from)
   dateTo.value = fmt(to)
+}
+
+function last30Range() {
+  const to = new Date()
+  const from = new Date()
+  from.setDate(from.getDate() - 29)
+  const fmt = (d: Date) => {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day}`
+  }
+  dateFrom.value = fmt(from)
+  dateTo.value = fmt(to)
+}
+
+function clearRange() {
+  dateFrom.value = ''
+  dateTo.value = ''
 }
 
 // ---- 订单管理 ----
@@ -116,7 +144,7 @@ async function renderTrend() {
     trendChart = echarts.init(trendEl.value)
   }
   const labels = orderStats.value.map((b) => b.label.slice(5))
-  const series: echarts.SeriesOption[] = []
+  const series: (BarSeriesOption | LineSeriesOption)[] = []
   if (showOrders.value)
     series.push({
       name: '下单数',
@@ -180,8 +208,14 @@ async function renderTrend() {
         backgroundColor: 'rgba(15,23,42,0.92)',
         borderWidth: 0,
         textStyle: { color: '#f1f5f9', fontSize: 12 },
-        formatter: (params: any) => {
-          const rows = (params as any[])
+        formatter: (params: unknown) => {
+          const list = (Array.isArray(params) ? params : [params]) as Array<{
+            seriesName: string
+            marker: string
+            value: number | string
+            axisValue: string
+          }>
+          const rows = list
             .map((p) => {
               const unit = p.seriesName.includes('金额') || p.seriesName.includes('盈收') ? '元' : '单';
               const val =
@@ -189,7 +223,7 @@ async function renderTrend() {
               return `${p.marker} ${p.seriesName}<span style="float:right;margin-left:24px;font-weight:700">${val}</span>`;
             })
             .join('<br/>');
-          return `<div style="font-weight:700;margin-bottom:4px">${params[0].axisValue}</div>${rows}`;
+          return `<div style="font-weight:700;margin-bottom:4px">${list[0]?.axisValue ?? ''}</div>${rows}`;
         },
       },
       legend: {
@@ -356,10 +390,6 @@ function onRecordsFilter() {
   loadRecords()
 }
 
-function recordTime(s: string): string {
-  return s ? s.slice(0, 16).replace('T', ' ') : '—'
-}
-
 function reloadActive() {
   if (activeTab.value === 'orders') loadOrderStats()
   else if (activeTab.value === 'lessons') loadLessons()
@@ -482,6 +512,9 @@ onUnmounted(() => {
       <input v-model="dateFrom" type="date" class="filter-input" @change="reloadActive()" />
       <span class="filter-sep">—</span>
       <input v-model="dateTo" type="date" class="filter-input" @change="reloadActive()" />
+      <button class="btn ghost sm" @click="defaultRange(); reloadActive()">本月</button>
+      <button class="btn ghost sm" @click="last30Range(); reloadActive()">近30天</button>
+      <button class="btn ghost sm" @click="clearRange(); reloadActive()">全部</button>
       <select v-model="campus" class="filter-select" @change="reloadActive()">
         <option value="">全部校区</option>
         <option v-for="c in campuses" :key="c.id" :value="c.name">{{ c.name }}</option>

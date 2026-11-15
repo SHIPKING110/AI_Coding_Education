@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum, Numeric, String, func
+from sqlalchemy import Boolean, DateTime, Enum, Numeric, String, false, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -35,6 +35,8 @@ class User(Base):
     role: Mapped[str] = mapped_column(Enum(Role, native_enum=False, length=16, values_callable=_enum_values), index=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     phone: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
+    # 微信小程序 openid（家长端登录绑定；唯一可空，未绑定为空）
+    wechat_openid: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     name: Mapped[str] = mapped_column(String(64))
     password_hash: Mapped[str] = mapped_column(String(255))
     # 校区/分支机构标签（多校区区分，如 一校/二校/三校，可自定义）
@@ -49,8 +51,11 @@ class User(Base):
     # 基本工资（为空时取职务基本工资）
     base_salary: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     status: Mapped[str] = mapped_column(
-        Enum(UserStatus, native_enum=False, length=16, values_callable=_enum_values), default=UserStatus.ACTIVE
+        Enum(UserStatus, native_enum=False, length=16, values_callable=_enum_values),
+        default=UserStatus.ACTIVE,
     )
+    # 强制改密：管理员代建账号/重置密码后置 True，登录后仅可访问改密接口直至完成改密
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

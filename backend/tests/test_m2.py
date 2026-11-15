@@ -55,10 +55,10 @@ def _register(client, role, tag):
     username = f"{tag}-{uuid.uuid4().hex[:8]}"
     r = client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
     assert r.status_code == 201, r.text
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
 
@@ -403,15 +403,23 @@ def test_attendance_blocked_before_start(client, admin_token):
     )
     sched_id = r.json()["schedule"]["id"]
 
-    # 已到 / 请假 都应被拦截并提示"未到上课时间"
-    for st in ("attended", "leave"):
-        sub = client.post(
-            f"/api/schedules/{sched_id}/attendance",
-            json={"items": [{"student_id": sid, "status": st}]},
-            headers=admin_token,
-        )
-        assert sub.status_code == 400
-        assert "未到上课时间" in sub.json()["detail"]
+    # 未到上课时间：签到被拦截并提示"未到上课时间"；请假允许提前标记（方便家长提前请假）
+    sub = client.post(
+        f"/api/schedules/{sched_id}/attendance",
+        json={"items": [{"student_id": sid, "status": "attended"}]},
+        headers=admin_token,
+    )
+    assert sub.status_code == 400
+    assert "未到上课时间" in sub.json()["detail"]
+
+    # 提前请假允许（不扣课时）
+    leave = client.post(
+        f"/api/schedules/{sched_id}/attendance",
+        json={"items": [{"student_id": sid, "status": "leave"}]},
+        headers=admin_token,
+    )
+    assert leave.status_code == 200
+    assert len(leave.json()["lesson_records"]) == 0
 
     # 余额未被扣减
     stu = client.get(f"/api/students/{sid}", headers=admin_token)
@@ -425,7 +433,7 @@ def _register_with_campus(client, role, name, campus):
         json={
             "role": role,
             "username": username,
-            "password": "123456",
+            "password": "12345678a",
             "name": name,
             "campus": campus,
         },
@@ -669,10 +677,10 @@ def test_schedule_campus_filter(client, admin_token):
     t1 = _register_with_campus(client, "teacher", "一校排课教师", "一校")
     t2 = _register_with_campus(client, "teacher", "二校排课教师", "二校")
     login1 = client.post(
-        "/api/auth/login", json={"username": t1["username"], "password": "123456"}
+        "/api/auth/login", json={"username": t1["username"], "password": "12345678a"}
     ).json()
     login2 = client.post(
-        "/api/auth/login", json={"username": t2["username"], "password": "123456"}
+        "/api/auth/login", json={"username": t2["username"], "password": "12345678a"}
     ).json()
     h1 = {"Authorization": f"Bearer {login1['access_token']}"}
     h2 = {"Authorization": f"Bearer {login2['access_token']}"}

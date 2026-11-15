@@ -27,6 +27,7 @@ import {
   type PromptTemplateOut,
 } from '@/api/prompt'
 import { useAuthStore } from '@/stores/auth'
+import { apiErrorDetail } from '@/utils/errors'
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import PlaceholderBar from '@/components/PlaceholderBar.vue'
@@ -113,12 +114,14 @@ function stopAiTimer() {
 }
 
 /** AI 失败原因转中文：超时 / 断网 / 限流单独提示，避免一律“生成失败” */
-function aiErrorText(e: any): string {
-  if (e?.response?.data?.detail) return e.response.data.detail
-  if (e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message ?? '')) {
+function aiErrorText(e: unknown): string {
+  const err = e as { response?: { data?: { detail?: unknown } }; code?: string; message?: string }
+  const detail = err?.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (err?.code === 'ECONNABORTED' || /timeout/i.test(err?.message ?? '')) {
     return 'AI 生成超时（超过 120 秒无响应），可能是模型繁忙，请稍后重试'
   }
-  if (!e?.response && (e?.code === 'ERR_NETWORK' || /network/i.test(e?.message ?? ''))) {
+  if (!err?.response && (err?.code === 'ERR_NETWORK' || /network/i.test(err?.message ?? ''))) {
     return '网络连接失败，请检查网络后重试'
   }
   return 'AI 课堂评价生成失败，请稍后重试'
@@ -306,17 +309,9 @@ async function loadRows(scheduleId: string) {
   }
 }
 
-/** 待反馈的学员 = 签到(attended) 且未发布反馈 */
-function isPending(r: FbRow): boolean {
-  return r.attendance_status === 'attended' && r.status !== 'published'
-}
 const editableRows = computed(() => rows.value.filter((r) => r.attendance_status === 'attended'))
 const absentRows = computed(() => rows.value.filter((r) => r.attendance_status === 'leave'))
 
-function openBatch() {
-  batch.value = { title: '', topic: '', content: '', performance: '', evaluation: '', homework: '' }
-  showBatch.value = true
-}
 
 async function applyBatch() {
   rows.value.forEach((r) => {
@@ -357,8 +352,8 @@ async function openAiModal(r: FbRow) {
       r.feedback_id = f.id
       r.status = f.status
       showNotice(`「${r.student_name}」已自动保存，可以继续生成 AI 课堂评价`)
-    } catch (e: any) {
-      showError(e?.response?.data?.detail || '自动保存失败，请先手动保存')
+    } catch (e: unknown) {
+      showError(apiErrorDetail(e, '自动保存失败，请先手动保存'))
       return
     } finally {
       r.saving = false
@@ -409,7 +404,7 @@ async function aiEnhance() {
   // 生成中保留弹窗：展示显眼的进度条与计时，禁止误关
   try {
     const draft = await aiEnhanceFeedback(fid, payload)
-    const text = (draft as any)?.evaluation ?? ''
+    const text = draft?.evaluation ?? ''
     if (typeof text !== 'string' || !text.trim()) {
       throw new Error('AI 返回内容为空，请更换模板或补充课题内容后重试')
     }
@@ -446,8 +441,8 @@ async function aiEnhance() {
     aiResultTitle.value = 'AI 课堂评价已生成'
     aiResultMsg.value = `「${aiTaskName.value}」的课堂评价已回填到课堂评价框，可继续编辑或再次润色。`
     showAiResult.value = true
-  } catch (e: any) {
-    const msg = typeof e?.message === 'string' && !e?.response ? e.message : aiErrorText(e)
+  } catch (e: unknown) {
+    const msg = e instanceof Error && !('response' in e) ? e.message : aiErrorText(e)
     aiTplError.value = msg
     aiResultOk.value = false
     aiResultTitle.value = 'AI 生成失败'
@@ -512,9 +507,9 @@ async function saveTpl() {
           name: tplForm.value.name.trim(),
           content: tplForm.value.content.trim(),
         })
-      } catch (e: any) {
+      } catch (e: unknown) {
         // 非管理员编辑系统/全校模板被 403：自动降级为新建个人副本
-        if (e?.response?.status === 403 && tplEditing.value.scope !== 'personal') {
+        if ((e as { response?: { status?: number } })?.response?.status === 403 && tplEditing.value.scope !== 'personal') {
           const copy = await createPromptTemplate({
             name:
               tplForm.value.name.trim() === tplEditing.value.name
@@ -541,8 +536,8 @@ async function saveTpl() {
     tplEditing.value = null
     tplForm.value = { name: '', content: '' }
     await loadTplTemplates()
-  } catch (e: any) {
-    tplNotice.value = e?.response?.data?.detail || '保存失败'
+  } catch (e: unknown) {
+    tplNotice.value = apiErrorDetail(e, '保存失败')
   } finally {
     tplLoading.value = false
   }
@@ -563,8 +558,8 @@ async function confirmTplDelete() {
   try {
     await deletePromptTemplate(t.id)
     await loadTplTemplates()
-  } catch (e: any) {
-    tplNotice.value = e?.response?.data?.detail || '删除失败'
+  } catch (e: unknown) {
+    tplNotice.value = apiErrorDetail(e, '删除失败')
   } finally {
     tplDeleting.value = null
   }
@@ -574,8 +569,8 @@ async function publishTpl(t: PromptTemplateOut) {
   try {
     await publishPromptTemplate(t.id)
     await loadTplTemplates()
-  } catch (e: any) {
-    tplNotice.value = e?.response?.data?.detail || '发布失败'
+  } catch (e: unknown) {
+    tplNotice.value = apiErrorDetail(e, '发布失败')
   }
 }
 
@@ -583,8 +578,8 @@ async function unpublishTpl(t: PromptTemplateOut) {
   try {
     await unpublishPromptTemplate(t.id)
     await loadTplTemplates()
-  } catch (e: any) {
-    tplNotice.value = e?.response?.data?.detail || '取消发布失败'
+  } catch (e: unknown) {
+    tplNotice.value = apiErrorDetail(e, '取消发布失败')
   }
 }
 
@@ -631,8 +626,8 @@ async function saveRowQuiet(r: FbRow, notify = false): Promise<string | null> {
     if (notify) showNotice(`「${r.student_name}」反馈已保存`)
     refreshScheduleStatus()
     return null
-  } catch (e: any) {
-    const msg = e?.response?.data?.detail || '保存失败'
+  } catch (e: unknown) {
+    const msg = apiErrorDetail(e, '保存失败')
     if (notify) showError(msg)
     return msg
   } finally {
@@ -687,8 +682,8 @@ async function publishRowQuiet(r: FbRow, notify = false): Promise<string | null>
     if (notify) showNotice(`「${r.student_name}」反馈已发送给家长`)
     refreshScheduleStatus()
     return null
-  } catch (e: any) {
-    const msg = e?.response?.data?.detail || '发送失败'
+  } catch (e: unknown) {
+    const msg = apiErrorDetail(e, '发送失败')
     if (notify) showError(msg)
     return msg
   } finally {
@@ -719,8 +714,8 @@ async function confirmRecall() {
     r.status = f.status
     showNotice(`「${r.student_name}」已撤回，可编辑后重新发送`)
     refreshScheduleStatus()
-  } catch (e: any) {
-    showError(e?.response?.data?.detail || '撤回失败')
+  } catch (e: unknown) {
+    showError(apiErrorDetail(e, '撤回失败'))
   } finally {
     r.saving = false
     recallRow.value = null
@@ -791,8 +786,8 @@ async function onMediaSelected(e: Event) {
       r.media_urls.push(res.url)
     }
     showNotice('素材上传成功')
-  } catch (err: any) {
-    showError(err?.response?.data?.detail || '上传失败')
+  } catch (e: unknown) {
+    showError(apiErrorDetail(e, '上传失败'))
   } finally {
     r.uploading = false
     input.value = ''

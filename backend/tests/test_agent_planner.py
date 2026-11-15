@@ -70,6 +70,27 @@ def db_session():
         engine.dispose()
 
 
+def test_planner_receives_history_context(db_session, monkeypatch):
+    """错片根因修复：规划器必须收到最近对话摘要，短确认句才能延续上文主题。"""
+    from app.services import agent_planner, llm
+
+    db, tid = db_session
+    user = db.get(User, tid)
+    seen = {}
+
+    def fake_step(messages, tools):
+        seen["msgs"] = messages
+        return "", []
+
+    monkeypatch.setattr(llm, "tool_step", fake_step)
+    hist = [("user", "我要一份 Python 课件，深靛配色，16 页"),
+            ("assistant", "方案已确认：项目 py-grade46，深靛科技风")]
+    agent_planner.plan_and_run(db, user, "本周排课怎么样，顺便继续上次的 PPT", history=hist)
+    joined = "\n".join(str(getattr(m, "content", "")) for m in seen["msgs"])
+    assert "py-grade46" in joined and "深靛" in joined, "规划器上下文应包含上文主题与项目名"
+    assert "禁止换成无关主题" in joined
+
+
 def test_non_business_skips_all(db_session, monkeypatch):
     from app.services import agent_planner, llm
 

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
-import { buildPpt, pptChatStream, pptDownloadUrl, type PptChatStage, type PptPhase } from '@/api/report'
+import { buildPpt, pptChatStream, type PptChatStage, type PptPhase } from '@/api/report'
+import { openMedia } from '@/api/media'
 import { renderMarkdown } from '@/utils/markdown'
+import { apiErrorDetail, errorMessage } from '@/utils/errors'
 
 const props = defineProps<{
   visible: boolean
@@ -285,8 +287,8 @@ async function runStream(stage: PptChatStage, message: string) {
       content: shown,
       options: options.length ? options : fallbackOptions(),
     })
-  } catch (e: any) {
-    error.value = e?.message || 'AI 定制失败'
+  } catch (e: unknown) {
+    error.value = errorMessage(e) || 'AI 定制失败'
   } finally {
     streaming.value = false
     streamBuf.value = ''
@@ -440,8 +442,8 @@ async function doBuild() {
     })
     emit('built', r.ppt_url)
     await scrollBottom()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || e?.message || '生成失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '') || errorMessage(e) || '生成失败'
   } finally {
     busy.value = false
   }
@@ -614,7 +616,7 @@ function close() {
             <div class="pb-work-head"><h3>导出</h3></div>
             <div v-if="resultUrl" class="pb-export">
               <p class="pb-ok">✓ PPT 已生成</p>
-              <a class="btn primary" :href="pptDownloadUrl(resultUrl)" target="_blank" rel="noopener">下载 / 预览 PPT</a>
+              <a class="btn primary" href="#" @click.prevent="openMedia(resultUrl)">下载 / 预览 PPT</a>
               <button class="btn ghost" @click="step = 'layout'">← 返回调整</button>
             </div>
             <div v-else class="pb-empty">

@@ -85,6 +85,9 @@ def resolve_override(db, user_id, module: str, config_id: str | uuid.UUID | None
             embed_model=cfg.embed_model,
             config_id=cfg.id,
             config_name=cfg.name,
+            owner_id=cfg.owner_id,
+            module=module,
+            is_platform=False,
         )
     resolved = crud.resolve(db, user_id, module)
     if resolved is None:

@@ -59,10 +59,10 @@ def _register(client, role, tag):
     username = f"{tag}-{role}-{uuid.uuid4().hex[:5]}"
     r = client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
     assert r.status_code == 201, r.text
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     tok = {"Authorization": f"Bearer {login.json()['access_token']}"}
     me = client.get("/api/auth/me", headers=tok).json()
     return tok, me["id"]
@@ -201,3 +201,50 @@ def test_personal_config_drives_generate_without_global_key(monkeypatch):
             source_question="x", source_answer=None, hint=None, types=None,
         )
     assert isinstance(out, list) and len(out) == 1
+
+
+def test_ping_meters_with_checked_endpoint(monkeypatch):
+    """回归：连通性检查的记账必须用被检查配置的网关/模型名，否则会被判「未定价」。"""
+    from app.services import llm as llm_svc
+    from app.services import llm_context as ctx
+    from app.services import usage_meter
+
+    captured: dict = {}
+    monkeypatch.setattr(usage_meter, "record_chat", lambda **kw: captured.update(kw))
+
+    class FakeResp:
+        content = "pong"
+        usage_metadata = {"input_tokens": 5, "output_tokens": 2}
+
+    class FakeModel:
+        def invoke(self, msgs):
+            return FakeResp()
+
+    monkeypatch.setattr(llm_svc, "_build_chat", lambda *a, **k: FakeModel())
+    resolved = crud.ResolvedLLM(
+        base_url="https://api.deepseek.com/v1",
+        api_key="sk-x",
+        model="deepseek-v4-pro",
+        embed_model=None,
+        config_id=None,
+        config_name="t",
+        module="config_test",
+    )
+    with ctx.use_llm(resolved):
+        llm_svc.ping(resolved)
+    assert "api.deepseek.com" in captured["base_url"]
+    assert captured["model"] == "deepseek-v4-pro"
+
+
+def test_test_endpoint_rate_limited(client):
+    """「检查」端点有频率限制：短时间内连续调用第二次返回 429。"""
+    tok, _ = _register(client, "teacher", "llmRL")
+    cfg = client.post(
+        "/api/llm-configs",
+        json={**CFG, "base_url": "http://127.0.0.1:9", "model": "x"},
+        headers=tok,
+    ).json()
+    r1 = client.post(f"/api/llm-configs/{cfg['id']}/test", headers=tok)
+    assert r1.status_code == 200
+    r2 = client.post(f"/api/llm-configs/{cfg['id']}/test", headers=tok)
+    assert r2.status_code == 429
