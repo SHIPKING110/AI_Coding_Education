@@ -309,7 +309,6 @@ def _disk_svg_pages(task: AgentPptTask) -> list[str]:
     if project_key:
         keys_to_try.append(project_key)
         # 去掉会话前缀 → projects/...
-        prefix = ""
         if project_key.startswith("conversations/"):
             parts = project_key.split("/", 2)
             if len(parts) >= 3:

@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
-import { getAgentRun, getAgentSession, listAgentSessions, type AgentRun, type AgentSessionSummary } from '@/api/agentOps'
+import { getAgentRun, getAgentSession, listAgentSessions, type AgentRun, type AgentRunSpan, type AgentSessionSummary } from '@/api/agentOps'
 
 const loading = ref(false)
 const error = ref('')
@@ -15,8 +15,8 @@ const q = ref('')
 const agentId = ref('')
 const selectedId = ref<string | null>(null)
 const detailLoading = ref(false)
-const detail = ref<{ conversation: any; messages: any[]; runs: AgentRun[] } | null>(null)
-const selectedRun = ref<{ run: AgentRun; spans: any[] } | null>(null)
+const detail = ref<Awaited<ReturnType<typeof getAgentSession>> | null>(null)
+const selectedRun = ref<{ run: AgentRun; spans: AgentRunSpan[] } | null>(null)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 

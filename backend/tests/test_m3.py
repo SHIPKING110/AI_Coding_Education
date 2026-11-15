@@ -69,10 +69,10 @@ def _register(client, role, tag):
     username = f"{tag}-{uuid.uuid4().hex[:8]}"
     r = client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
     assert r.status_code == 201, r.text
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
 
@@ -235,15 +235,17 @@ def test_feedback_role_and_upload(client, admin_token):
     url = good.json()["url"]
     assert url.startswith("/uploads/feedback/")
 
-    # 上传后文件可通过静态服务访问
+    # 响应层自动补签名：带签名访问 200；剥掉签名的直链必须 401（匿名盗链防护）
     served = client.get(url)
     assert served.status_code == 200
     assert served.content == b"\x89PNG\r\n\x1a\nfake"
 
+    unsigned = url.split("?", 1)[0]
+    assert client.get(unsigned).status_code == 401
+
 
 def test_feedback_ai_enhance_degraded_without_llm(client, admin_token, monkeypatch):
     """AI 草稿接口：未配置 LLM 时显式 502（不静默返回空内容，避免前端误报成功）。"""
-    from app.services import llm
 
     from app.services import llm_context as _llm_ctx
     monkeypatch.setattr(_llm_ctx, "optional_resolved", lambda *a, **k: None)
@@ -554,7 +556,7 @@ def _register_with_campus(client, name, campus):
         json={
             "role": "teacher",
             "username": f"{name}-{uuid.uuid4().hex[:6]}",
-            "password": "123456",
+            "password": "12345678a",
             "name": name,
             "campus": campus,
         },

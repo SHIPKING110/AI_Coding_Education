@@ -12,6 +12,7 @@ import {
   type ScheduleOut,
 } from '@/api/schedule'
 import { fmtDateTimeFromIso, parseServerTime, today } from '@/utils/date'
+import { apiErrorDetail, errorMessage } from '@/utils/errors'
 
 const route = useRoute()
 const router = useRouter()
@@ -43,8 +44,8 @@ async function load() {
   try {
     schedule.value = await getSchedule(scheduleId)
     rows.value = await listAttendance(scheduleId)
-  } catch (e: any) {
-    loadError.value = e?.response?.data?.detail || e?.message || '加载排课详情失败'
+  } catch (e: unknown) {
+    loadError.value = apiErrorDetail(e, '') || errorMessage(e) || '加载排课详情失败'
   } finally {
     loading.value = false
   }
@@ -65,8 +66,8 @@ async function confirmCancel() {
   try {
     await cancelSchedule(schedule.value.id)
     router.push({ name: 'schedules' })
-  } catch (e: any) {
-    notice.value = { type: 'err', text: e?.response?.data?.detail || '取消排课失败' }
+  } catch (e: unknown) {
+    notice.value = { type: 'err', text: apiErrorDetail(e, '取消排课失败') }
   }
 }
 
@@ -111,8 +112,8 @@ async function mark(status: 'attended' | 'leave', studentId: string) {
         : { type: 'ok', text: '已标记请假（不扣课时）' }
     }
     await load()
-  } catch (e: any) {
-    notice.value = { type: 'err', text: e?.response?.data?.detail || '操作失败' }
+  } catch (e: unknown) {
+    notice.value = { type: 'err', text: apiErrorDetail(e, '操作失败') }
   } finally {
     pending.value.delete(studentId)
     submitting.value = false

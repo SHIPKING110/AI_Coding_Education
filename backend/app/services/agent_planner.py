@@ -153,7 +153,7 @@ def plan_and_run(
     seen: set[str] = set()
     rounds = 0
 
-    def _run_one(name: str, args: dict) -> "Step":
+    def _run_one(name: str, args: dict) -> Step:
         """执行一个工具：先回调「开始」，执行完再回调「结束」（前端实时展示执行到哪步）。"""
         from app.services import agent_ops
 
@@ -192,7 +192,7 @@ def plan_and_run(
                 pass
         return step
 
-    def _push_step(step: "Step") -> None:
+    def _push_step(step: Step) -> None:
         """追加一步并即时回调（用于兜底/自愈等非主循环路径）。"""
         from app.services import agent_ops
 

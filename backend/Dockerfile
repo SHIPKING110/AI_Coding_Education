@@ -53,6 +53,11 @@ VOLUME ["/srv/app/uploads", "/srv/app/data"]
 
 EXPOSE 8000
 
+# 入口脚本：先跑 alembic 迁移再启动（见 entrypoint.sh 与 ADR-0029）
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
+ENTRYPOINT ["./entrypoint.sh"]
+
 # 单 worker：AI 出题/评估任务状态在进程内存（ThreadPool + dict），多 worker 会导致
 # 建任务与轮询落到不同进程而 404；需要扩容时先把任务状态外置（DB/Redis）再加 worker
 CMD [".venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -4,9 +4,16 @@ import { onMounted, ref } from 'vue'
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import { listRagRoutes, testRagRoute, updateRagRoute, type RagTrace } from '@/api/ragAdmin'
+import {
+  listRagRoutes,
+  testRagRoute,
+  updateRagRoute,
+  type RagRouteConfig,
+  type RagRouteTestResult,
+  type RagTrace,
+} from '@/api/ragAdmin'
 
-const routes = ref<any[]>([])
+const routes = ref<RagRouteConfig[]>([])
 const loading = ref(false)
 const error = ref('')
 const testForm = ref({
@@ -18,7 +25,7 @@ const testForm = ref({
   rerank: true,
   min_similarity: '',
 })
-const testResult = ref<any>(null)
+const testResult = ref<RagRouteTestResult | null>(null)
 const pending = ref<{ title: string; message: string; run: () => void | Promise<void> } | null>(null)
 
 function ask(title: string, message: string, run: () => void | Promise<void>) {
@@ -42,7 +49,7 @@ async function load() {
   }
 }
 
-async function saveRoute(r: any) {
+async function saveRoute(r: RagRouteConfig) {
   ask('保存路由配置', `确认保存「${r.name}」的检索参数？保存后新请求将立即使用。`, async () => {
     try {
       await updateRagRoute(r.key, {
@@ -79,7 +86,7 @@ async function runTest() {
   }
 }
 
-function stageText(t: RagTrace | any) {
+function stageText(t: RagTrace | null | undefined) {
   const s = t?.stage_timings || {}
   return Object.entries(s).map(([k, v]) => `${k} ${Math.round(Number(v))}ms`).join(' · ')
 }

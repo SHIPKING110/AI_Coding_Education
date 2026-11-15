@@ -66,12 +66,19 @@ export interface RagOverview {
     answer_eval: boolean
     generation_model?: string
     judge_model?: string
-    metrics: Record<string, any> | null
-    compare: Record<string, any> | null
+    metrics: Record<string, unknown> | null
+    compare: Record<string, unknown> | null
     created_at: string | null
     finished_at: string | null
   } | null
 }
+
+/**
+ * 评测指标/对比为后端动态聚合的 JSON 包（键随指标口径演进）。
+ * 视图层通过 pick()/运行时守卫读取；此处收口为唯一显式 any 出口，避免散落。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type EvalMetricsBag = Record<string, any>
 
 export interface RagStorageProfile {
   collection: string
@@ -221,7 +228,103 @@ export async function deleteRagDocument(id: string): Promise<void> {
   await http.delete(`/admin/rag/documents/${id}`)
 }
 
-export async function listKnowledgeBases(): Promise<{ items: any[] }> {
+export interface RagKnowledgeBase {
+  key: string
+  name: string
+  description: string
+  documents: number
+  ready: number
+  failed: number
+  chunks: number
+  queries_7d?: number
+  zero_result_rate_7d?: number | null
+  docs?: RagDoc[]
+}
+
+export interface RagSweepResult {
+  scanned: number
+  orphan_docs?: number
+  deleted: number
+  collection?: string
+}
+
+export interface RagSyncResult {
+  scanned: number
+  reindexed: number
+  missing_source: number
+  skipped_indexing?: number
+}
+
+export interface RagRouteEffective {
+  top_k?: number | null
+  min_similarity?: number | null
+  per_doc_cap?: number | null
+  rerank_oversample?: number | null
+  [key: string]: unknown
+}
+
+export interface RagRouteConfig {
+  key: string
+  name: string
+  owner_scope?: string
+  doc_scope?: string
+  description?: string
+  defaults?: Record<string, unknown>
+  effective: RagRouteEffective
+  [key: string]: unknown
+}
+
+export interface RagRouteTestResult {
+  trace_id?: string
+  summary?: string
+  diag?: RagTrace | null
+  hits?: {
+    title: string
+    similarity?: number | null
+    rerank_score?: number | null
+    rrf_score?: number | null
+    text?: string
+  }[]
+  [key: string]: unknown
+}
+
+export interface ParentSessionThreadRow {
+  thread_id: string
+  status: string
+  risk_flag: boolean
+  created_at?: string | null
+  updated_at: string | null
+  message_count: number
+  trace_count: number
+  [key: string]: unknown
+}
+
+export interface ParentSessionMessage {
+  id?: string
+  role: string
+  content: string
+  tokens?: number | null
+  created_at?: string | null
+  [key: string]: unknown
+}
+
+export interface ParentSessionDetail {
+  thread: ParentSessionThreadRow
+  messages: ParentSessionMessage[]
+  traces: RagTrace[]
+}
+
+export interface RagAuditEntry {
+  id: string
+  action: string
+  target: string
+  detail: Record<string, unknown> | null
+  operator_id: string | null
+  created_at: string | null
+  [key: string]: unknown
+}
+
+export async function listKnowledgeBases(): Promise<{ items: RagKnowledgeBase[] }> {
   const { data } = await http.get('/admin/rag/knowledge-bases')
   return data
 }
@@ -231,27 +334,27 @@ export async function listRagCollections(): Promise<{ active: string; collection
   return data
 }
 
-export async function sweepRagCollections(dryRun = false): Promise<any> {
+export async function sweepRagCollections(dryRun = false): Promise<RagSweepResult> {
   const { data } = await http.post('/admin/rag/collections/sweep', null, { params: { dry_run: dryRun } })
   return data
 }
 
-export async function triggerRagSync(limit = 50): Promise<any> {
+export async function triggerRagSync(limit = 50): Promise<RagSyncResult> {
   const { data } = await http.post('/admin/rag/maintenance/sync', null, { params: { limit } })
   return data
 }
 
-export async function listRagRoutes(): Promise<{ items: any[] }> {
+export async function listRagRoutes(): Promise<{ items: RagRouteConfig[] }> {
   const { data } = await http.get('/admin/rag/routes')
   return data
 }
 
-export async function updateRagRoute(routeKey: string, payload: Record<string, unknown>): Promise<any> {
+export async function updateRagRoute(routeKey: string, payload: Record<string, unknown>): Promise<RagRouteConfig> {
   const { data } = await http.put(`/admin/rag/routes/${routeKey}`, payload)
   return data
 }
 
-export async function testRagRoute(payload: Record<string, unknown>): Promise<any> {
+export async function testRagRoute(payload: Record<string, unknown>): Promise<RagRouteTestResult> {
   const { data } = await http.post('/admin/rag/routes/test', payload)
   return data
 }
@@ -266,12 +369,14 @@ export async function getRagTrace(traceId: string): Promise<RagTrace> {
   return data
 }
 
-export async function listParentSessions(params: Record<string, unknown> = {}): Promise<{ total: number; page: number; page_size: number; items: any[] }> {
+export async function listParentSessions(
+  params: Record<string, unknown> = {},
+): Promise<{ total: number; page: number; page_size: number; items: ParentSessionThreadRow[] }> {
   const { data } = await http.get('/admin/rag/parent-sessions', { params })
   return data
 }
 
-export async function getParentSession(threadId: string): Promise<{ thread: any; messages: any[]; traces: RagTrace[] }> {
+export async function getParentSession(threadId: string): Promise<ParentSessionDetail> {
   const { data } = await http.get(`/admin/rag/parent-sessions/${threadId}`)
   return data
 }
@@ -285,7 +390,7 @@ export async function getRagConfig(): Promise<{ config: RagConfig; defaults: Rag
   return data
 }
 
-export async function updateRagConfig(config: RagConfig, note = ''): Promise<any> {
+export async function updateRagConfig(config: RagConfig, note = ''): Promise<Record<string, unknown>> {
   const { data } = await http.put('/admin/rag/config', { config, note })
   return data
 }
@@ -295,13 +400,13 @@ export async function listRagConfigVersions(): Promise<RagConfigVersion[]> {
   return data.items
 }
 
-export async function rollbackRagConfig(version: number): Promise<any> {
+export async function rollbackRagConfig(version: number): Promise<Record<string, unknown>> {
   const { data } = await http.post(`/admin/rag/config/rollback/${version}`)
   return data
 }
 
-export async function listRagAudit(limit = 100): Promise<any[]> {
-  const { data } = await http.get<{ items: any[] }>('/admin/rag/audit', { params: { limit } })
+export async function listRagAudit(limit = 100): Promise<RagAuditEntry[]> {
+  const { data } = await http.get<{ items: RagAuditEntry[] }>('/admin/rag/audit', { params: { limit } })
   return data.items
 }
 
@@ -354,8 +459,8 @@ export interface RagEvalRun {
   generation_model: string
   judge_model: string
   config_version: number | null
-  metrics: any
-  compare: any
+  metrics: EvalMetricsBag | null
+  compare: EvalMetricsBag | null
   error: string | null
   created_at: string | null
   finished_at: string | null
@@ -384,7 +489,7 @@ export interface RagEvalResult {
   ranked: string[]
   relevant: string[]
   hits: RagTraceHit[]
-  metrics: any
+  metrics: EvalMetricsBag | null
   retrieval_summary: string
   bad_case_type: string
   human_score: number | null
@@ -466,7 +571,10 @@ export async function updateEvalCase(
   return data
 }
 
-export async function generateEvalCases(setId: string, payload: Record<string, unknown>): Promise<any> {
+export async function generateEvalCases(
+  setId: string,
+  payload: Record<string, unknown>,
+): Promise<{ created: number; failed?: number; errors?: { index: number; error: string }[]; items?: RagEvalCase[] }> {
   const { data } = await http.post(`/admin/rag/eval/sets/${setId}/generate`, payload)
   return data
 }
@@ -495,7 +603,7 @@ export async function getEvalRun(runId: string): Promise<{ run: RagEvalRun; resu
 
 export async function setEvalResultHumanScore(
   resultId: string, payload: { score: number; judge?: string; reason?: string },
-): Promise<{ result_id: string; run_id: string; human_score: number; calibration: any }> {
+): Promise<{ result_id: string; run_id: string; human_score: number; calibration: Record<string, unknown> | null }> {
   const { data } = await http.post(`/admin/rag/eval/results/${resultId}/human-score`, payload)
   return data
 }

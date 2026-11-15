@@ -45,12 +45,12 @@ def test_build_ppt_with_real_data():
         client = TestClient(app)
         r = client.post(
             "/api/auth/register",
-            json={"role": "teacher", "username": f"ppt-{uuid.uuid4().hex[:8]}", "password": "123456", "name": "t"},
+            json={"role": "teacher", "username": f"ppt-{uuid.uuid4().hex[:8]}", "password": "12345678a", "name": "t"},
         )
         assert r.status_code == 201, r.text
         login = client.post(
             "/api/auth/login",
-            json={"username": r.json()["username"], "password": "123456"},
+            json={"username": r.json()["username"], "password": "12345678a"},
         )
         headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
         # 建一份带统计快照的季度报告

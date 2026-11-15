@@ -383,7 +383,9 @@ def _image_data_urls(attachments: list[dict], *, max_images: int = 4, max_total_
         url = str(a.get("url") or "")
         if not url.startswith("/uploads/"):
             continue
-        disk = upload_root / url[len("/uploads/"):]
+        from app.core.media import strip_media_signature
+
+        disk = upload_root / strip_media_signature(url)[len("/uploads/"):]
         mime = _VISION_MIME.get(disk.suffix.lower())
         if not mime:
             continue
@@ -433,10 +435,12 @@ def _attachment_block(attachments: list[dict]) -> str:
             else:
                 lines.append(f"- 用户上传了文档《{name}》（未能解析出文本，请按文件名理解用途）")
         else:
-            # 把 /uploads/... 映射到磁盘绝对路径，供 Skill 脚本读取/嵌入
+            # 把 /uploads/... 映射到磁盘绝对路径，供 Skill 脚本读取/嵌入（先剥离短期签名查询串）
             disk_path = ""
             if url.startswith("/uploads/"):
-                disk_path = str(Path(upload_root) / url[len("/uploads/"):])
+                from app.core.media import strip_media_signature
+
+                disk_path = str(Path(upload_root) / strip_media_signature(url)[len("/uploads/"):])
             lines.append(
                 f"- 用户上传了图片《{name}》"
                 + (f"（磁盘路径：{disk_path}，可直接在 Skill 脚本中读取并插入 PPT/文档）" if disk_path else "")
@@ -863,6 +867,8 @@ def _pptx_slide_count(url: str) -> int:
         from app.core.config import get_settings
 
         rel = raw.split("/uploads/", 1)[-1] if "/uploads/" in raw else raw.lstrip("/")
+        # 剥离签名查询串（/uploads/x.pptx?exp=..&sig=.. 不能直接拼磁盘路径）
+        rel = rel.split("?", 1)[0]
         path = Path(get_settings().UPLOAD_DIR) / rel
         if path.is_file():
             return len(_PptxReader(str(path)).slides)

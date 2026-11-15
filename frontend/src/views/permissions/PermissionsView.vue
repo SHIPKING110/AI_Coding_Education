@@ -6,6 +6,7 @@
  * 硬性规则不受开关影响：教师只能操作本人所带班级；只有空班级才能删除。
  */
 import { computed, onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -172,8 +173,8 @@ async function quickApply() {
     const i = rows.value.findIndex((r) => r.teacher_id === updated.teacher_id)
     if (i >= 0) rows.value[i] = updated
     quickMsg.value = `已应用「${quickTitle.value}」`
-  } catch (e: any) {
-    quickMsg.value = e?.response?.data?.detail || '应用失败'
+  } catch (e: unknown) {
+    quickMsg.value = apiErrorDetail(e, '应用失败')
   }
 }
 
@@ -228,8 +229,8 @@ async function saveTitle() {
     syncMsg.value = ''
     if (saved && affected > 0) syncTarget.value = saved
     else if (saved) syncMsg.value = `职务「${savedName}」已保存，暂无在职教师使用`
-  } catch (e: any) {
-    titleError.value = e?.response?.data?.detail || '保存职务失败'
+  } catch (e: unknown) {
+    titleError.value = apiErrorDetail(e, '保存职务失败')
   } finally {
     titleSaving.value = false
   }
@@ -242,8 +243,8 @@ async function confirmDelTitle() {
     await deleteJobTitle(delTitle.value.id)
     delTitle.value = null
     titles.value = await listJobTitles()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '删除职务失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '删除职务失败')
   }
 }
 
@@ -260,8 +261,8 @@ async function confirmSync() {
     syncMsg.value = `「${res.title}」已同步到 ${res.synced} 名教师`
     syncTarget.value = null
     rows.value = await listTeacherPermissions()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '同步失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '同步失败')
     syncTarget.value = null
   }
 }
@@ -306,8 +307,8 @@ async function applyTitle() {
     const i = rows.value.findIndex((r) => r.teacher_id === updated.teacher_id)
     if (i >= 0) rows.value[i] = updated
     applyMsg.value = `已将「${applyTitleName.value}」应用到「${updated.teacher_name}」`
-  } catch (e: any) {
-    applyMsg.value = e?.response?.data?.detail || '应用失败'
+  } catch (e: unknown) {
+    applyMsg.value = apiErrorDetail(e, '应用失败')
   }
 }
 

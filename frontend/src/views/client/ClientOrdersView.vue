@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import PaginationBar from '@/components/PaginationBar.vue'
 import {
@@ -113,8 +114,8 @@ async function confirmPay() {
     msg.value = '模拟支付成功，请等待机构确认到账'
     setTimeout(() => (msg.value = ''), 3000)
     await load()
-  } catch (e: any) {
-    payError.value = e?.response?.data?.detail || '支付失败'
+  } catch (e: unknown) {
+    payError.value = apiErrorDetail(e, '支付失败')
     if (/超时|撤销/.test(payError.value)) await load()
   } finally {
     paying.value = false
@@ -127,8 +128,8 @@ async function cancel(order: OrderOut) {
     await cancelClientOrder(order.id)
     await load()
     await store.loadMe(true)
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '取消失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '取消失败'))
   }
 }
 
@@ -152,8 +153,8 @@ async function openRefund(order: OrderOut) {
     reasonKey.value = 'wrong_package'
     reasonText.value = ''
     showRefund.value = true
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '检查失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '检查失败'))
   }
 }
 
@@ -176,8 +177,8 @@ async function confirmRefund() {
     setTimeout(() => (msg.value = ''), 3000)
     await load()
     await store.loadMe(true)
-  } catch (e: any) {
-    refundError.value = e?.response?.data?.detail || '退款失败'
+  } catch (e: unknown) {
+    refundError.value = apiErrorDetail(e, '退款失败')
   } finally {
     refunding.value = false
   }

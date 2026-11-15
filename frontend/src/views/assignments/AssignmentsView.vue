@@ -12,7 +12,6 @@ import {
   deleteAssignmentFolder,
   deleteQuestion,
   getAssignment,
-  isTaskRunning,
   listAssignmentsGrouped,
   listAssignmentFolders,
   listQuestionsPool,
@@ -25,7 +24,6 @@ import {
   updateAssignmentFolder,
   updateQuestion,
   type AiGenerateIn,
-  type AiTaskOut,
   type AssignmentFolderOut,
   type AssignmentOut,
   type QuestionIn,
@@ -34,6 +32,7 @@ import {
   QUESTION_TYPE_LABELS,
 } from '@/api/assignment'
 import { toastApiError } from '@/stores/toast'
+import { apiErrorDetail } from '@/utils/errors'
 import { listCampusesApi, listTeachersApi, type UserOut } from '@/api/auth'
 import { listClasses, listStudents, type ClassOut } from '@/api/enrollment'
 import { useAiTasksStore, type UnifiedAiTask } from '@/stores/aiTasks'
@@ -111,8 +110,8 @@ async function loadList() {
     assignments.value = items
     total.value = items.length
     pickedIds.value = pickedIds.value.filter((id) => items.some((a) => a.id === id))
-  } catch (e: any) {
-    listError.value = e?.response?.data?.detail || '加载作业列表失败'
+  } catch (e: unknown) {
+    listError.value = apiErrorDetail(e, '加载作业列表失败')
   } finally {
     listLoading.value = false
   }
@@ -179,9 +178,6 @@ function pickAllOnPage() {
   }
 }
 
-const folderName = (id: string | null | undefined) =>
-  folders.value.find((f) => f.id === id)?.name ?? ''
-
 // —— 分组管理弹窗 ——
 const showFolderModal = ref(false)
 const newFolderName = ref('')
@@ -210,8 +206,8 @@ async function addFolder() {
     await createAssignmentFolder({ name, sort_no: maxSort + 1 })
     newFolderName.value = ''
     await loadFolders()
-  } catch (e: any) {
-    folderOpError.value = e?.response?.data?.detail || '创建分组失败'
+  } catch (e: unknown) {
+    folderOpError.value = apiErrorDetail(e, '创建分组失败')
   }
 }
 
@@ -228,8 +224,8 @@ async function confirmRename() {
     await updateAssignmentFolder(id, { name })
     renamingFolderId.value = ''
     await loadFolders()
-  } catch (e: any) {
-    folderOpError.value = e?.response?.data?.detail || '重命名失败'
+  } catch (e: unknown) {
+    folderOpError.value = apiErrorDetail(e, '重命名失败')
   }
 }
 
@@ -245,8 +241,8 @@ async function removeFolder(f: AssignmentFolderOut) {
     }
     await loadFolders()
     loadList()
-  } catch (e: any) {
-    folderOpError.value = e?.response?.data?.detail || '删除分组失败'
+  } catch (e: unknown) {
+    folderOpError.value = apiErrorDetail(e, '删除分组失败')
   }
 }
 
@@ -263,8 +259,8 @@ async function movePickedTo(folderId: string) {
     selecting.value = false
     await loadFolders()
     loadList()
-  } catch (e: any) {
-    listError.value = e?.response?.data?.detail || '移动失败'
+  } catch (e: unknown) {
+    listError.value = apiErrorDetail(e, '移动失败')
   }
 }
 
@@ -534,8 +530,8 @@ async function saveAssignment(): Promise<boolean> {
     editorNotice.value = '作业已保存'
     loadList()
     return true
-  } catch (e: any) {
-    editorError.value = e?.response?.data?.detail || '保存失败'
+  } catch (e: unknown) {
+    editorError.value = apiErrorDetail(e, '保存失败')
     return false
   } finally {
     saving.value = false
@@ -822,8 +818,8 @@ async function confirmPublish() {
     openAssignment(r)
     editorNotice.value = isClasswork ? '课堂作业已发布到学员账号' : '作业已发布'
     loadList()
-  } catch (e: any) {
-    publishError.value = e?.response?.data?.detail || '发布失败'
+  } catch (e: unknown) {
+    publishError.value = apiErrorDetail(e, '发布失败')
   } finally {
     publishing.value = false
   }
@@ -863,8 +859,8 @@ async function unpublish() {
     openAssignment(r)
     editorNotice.value = '作业已撤回为草稿'
     loadList()
-  } catch (e: any) {
-    editorError.value = e?.response?.data?.detail || '撤回失败'
+  } catch (e: unknown) {
+    editorError.value = apiErrorDetail(e, '撤回失败')
   }
 }
 
@@ -875,8 +871,8 @@ async function remove() {
     resetEditor()
     editorNotice.value = '作业已删除'
     loadList()
-  } catch (e: any) {
-    editorError.value = e?.response?.data?.detail || '删除失败'
+  } catch (e: unknown) {
+    editorError.value = apiErrorDetail(e, '删除失败')
   }
 }
 
@@ -971,8 +967,8 @@ async function runAi() {
   try {
     const task = await aiGenerate(payload)
     aiTasks.register(task, 'assignment')
-  } catch (e: any) {
-    aiError.value = e?.response?.data?.detail || '提交任务失败'
+  } catch (e: unknown) {
+    aiError.value = apiErrorDetail(e, '提交任务失败')
     toastApiError(e)
   } finally {
     aiLoading.value = false
@@ -1002,8 +998,8 @@ async function applyTaskResult(t: UnifiedAiTask, picked: boolean[]) {
     const ok = await saveAssignment()
     if (!ok) return // 校验失败，错误信息已展示在编辑器顶部
     editorNotice.value = `已加入 ${items.length} 道 AI 生成的题目，并已自动保存为草稿`
-  } catch (e: any) {
-    editorError.value = e?.response?.data?.detail || 'AI 题已加入，但自动保存失败，请手动点击“保存草稿”'
+  } catch (e: unknown) {
+    editorError.value = apiErrorDetail(e, 'AI 题已加入，但自动保存失败，请手动点击“保存草稿”')
   }
 }
 
@@ -1067,8 +1063,8 @@ async function loadPool() {
     })
     poolItems.value = r.items
     poolTotal.value = r.total
-  } catch (e: any) {
-    poolError.value = e?.response?.data?.detail || '加载历史题目失败'
+  } catch (e: unknown) {
+    poolError.value = apiErrorDetail(e, '加载历史题目失败')
   } finally {
     poolLoading.value = false
   }
@@ -1146,8 +1142,8 @@ async function applyPoolQuestions() {
     const ok = await saveAssignment()
     if (!ok) return
     editorNotice.value = `已加入 ${selected.length} 道历史题目，并已自动保存为草稿`
-  } catch (e: any) {
-    editorError.value = e?.response?.data?.detail || '历史题目已加入，但自动保存失败，请手动点击“保存草稿”'
+  } catch (e: unknown) {
+    editorError.value = apiErrorDetail(e, '历史题目已加入，但自动保存失败，请手动点击“保存草稿”')
   } finally {
     poolApplying.value = false
   }
@@ -1182,12 +1178,12 @@ async function runRefine() {
   refineError.value = ''
   try {
     const task = await aiRefine({ question: q.value, instruction: refineInstruction.value })
-    aiTasks.register(task as any, 'assignment')
+    aiTasks.register(task, 'assignment')
     refineTaskId.value = task.id
     showRefineModal.value = false
     editorNotice.value = '优化任务已提交，稍后可在 AI 出题弹窗中查看并应用'
-  } catch (e: any) {
-    refineError.value = e?.response?.data?.detail || '提交优化失败'
+  } catch (e: unknown) {
+    refineError.value = apiErrorDetail(e, '提交优化失败')
     toastApiError(e)
   } finally {
     refineLoading.value = false
@@ -1225,7 +1221,7 @@ function formatAnswer(item: QuestionIn): string {
 }
 
 function isQuestionLike(v: unknown): v is QuestionIn {
-  return !!v && typeof v === 'object' && 'type' in (v as any) && 'stem' in (v as any)
+  return !!v && typeof v === 'object' && 'type' in v && 'stem' in v
 }
 
 function downloadDoc() {

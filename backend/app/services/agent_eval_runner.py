@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -365,7 +365,7 @@ def _run(run_id: str) -> None:
             run.status = "failed"
             run.stage = "failed"
             run.error = "评测集为空"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = datetime.now(UTC)
             db.commit()
             return
         if requested_limit > 0:
@@ -377,7 +377,7 @@ def _run(run_id: str) -> None:
             "frozen": sum(1 for c in cases if c.split == "frozen"),
             "agent_id": run.agent_id,
             "model_config_id": str(run.model_config_id) if run.model_config_id else None,
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": datetime.now(UTC).isoformat(),
         }
         db.commit()
 
@@ -387,7 +387,7 @@ def _run(run_id: str) -> None:
             run.status = "failed"
             run.stage = "failed"
             run.error = "工具名校验失败：" + "; ".join(tool_errors)
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = datetime.now(UTC)
             db.commit()
             logger.error("agent eval run %s failed tool validation: %s", run_id, tool_errors)
             return
@@ -397,7 +397,7 @@ def _run(run_id: str) -> None:
             run.status = "failed"
             run.stage = "failed"
             run.error = "未找到可用的管理员账号"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = datetime.now(UTC)
             db.commit()
             return
 
@@ -413,7 +413,7 @@ def _run(run_id: str) -> None:
         run.gate = agent_metrics.agent_eval_gate(metrics, baseline_metrics=_baseline_metrics(db, run))
         run.status = "done"
         run.stage = "done"
-        run.finished_at = datetime.now(timezone.utc)
+        run.finished_at = datetime.now(UTC)
         db.commit()
     except Exception as exc:
         logger.exception("agent eval run failed: %s", run_id)
@@ -423,7 +423,7 @@ def _run(run_id: str) -> None:
                 run.status = "failed"
                 run.stage = "failed"
                 run.error = str(exc)[:2000]
-                run.finished_at = datetime.now(timezone.utc)
+                run.finished_at = datetime.now(UTC)
                 db.commit()
         except Exception:
             logger.exception("agent eval run finalize failed: %s", run_id)

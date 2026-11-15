@@ -42,9 +42,10 @@ JUDGE_TEMPLATE = """问题：
 
 def judge_answer(question: str, contexts: list[str], answer: str) -> dict:
     """调当前上下文的对话模型打分；返回 {faithfulness, relevance, reason}。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
     from app.services import llm
     from app.services.llm import LLMConfigError
-    from langchain_core.messages import HumanMessage, SystemMessage
 
     prompt = JUDGE_TEMPLATE.format(
         question=(question or "").strip()[:1000],

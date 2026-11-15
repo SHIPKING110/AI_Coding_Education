@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import {
   createQuickReply,
@@ -87,8 +88,8 @@ async function saveQr() {
     }
     showQrForm.value = false
     await loadQuickReplies()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '保存快捷术语失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '保存快捷术语失败')
   } finally {
     qrSaving.value = false
   }
@@ -99,8 +100,8 @@ async function removeQr(q: QuickReply) {
   try {
     await deleteQuickReply(q.id)
     await loadQuickReplies()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '删除失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '删除失败')
   }
 }
 
@@ -115,8 +116,8 @@ async function loadThreads() {
     threads.value = r.items
     campuses.value = r.campuses || []
     if (!activeId.value && threads.value.length) await openThread(threads.value[0].id)
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '加载会话失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '加载会话失败')
   }
 }
 
@@ -129,8 +130,8 @@ async function openThread(id: string) {
     active.value = r.thread
     messages.value = r.items
     await scrollMessages()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '加载消息失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '加载消息失败')
   } finally {
     loading.value = false
   }
@@ -144,8 +145,8 @@ async function sendReply() {
     reply.value = ''
     await openThread(activeId.value)
     await refreshSilent()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '回复失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '回复失败')
   }
 }
 
@@ -155,8 +156,8 @@ async function closeThread() {
     await staffServiceClose(activeId.value)
     await openThread(activeId.value)
     await refreshSilent()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '关闭失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '关闭失败')
   }
 }
 

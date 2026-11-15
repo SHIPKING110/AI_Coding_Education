@@ -1,5 +1,6 @@
 <template>
   <RouterView />
+  <ForcePasswordDialog />
   <ToastHost />
 </template>
 
@@ -7,6 +8,7 @@
 import { onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 
+import ForcePasswordDialog from './components/ForcePasswordDialog.vue'
 import ToastHost from './components/ToastHost.vue'
 import { useThemeStore } from './stores/theme'
 

@@ -9,10 +9,9 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-from app.core.database import Base
-
 # 建表前导入模型，确保 metadata 收录（否则 system_search_config 不会被 create_all 建出来）
 import app.models.search_config  # noqa: F401
+from app.core.database import Base
 
 TEST_DB_NAME = "child_code_test_websearch"
 

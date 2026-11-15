@@ -59,7 +59,7 @@ def test_retrieve_applies_route_override_and_parent_context(monkeypatch):
     ]
     monkeypatch.setattr(rag, "get_collection", lambda: _FakeCollection(docs, metas, [0.1, 0.2, 0.3]))
     monkeypatch.setattr(rag, "embed_texts", lambda texts: [[0.1, 0.2, 0.3]])
-    monkeypatch.setattr("app.crud.knowledge.usable_doc_ids", lambda db, doc_ids: set(doc_ids))
+    monkeypatch.setattr("app.crud.knowledge.usable_doc_ids", lambda db, doc_ids=None, parent_visible=False, **_kw: set(doc_ids or []))
     monkeypatch.setattr(rag, "_apply_rerank", lambda q, cands, db, owner: (cands, {"rerank": False}))
 
     diag: dict = {}
@@ -88,7 +88,7 @@ def _fake_retrieval_env(monkeypatch, dists=(0.1,)):
     metas = [{"doc_id": f"d{i}", "title": "文档一"} for i in range(len(dists))]
     monkeypatch.setattr(rag, "get_collection", lambda: _FakeCollection(docs, metas, list(dists)))
     monkeypatch.setattr(rag, "embed_texts", lambda texts: [[0.1, 0.2, 0.3]])
-    monkeypatch.setattr("app.crud.knowledge.usable_doc_ids", lambda db, doc_ids: set(doc_ids))
+    monkeypatch.setattr("app.crud.knowledge.usable_doc_ids", lambda db, doc_ids=None, parent_visible=False, **_kw: set(doc_ids or []))
     kw = [{"text": "内容一", "title": "文档一", "doc_id": "d0", "similarity": 0.5}]
     monkeypatch.setattr(rag, "_keyword_search", lambda q, **kwargs: kw)
 

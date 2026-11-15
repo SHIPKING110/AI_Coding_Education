@@ -1,7 +1,16 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.media import strip_media_signature
+
+
+def _strip_signed_urls(urls: list[str] | None) -> list[str] | None:
+    """入库前剥离 /uploads/ URL 上的短期签名查询串（签名由响应层按需重签）。"""
+    if urls is None:
+        return None
+    return [strip_media_signature(u) for u in urls]
 
 
 class FeedbackCreate(BaseModel):
@@ -17,6 +26,11 @@ class FeedbackCreate(BaseModel):
     homework: str | None = Field(default=None)
     media_urls: list[str] = Field(default_factory=list)
 
+    @field_validator("media_urls")
+    @classmethod
+    def _clean_media_urls(cls, v):
+        return _strip_signed_urls(v) or []
+
 
 class FeedbackUpdate(BaseModel):
     """编辑课后反馈（含批量学员时共享的课程字段）。"""
@@ -28,6 +42,11 @@ class FeedbackUpdate(BaseModel):
     evaluation: str | None = None
     homework: str | None = None
     media_urls: list[str] | None = None
+
+    @field_validator("media_urls")
+    @classmethod
+    def _clean_media_urls(cls, v):
+        return _strip_signed_urls(v)
 
 
 class FeedbackPublishIn(BaseModel):

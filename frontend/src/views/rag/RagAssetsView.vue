@@ -19,6 +19,7 @@ import {
   type RagChunk,
   type RagCollectionStat,
   type RagDoc,
+  type RagKnowledgeBase,
 } from '@/api/ragAdmin'
 
 type Tab = 'documents' | 'bases' | 'collections'
@@ -34,7 +35,7 @@ const q = ref('')
 const statusFilter = ref('')
 const visibility = ref('')
 const enabledFilter = ref('')
-const bases = ref<any[]>([])
+const bases = ref<RagKnowledgeBase[]>([])
 const collections = ref<{ active: string; collections: RagCollectionStat[] } | null>(null)
 const selected = ref<RagDoc | null>(null)
 const chunks = ref<RagChunk[]>([])

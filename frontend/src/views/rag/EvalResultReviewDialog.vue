@@ -44,8 +44,8 @@ const formError = ref('')
  */
 const queue = ref<RagEvalResult[]>([])
 const current = computed<RagEvalResult | null>(() => queue.value[idx.value] ?? null)
-const ans = computed(() => (current.value?.metrics?.answer ?? null) as Record<string, any> | null)
-const judge = computed(() => (ans.value?.judge ?? null) as Record<string, any> | null)
+const ans = computed(() => (current.value?.metrics?.answer ?? null) as EvalAnswerBag | null)
+const judge = computed(() => (ans.value?.judge ?? null) as Record<string, unknown> | null)
 const retrievalOnly = computed(() => props.run?.answer_eval === false && !judge.value)
 
 const hitIds = computed(() => {
@@ -81,7 +81,17 @@ function pct(v: unknown): string {
   return typeof v === 'number' ? `${Math.round(v * 100)}%` : '-'
 }
 
-function citationText(a: Record<string, any> | null): string {
+/** 评测结果 metrics.answer 的动态结构（后端口径演进，已知键显式声明） */
+interface EvalAnswerBag {
+  answer?: string
+  judge?: Record<string, unknown> | null
+  citation?: { present?: boolean; indices?: number[]; invalid?: number[] } | null
+  keyword_hit?: number
+  keyword_missing?: string[]
+  [key: string]: unknown
+}
+
+function citationText(a: EvalAnswerBag | null): string {
   const c = a?.citation
   if (!c || !c.present) return '未引用'
   const list = (c.indices || []).join('、')
@@ -228,7 +238,7 @@ watch(
               <p class="rv-answer">{{ ans.answer || '（无回答）' }}</p>
               <p class="rv-line muted">
                 {{ citationText(ans) }} · 关键词命中 {{ pct(ans.keyword_hit) }}
-                <template v-if="(ans.keyword_missing || []).length">· 缺失：{{ ans.keyword_missing.join('、') }}</template>
+                <template v-if="(ans?.keyword_missing || []).length">· 缺失：{{ (ans?.keyword_missing || []).join('、') }}</template>
               </p>
             </section>
 

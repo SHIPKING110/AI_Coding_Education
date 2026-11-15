@@ -7,12 +7,12 @@ import json
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_roles, require_teacher_permission
+from app.api.deps import get_current_user, require_roles
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.models.system_setting import SystemSetting
@@ -161,6 +161,7 @@ def read_settings(db: Session = Depends(get_db)) -> dict:
 @router.put("")
 def update_settings(
     payload: SystemSettingUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict:
@@ -173,6 +174,7 @@ def update_settings(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="暂无个性化设置操作权限，请联系管理员开通")
     row = _get_or_create(db)
     data = payload.model_dump(exclude_unset=True)
+    audit_before = {k: getattr(row, k, None) for k in data}
     if "login_theme" in data and data["login_theme"] not in ALLOWED_LOGIN_THEMES:
         raise HTTPException(status_code=400, detail=f"login_theme 非法，可选：{ALLOWED_LOGIN_THEMES}")
     if "ui_theme" in data and data["ui_theme"] not in ALLOWED_UI_THEMES:
@@ -207,10 +209,26 @@ def update_settings(
         elif k in ("parent_risk_words", "parent_quick_replies"):
             arr = v if isinstance(v, list) else [s.strip() for s in str(v).split("\n") if s.strip()]
             setattr(row, k, json.dumps(arr, ensure_ascii=False))
+        elif k in ("login_logo", "desktop_bg"):
+            # 媒体 URL 入库前去签名：签名有有效期，持久化会让登录页背景/Logo 过期后 401
+            from app.core.media import strip_media_signature
+
+            setattr(row, k, strip_media_signature(v) if isinstance(v, str) else v)
         else:
             setattr(row, k, json.dumps(v) if k == "nav_order" else v)
     db.commit()
     db.refresh(row)
+    from app.services import audit
+
+    audit_after = {k: getattr(row, k, None) for k in data}
+    changed = audit.diff(audit_before, audit_after)
+    audit.record(
+        db, user, "settings.update",
+        target_type="system_settings", target_id="singleton",
+        before={k: audit_before.get(k) for k in changed},
+        after=changed,
+        request=request,
+    )
     return _out(row)
 
 

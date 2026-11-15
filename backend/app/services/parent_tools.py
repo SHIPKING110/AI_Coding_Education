@@ -14,13 +14,11 @@
 from __future__ import annotations
 
 import time
-import uuid
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.enrollment import StudentStatus
 from app.models.feedback import Feedback, FeedbackStatus
 from app.models.schedule import Schedule, ScheduleStatus
 from app.models.user import User

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -196,12 +198,12 @@ def rank_memories(
 
 def reinforce_memories(db: Session, *, memory_ids: list) -> int:
     """强化：本轮被召回/采用的记忆 use_count+1、刷新 last_used_at、importance 微升。"""
-    from datetime import datetime, timezone as _tz
+    from datetime import datetime
 
     if not memory_ids:
         return 0
     rows = db.scalars(select(AgentMemory).where(AgentMemory.id.in_(memory_ids))).all()
-    now = datetime.now(_tz.utc)
+    now = datetime.now(UTC)
     for r in rows:
         r.use_count = int(r.use_count or 0) + 1
         r.last_used_at = now

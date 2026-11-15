@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 import { useRoute, useRouter } from 'vue-router'
 
 import { listCampusesApi, listTeachersApi, type UserOut } from '@/api/auth'
@@ -230,13 +231,13 @@ const visibleCoursesMd = computed(() =>
     : (form.value.fields['courses'] ?? ''),
 )
 const boardCoursesRowCount = computed(() =>
-  countMdTableRows(((boardDetail.value?.content as any)?.courses ?? '') as string),
+  countMdTableRows((boardDetail.value?.content?.courses ?? '') as string),
 )
 const boardCoursesCollapsed = computed(
   () => boardCoursesRowCount.value > COURSES_COLLAPSE_LIMIT && !boardCoursesExpanded.value,
 )
 const visibleBoardCoursesMd = computed(() => {
-  const md = (((boardDetail.value?.content as any)?.courses ?? '') as string) ?? ''
+  const md = ((boardDetail.value?.content?.courses ?? '') as string) ?? ''
   return boardCoursesCollapsed.value ? truncateMdTable(md, COURSES_COLLAPSE_LIMIT) : md
 })
 
@@ -399,10 +400,6 @@ function restoreDailyWeeklyAiJob() {
 }
 
 /** AI 任务失败时前端只弹 toast，这里直接清除任务状态 */
-function dismissDailyWeeklyAiJob() {
-  clearAiJobState()
-}
-
 function showError(msg: string) {
   toast.error(msg)
 }
@@ -612,8 +609,8 @@ async function save() {
     form.value.title = r.title ?? title
     showNotice('已保存草稿（含最新统计数据）')
     loadHistory()
-  } catch (e: any) {
-    showError(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    showError(apiErrorDetail(e, '保存失败'))
   } finally {
     saving.value = false
   }
@@ -639,8 +636,8 @@ async function publish() {
     report.value = await publishReport(report.value.id)
     showNotice('报告已提交/发布')
     loadHistory()
-  } catch (e: any) {
-    showError(e?.response?.data?.detail || '发布失败')
+  } catch (e: unknown) {
+    showError(apiErrorDetail(e, '发布失败'))
   } finally {
     publishing.value = false
   }
@@ -658,8 +655,8 @@ async function doUnpublish() {
     report.value = await unpublishReport(report.value.id)
     showNotice('已撤回为草稿')
     loadHistory()
-  } catch (e: any) {
-    showError(e?.response?.data?.detail || '撤回失败')
+  } catch (e: unknown) {
+    showError(apiErrorDetail(e, '撤回失败'))
   }
 }
 
@@ -728,8 +725,8 @@ async function generateAI() {
     showAiModal.value = false
     toast.info('AI 正在后台生成（约 20-60 秒），完成后自动回填，可继续编辑')
     startAiJobTimers()
-  } catch (e: any) {
-    aiError.value = e?.response?.data?.detail || 'AI 任务提交失败'
+  } catch (e: unknown) {
+    aiError.value = apiErrorDetail(e, 'AI 任务提交失败')
     toastApiError(e)
   }
 }

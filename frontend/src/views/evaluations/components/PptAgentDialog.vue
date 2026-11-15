@@ -5,13 +5,13 @@ import {
   buildPptAgent,
   getPptAgentTitles,
   initPptAgent,
-  pptDownloadUrl,
   refinePptAgent,
   submitPptAgentOutline,
   type PptAgentInitOut,
   type PptAgentOutlineItem,
   type PptAgentOutlinePreviewItem,
 } from '@/api/evaluation'
+import { openMedia } from '@/api/media'
 import { useAiTasksStore } from '@/stores/aiTasks'
 
 const aiTasks = useAiTasksStore()
@@ -293,7 +293,7 @@ async function pick(id: string) {
       titleOpts.value = r.titles
       typewriterTo(`「${pickedLabel}」风格已定，排版会整套换肤，标题只决定封面文字。为你拟了 4 个标题，选一个最喜欢的，或点 E 自定义输入。`)
       step.value = 2
-    } catch (e: unknown) {
+    } catch {
       // 标题 AI 偶发超时也不阻塞流程：给本地兜底标题，仍可继续下一步
       const cn = initData.value?.class_name || '本班'
       titleOpts.value = [`${cn} 阶段学习汇报`, `看见每一次进步 · ${cn}`, `一起见证成长 · ${cn}`, `${cn} 家长会`]
@@ -636,7 +636,7 @@ defineExpose({ start })
                     <strong>{{ buildRecordTitle }}</strong>
                     <span>可预览与下载</span>
                   </div>
-                  <a class="result-download" :href="pptDownloadUrl(buildRecordPptUrl)" target="_blank">下载 .pptx</a>
+                  <a class="result-download" href="#" @click.prevent="openMedia(buildRecordPptUrl)">下载 .pptx</a>
                 </div>
                 <div v-else-if="!buildTask" class="result-empty">点击「生成精美 PPT」后在此查看进度与下载</div>
 

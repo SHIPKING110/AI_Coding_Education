@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 import { useRouter } from 'vue-router'
 
 import {
@@ -120,8 +121,8 @@ async function confirmSubscribe() {
     payError.value = ''
     showPay.value = true
     startTimer(order.expires_at)
-  } catch (e: any) {
-    orderError.value = e?.response?.data?.detail || '下单失败，请重试'
+  } catch (e: unknown) {
+    orderError.value = apiErrorDetail(e, '下单失败，请重试')
   } finally {
     ordering.value = false
   }
@@ -136,8 +137,8 @@ async function confirmPay() {
     showPay.value = false
     stopTimer()
     router.push({ name: 'client-orders' })
-  } catch (e: any) {
-    payError.value = e?.response?.data?.detail || '支付失败'
+  } catch (e: unknown) {
+    payError.value = apiErrorDetail(e, '支付失败')
   } finally {
     paying.value = false
   }

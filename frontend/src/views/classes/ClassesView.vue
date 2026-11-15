@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -264,8 +265,8 @@ async function submit() {
     }
     showForm.value = false
     await load()
-  } catch (e: any) {
-    formError.value = e?.response?.data?.detail || '保存失败'
+  } catch (e: unknown) {
+    formError.value = apiErrorDetail(e, '保存失败')
   }
 }
 
@@ -385,7 +386,7 @@ onMounted(async () => {
     campuses.value = []
   }
   try {
-    subjectOptions.value = (await listSubjects()).map((s: any) => s.name)
+    subjectOptions.value = (await listSubjects()).map((s) => s.name)
   } catch {
     subjectOptions.value = []
   }

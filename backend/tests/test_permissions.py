@@ -137,7 +137,7 @@ def test_teacher_crud_gated(client):
     r = c.post(
         "/api/auth/teachers",
         headers=_h(tokens, "t1"),
-        json={"username": f"nt{ids['t1'].hex[:4]}", "password": "123456", "name": "新教师"},
+        json={"username": f"nt{ids['t1'].hex[:4]}", "password": "12345678a", "name": "新教师"},
     )
     assert r.status_code == 403, r.text
     # 开通新增后可建，且职务预设自动套用
@@ -149,7 +149,7 @@ def test_teacher_crud_gated(client):
     r = c.post(
         "/api/auth/teachers",
         headers=_h(tokens, "t1"),
-        json={"username": f"nt{ids['t1'].hex[:4]}", "password": "123456", "name": "新教师", "title": "助教"},
+        json={"username": f"nt{ids['t1'].hex[:4]}", "password": "12345678a", "name": "新教师", "title": "助教"},
     )
     assert r.status_code == 201, r.text
     new_id = r.json()["id"]

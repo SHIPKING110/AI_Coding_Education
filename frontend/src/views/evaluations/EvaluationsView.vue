@@ -10,6 +10,7 @@ import PptAgentDialog from '@/views/evaluations/components/PptAgentDialog.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import StudentFilter, { type StudentFilterValue } from '@/components/StudentFilter.vue'
 import { listCampusesApi, listTeachersApi, type UserOut } from '@/api/auth'
+import { openMedia } from '@/api/media'
 import {
   getStudent,
   listClasses,
@@ -30,7 +31,6 @@ import {
   getEvaluationMaterial,
   listEvaluations,
   publishEvaluation,
-  pptDownloadUrl,
   updateClassPpt,
   type ClassPptRecordOut,
   type ClassPptTaskOut,
@@ -1169,7 +1169,7 @@ onBeforeUnmount(() => {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14M8 5v14M16 5v14M4 9h16M4 13h16" /></svg>
           班级家长会 PPT
         </button>
-        <a v-if="current?.ppt_url" class="op-btn download" :href="pptDownloadUrl(current.ppt_url)" target="_blank">
+        <a v-if="current?.ppt_url" class="op-btn download" href="#" @click.prevent="openMedia(String(current.ppt_url))">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
           查看 PPT
         </a>
@@ -1601,7 +1601,7 @@ onBeforeUnmount(() => {
                   <strong>{{ String(classPptResult.title || '班级家长会 PPT') }}</strong>
                   <span v-if="classPptResult.student_count">含 {{ classPptResult.student_count }} 名学员数据</span>
                 </div>
-                <a class="result-download" :href="pptDownloadUrl(String(classPptResult.ppt_url))" target="_blank">
+                <a class="result-download" href="#" @click.prevent="openMedia(String(classPptResult.ppt_url))">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
                   下载 PPT
                 </a>
@@ -1615,7 +1615,7 @@ onBeforeUnmount(() => {
                     <template v-if="classPptRecord.updated_at"> · 更新于 {{ fmtCnDateKey(classPptRecord.updated_at) }}</template>
                   </span>
                 </div>
-                <a class="result-download" :href="pptDownloadUrl(classPptRecord.ppt_url)" target="_blank">
+                <a class="result-download" href="#" @click.prevent="openMedia(classPptRecord.ppt_url)">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
                   下载 PPT
                 </a>

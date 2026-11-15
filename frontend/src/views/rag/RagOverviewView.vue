@@ -49,14 +49,14 @@ function latencyTone(v: number | null | undefined, good = 800, warn = 2000) {
 function evalMetric(path: [string, string] | [string], fallback = '-') {
   const m = data.value?.latest_eval?.metrics
   if (!m) return fallback
-  let cur: any = m
+  let cur: unknown = m
   for (const key of path) {
     if (cur == null || typeof cur !== 'object') return fallback
-    cur = cur[key]
+    cur = (cur as Record<string, unknown>)[key]
   }
   return cur == null ? fallback : cur
 }
-function score(v: any) {
+function score(v: unknown) {
   if (v == null || Number.isNaN(Number(v))) return '-'
   return Number(v).toFixed(3)
 }

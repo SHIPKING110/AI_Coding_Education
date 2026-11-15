@@ -11,7 +11,13 @@ from sqlalchemy.orm import sessionmaker
 import app.models  # noqa: F401 —— 注册全部 ORM 模型
 from app.core.database import Base
 from app.main import app
-from app.services.rag import _split_multi_intent, _title_overlap, _apply_title_boost, _demote_faq_on_tie, _effective_score
+from app.services.rag import (
+    _apply_title_boost,
+    _demote_faq_on_tie,
+    _effective_score,
+    _split_multi_intent,
+    _title_overlap,
+)
 
 TEST_DB_NAME = "child_code_rag_admin_test"
 
@@ -78,10 +84,10 @@ def _register(client, role: str, tag: str) -> tuple[dict, dict]:
     username = f"{tag}-{uuid.uuid4().hex[:8]}"
     r = client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
     assert r.status_code == 201, r.text
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     token = login.json()["access_token"]
     me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).json()
     return {"Authorization": f"Bearer {token}"}, me

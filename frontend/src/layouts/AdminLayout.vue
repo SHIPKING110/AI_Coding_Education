@@ -113,10 +113,6 @@ watch(
   },
 )
 
-function goAssignments() {
-  router.push({ name: 'assignments' })
-}
-
 function goProfile() {
   router.push({ name: 'profile' })
 }

@@ -9,9 +9,11 @@ import {
   listSubmissions,
   type SubmissionDetail,
   type SubmissionListItem,
+  type SubmissionQuestionOut,
   type SubmissionStats,
 } from '@/api/client'
 import { createMakeupAssignment, getAssignment } from '@/api/assignment'
+import { apiErrorDetail } from '@/utils/errors'
 
 const route = useRoute()
 const router = useRouter()
@@ -37,6 +39,14 @@ const error = ref('')
 // 批改弹窗状态
 const gradingVisible = ref(false)
 const grading = ref<SubmissionDetail | null>(null)
+
+/** 单题批改结果（judge_results 的 value 形状） */
+type JudgeResult = { judged?: boolean; correct?: boolean; score?: number; max_score?: number }
+
+function judgeOf(q: SubmissionQuestionOut): JudgeResult | null {
+  const r = (grading.value?.judge_results ?? {})[String(q.order_no)]
+  return r && typeof r === 'object' ? (r as JudgeResult) : null
+}
 const scores = ref<Record<string, number>>({})
 const comment = ref('')
 const submitting = ref(false)
@@ -50,15 +60,15 @@ const isGradeView = computed(
 )
 /** 人工批改过的题号（judged=true 且有人工给分痕迹的题） */
 const manualQs = computed(() => {
-  const results = (grading.value?.judge_results ?? {}) as Record<string, any>
+  const results = (grading.value?.judge_results ?? {}) as Record<string, unknown>
   return (grading.value?.questions ?? []).filter((q) => {
-    const r = results[String(q.order_no)]
+    const r = results[String(q.order_no)] as JudgeResult | undefined
     return !!r && r.judged === true
   })
 })
 /** 已保存的批改评语（后端存在 judge_results._comment） */
 const savedComment = computed(() => {
-  const results = (grading.value?.judge_results ?? {}) as Record<string, any>
+  const results = (grading.value?.judge_results ?? {}) as Record<string, unknown>
   const c = results._comment
   return typeof c === 'string' ? c : ''
 })
@@ -110,7 +120,7 @@ const filteredSubmissions = computed(() => {
 
 // ---------- 展示辅助 ----------
 
-function answerText(q: any): string {
+function answerText(q: SubmissionQuestionOut): string {
   const answers = grading.value?.answers ?? {}
   const v = answers[String(q.order_no)]
   if (v === undefined || v === null) return '（未作答）'
@@ -125,7 +135,7 @@ function unescapeCode(text: string): string {
   return text.replace(/\\n/g, '\n').replace(/\\t/g, '\t')
 }
 
-function refText(q: any): string {
+function refText(q: SubmissionQuestionOut): string {
   const v = q.answer
   if (v === undefined || v === null) return '（无）'
   if (q.type === 'single_choice' && typeof v === 'number') return q.options?.[v] ?? String(v)
@@ -136,8 +146,8 @@ function refText(q: any): string {
   return q.type === 'code_fill' || q.type === 'programming' ? unescapeCode(s) : s
 }
 
-function judgeInfo(q: any): { cls: string; label: string } | null {
-  const r = (grading.value?.judge_results ?? {})[String(q.order_no)] as any
+function judgeInfo(q: SubmissionQuestionOut): { cls: string; label: string } | null {
+  const r = judgeOf(q)
   if (!r) return null
   if (r.judged === true) {
     return r.correct ? { cls: 'ok', label: '✓ 正确' } : { cls: 'no', label: '✗ 错误' }
@@ -145,13 +155,13 @@ function judgeInfo(q: any): { cls: string; label: string } | null {
   return { cls: 'manual', label: '待批改' }
 }
 
-function manualMax(q: any): number {
-  const r = (grading.value?.judge_results ?? {})[String(q.order_no)] as any
-  return Number(r?.max_score) > 0 ? Number(r.max_score) : 1
+function manualMax(q: SubmissionQuestionOut): number {
+  const r = judgeOf(q)
+  return Number(r?.max_score) > 0 ? Number(r?.max_score) : 1
 }
 
-function scoreText(q: any): number {
-  const r = (grading.value?.judge_results ?? {})[String(q.order_no)] as any
+function scoreText(q: SubmissionQuestionOut): number {
+  const r = judgeOf(q)
   const v = Number(r?.score)
   return Number.isFinite(v) && v >= 0 ? v : 0
 }
@@ -228,7 +238,7 @@ async function openFromNotification() {
 }
 
 function savedCommentOf(detail: SubmissionDetail | null): string {
-  const c = ((detail?.judge_results ?? {}) as Record<string, any>)._comment
+  const c = ((detail?.judge_results ?? {}) as Record<string, unknown>)._comment
   return typeof c === 'string' ? c : ''
 }
 
@@ -248,7 +258,7 @@ async function openGrade(item: SubmissionListItem) {
     grading.value = await getSubmission(assignmentId, item.id)
     scores.value = {}
     for (const q of grading.value?.questions ?? []) {
-      const r = (grading.value?.judge_results ?? {})[String(q.order_no)] as any
+      const r = judgeOf(q)
       if (r && r.judged === false) {
         scores.value[String(q.order_no)] = r.score ?? 0
       }
@@ -257,10 +267,10 @@ async function openGrade(item: SubmissionListItem) {
     // 已批改默认只读查看；待批改直接进入编辑态
     gradeReadonly.value = grading.value?.status === 'graded'
     gradingVisible.value = true
-  } catch (e: any) {
+  } catch (e: unknown) {
     // 已批改/被删除等情况下给出明确提示，避免「加载提交失败」误导
-    const status = e?.response?.status
-    const detail = e?.response?.data?.detail as string | undefined
+    const status = (e as { response?: { status?: number } })?.response?.status
+    const detail = apiErrorDetail(e, '')
     if (status === 404) {
       alert(detail || '该提交已不存在（可能已被删除或作业已撤回），请刷新列表')
       await load()
@@ -282,8 +292,8 @@ async function submitGrade() {
     setTimeout(() => (msg.value = ''), 3000)
     gradingVisible.value = false
     await load()
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '批改失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '批改失败'))
   } finally {
     submitting.value = false
   }
@@ -326,8 +336,8 @@ async function confirmMakeup() {
       `已生成补练草稿《${draft.title}》，仅 ${draft.target_student_names.length} 名学员可见。可在 AI 习题页用 AI 出题后发布。`,
     )
     router.push({ name: 'assignments', query: { draft: draft.id } })
-  } catch (e: any) {
-    makeupError.value = e?.response?.data?.detail || '生成补练作业失败'
+  } catch (e: unknown) {
+    makeupError.value = apiErrorDetail(e, '生成补练作业失败')
   } finally {
     makeupSubmitting.value = false
   }

@@ -68,10 +68,10 @@ def admin_token(client):
     username = f"smoke-admin-{uuid.uuid4().hex[:8]}"
     resp = client.post(
         "/api/auth/register",
-        json={"role": "admin", "username": username, "password": "123456", "name": "Smoke Admin"},
+        json={"role": "admin", "username": username, "password": "12345678a", "name": "Smoke Admin"},
     )
     assert resp.status_code == 201
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     assert login.status_code == 200
     return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
@@ -84,12 +84,12 @@ def teacher_token(client):
         json={
             "role": "teacher",
             "username": username,
-            "password": "123456",
+            "password": "12345678a",
             "name": "Smoke Teacher",
         },
     )
     assert resp.status_code == 201
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
 

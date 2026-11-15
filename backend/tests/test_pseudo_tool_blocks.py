@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """伪工具调用「当正文」问题回归测试：
 
 模型有时不发起真正的工具调用，而是把 `<write_skill_file> skill:/path:/content: <svg…>` 或

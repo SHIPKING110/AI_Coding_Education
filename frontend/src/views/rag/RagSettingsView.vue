@@ -10,6 +10,7 @@ import {
   listRagConfigVersions,
   rollbackRagConfig,
   updateRagConfig,
+  type RagAuditEntry,
   type RagConfigVersion,
 } from '@/api/ragAdmin'
 
@@ -36,7 +37,7 @@ interface Cfg {
 const form = ref<Cfg | null>(null)
 const defaults = ref<Cfg | null>(null)
 const versions = ref<RagConfigVersion[]>([])
-const audit = ref<any[]>([])
+const audit = ref<RagAuditEntry[]>([])
 const note = ref('')
 const loading = ref(false)
 const saving = ref(false)

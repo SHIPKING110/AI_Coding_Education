@@ -275,7 +275,9 @@ export async function generateReportPpt(
 }
 
 export function pptDownloadUrl(pptUrl: string): string {
-  // UPLOAD_DIR 静态服务挂载在 /uploads
+  // UPLOAD_DIR 静态服务挂载在 /uploads。
+  // 注意：/uploads/ 文件必须携带短期签名，「直接当 href 用」会 401；
+  // 点击下载请使用 @/api/media 的 openMedia（先换签名再打开）。
   return `/uploads/${pptUrl}`
 }
 

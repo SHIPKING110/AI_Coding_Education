@@ -1,4 +1,4 @@
-"""Skill 文件包：上传 zip（含 SKILL.md + 脚本/资源）→ 落盘隔离目录 → 解析引用。
+﻿"""Skill 文件包：上传 zip（含 SKILL.md + 脚本/资源）→ 落盘隔离目录 → 解析引用。
 
 安全设计（默认全部收紧）：
 - 只允许解压 .md/.txt/.json/.yaml/.yml/.py/.js/.sh/.png/.jpg/.jpeg/.gif/.webp，
@@ -141,7 +141,6 @@ def cleanup_conversation(owner_id, conv_id, output_urls=None) -> int:
                     _sh.rmtree(cd, ignore_errors=True)
                     removed += 1
                 # 兜底：conversations 下可能因不同短 id 截断产生相近目录，按前缀再清一次
-            convroot = None
             # 清理 _outputs：按传入 url 精确到 <run> 目录
             for url in output_urls or []:
                 m = _re.search(r"/uploads/skills/([^/]+)/([^/]+)/_outputs/([^/]+)/", str(url))
@@ -271,11 +270,11 @@ def skill_context_block(owner_id, skill_id, name: str, content: str, files: list
             pass
     # 专业结构分组：SKILL.md(已在摘要中) / scripts 可执行脚本 / references 参考资料 / assets 资源文件
     lowers = [(f, str(f).lower()) for f in (files or [])]
-    scripts = [f for f, l in lowers if l.endswith((".py", ".js", ".sh")) and not l.endswith("skill.md")]
+    scripts = [f for f, lp in lowers if lp.endswith((".py", ".js", ".sh")) and not lp.endswith("skill.md")]
     if scripts:
         parts.append("可执行脚本 scripts/（对话中可用 run_skill_script 工具实际执行：传 skill 名 + 脚本路径 + 参数；"
                      "生成的文件会自动取回并给出下载链接，不要只描述不执行）：\n" + "\n".join(f"- {s}" for s in scripts[:20]))
-    refs = [f for f, l in lowers if ("/references/" in f"/{l}" or l.endswith((".md", ".txt"))) and not l.endswith("skill.md") and f not in scripts]
+    refs = [f for f, lp in lowers if ("/references/" in f"/{lp}" or lp.endswith((".md", ".txt"))) and not lp.endswith("skill.md") and f not in scripts]
     if refs:
         parts.append("参考资料 references/：\n" + "\n".join(f"- {s}" for s in refs[:20]))
     assets = [f for f, _ in lowers if f not in scripts and f not in refs and not str(f).lower().endswith("skill.md")]

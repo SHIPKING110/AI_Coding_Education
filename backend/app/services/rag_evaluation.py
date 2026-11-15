@@ -13,7 +13,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -186,7 +186,7 @@ def _build_snapshot(db: Session, run: RagEvalRun, cases: list) -> dict:
         "parent_mode": bool(run.parent_mode),
         "collection": collection,
         "code_version": code_version,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -234,7 +234,7 @@ def _run(run_id: str) -> None:
             run.status = "failed"
             run.stage = "failed"
             run.error = "评测集为空"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = datetime.now(UTC)
             db.commit()
             return
         run.total_cases = len(cases)
@@ -296,7 +296,7 @@ def _run(run_id: str) -> None:
         run.stage = "done"
         run.progress = 100
         run.processed_cases = len(cases)
-        run.finished_at = datetime.now(timezone.utc)
+        run.finished_at = datetime.now(UTC)
         # 保存 rerank=on 的逐条结果（与前端展示一致）
         for c, row in zip(cases, rows):
             db.add(RagEvalResult(
@@ -314,7 +314,7 @@ def _run(run_id: str) -> None:
                 run.status = "failed"
                 run.stage = "failed"
                 run.error = str(exc) or exc.__class__.__name__
-                run.finished_at = datetime.now(timezone.utc)
+                run.finished_at = datetime.now(UTC)
                 db.commit()
         except Exception:
             pass

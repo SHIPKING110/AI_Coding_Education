@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useAuthStore } from '@/stores/auth'
@@ -31,8 +32,8 @@ async function onSubmit() {
     await auth.login({ username: username.value, password: password.value })
     const redirect = (route.query.redirect as string) || '/'
     router.push(redirect)
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '登录失败，请检查用户名和密码'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '登录失败，请检查用户名和密码')
   } finally {
     loading.value = false
   }

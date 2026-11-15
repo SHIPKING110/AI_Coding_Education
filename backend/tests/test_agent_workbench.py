@@ -1,4 +1,4 @@
-"""Agent 工作台四项优化回归测试：
+﻿"""Agent 工作台四项优化回归测试：
 1) 广场收录 Skill 可被收录者解析/执行（物化到使用者目录，效果与发布者一致）；
 2) 原生工具调用标记净化（二次编辑不再吐乱码）；
 3) Skill 生成 PPT 时从工具轨迹提炼大纲（大纲/成果对齐、SVG 页可预览）。
@@ -678,7 +678,8 @@ def test_sanitize_svg_fonts_removes_zero_placeholder():
     ns = {"Path": Path, "print": print}
     exec(m.group(0), ns)
     fn = ns["_sanitize_svg_fonts"]
-    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    d = Path(tempfile.mkdtemp())
+    (d / "svg_output").mkdir()
     f = d/"svg_output/16_end.svg"
     f.write_text(
         '<svg><text font-size="56">下节课见！</text>'
@@ -703,7 +704,8 @@ def test_sanitize_pptx_role_ids_fixes_missing_ids():
     ns = {"Path": Path, "print": print}
     exec(m.group(0), ns)
     fn = ns["_sanitize_pptx_role_ids"]
-    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    d = Path(tempfile.mkdtemp())
+    (d / "svg_output").mkdir()
     f = d/"svg_output/01_cover.svg"
     f.write_text(
         '<svg viewBox="0 0 1280 720">'
@@ -732,7 +734,8 @@ def test_sanitize_svg_colors_fixes_invalid():
     ns = {"Path": Path, "print": print}
     exec(m.group(0), ns)
     fn = ns["_sanitize_svg_colors"]
-    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    d = Path(tempfile.mkdtemp())
+    (d / "svg_output").mkdir()
     f = d/"svg_output/01_cover.svg"
     f.write_text('<svg><rect stroke="#33island" fill="#FFF"/><text fill="#GGG">x</text></svg>', encoding="utf-8")
     fn(d)
@@ -752,7 +755,8 @@ def test_sanitize_root_bounds_overlap_drops_smaller():
     ns = {"Path": Path, "print": print}
     exec(m.group(0), ns)
     fn = ns["_sanitize_root_bounds_overlap"]
-    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    d = Path(tempfile.mkdtemp())
+    (d / "svg_output").mkdir()
     f = d/"svg_output/06.svg"
     f.write_text(
         '<svg viewBox="0 0 1280 720">'
@@ -778,7 +782,8 @@ def test_sanitize_svg_xml_fixes_unescaped_amp():
     ns = {"Path": Path, "print": print}
     exec(m.group(0), ns)
     fn = ns["_sanitize_svg_xml"]
-    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    d = Path(tempfile.mkdtemp())
+    (d / "svg_output").mkdir()
     f = d/"svg_output/01.svg"
     f.write_text('<svg><text>A & B &amp; C</text><text>ctl\x08char</text></svg>', encoding="utf-8")
     fn(d)
@@ -797,7 +802,8 @@ def test_sanitize_svg_overflow_clamps_into_viewbox():
     ns = {"Path": Path, "print": print}
     exec(m.group(0), ns)
     fn = ns["_sanitize_svg_overflow"]
-    d = Path(tempfile.mkdtemp()); (d/"svg_output").mkdir()
+    d = Path(tempfile.mkdtemp())
+    (d / "svg_output").mkdir()
     f = d/"svg_output/01.svg"
     f.write_text(
         '<svg viewBox="0 0 1280 720">'
@@ -817,7 +823,9 @@ def test_qc_errors_only():
     import re
     src=open("seed_skills/ppt-master-adapter/scripts/ppt_oneshot.py",encoding="utf-8").read()
     m=re.search(r"def _qc_errors_only.*?(?=\ndef cmd_build)", src, re.S)
-    ns={"print":print}; exec(m.group(0),ns); fn=ns["_qc_errors_only"]
+    ns = {"print": print}
+    exec(m.group(0), ns)
+    fn = ns["_qc_errors_only"]
     assert fn('{"summary":{"errors":0,"warnings":2,"passed":0}}') is True
     assert fn('{"summary":{"errors":1}}') is False
     assert fn('[ERROR] bad') is False

@@ -48,16 +48,17 @@ def test_release_evidence_requires_calibration_pairs_and_kappa():
         {**base, "calibration": {"pairs": 12, "kappa": None}},
         done_runs=3, require_calibration=True,
     )
-    assert undefined and "Kappa 无定义" in undefined[0]
+    # 新版口径：旧校准数据（无四指标、无 SLA）提示重新评估
+    assert undefined and "缺少四指标" in undefined[0]
 
     low = check_release_evidence(
-        {**base, "calibration": {"pairs": 12, "kappa": 0.42}},
+        {**base, "calibration": {"pairs": 12, "sla": {"passed": False, "reasons": ["severe_rate 过高"]}}},
         done_runs=3, require_calibration=True,
     )
-    assert low and "低于 0.6" in low[0]
+    assert low and "人工校准未达 SLA" in low[0]
 
     trusted = check_release_evidence(
-        {**base, "calibration": {"pairs": 12, "kappa": 0.71}},
+        {**base, "calibration": {"pairs": 12, "sla": {"passed": True}}},
         done_runs=3, require_calibration=True,
     )
     assert trusted == []

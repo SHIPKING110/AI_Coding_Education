@@ -14,6 +14,9 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    # 幂等：create_all / schema_ensure 可能已建表，先探测再执行
+    if sa.inspect(op.get_bind()).has_table("sandbox_settings"):
+        return
     op.create_table(
         "sandbox_settings",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),

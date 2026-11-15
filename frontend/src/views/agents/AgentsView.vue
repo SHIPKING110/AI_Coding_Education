@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, onUpdated, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -285,61 +285,13 @@ const pptTitle = ref('')
 const building = ref(false)
 const pptResult = ref<{ ppt_url: string; download: string; pages: number; theme: string } | null>(null)
 const wsError = ref('')
-const deckPreview = ref(true)
 
 /* —— 幻灯片预览：把当前大纲/文案渲染成可读的 PPT 页（含封面），无需翻历史对话 —— */
-const THEME_TOKENS: Record<string, { primary: string; soft: string; accent: string; deep: string }> = {
-  brand: { primary: '#615FFF', soft: '#EEF2FF', accent: '#00B8DB', deep: '#312E81' },
-  cyan: { primary: '#00B8DB', soft: '#ECFEFF', accent: '#615FFF', deep: '#0E7490' },
-  deep: { primary: '#312E81', soft: '#EEF2FF', accent: '#00B8DB', deep: '#1E1B4B' },
-}
 
-const deckTheme = computed(() => THEME_TOKENS[pptTheme.value] ?? THEME_TOKENS.brand)
-const deckStyle = computed(() => {
-  const t = deckTheme.value
-  return { '--sp': t.primary, '--ss': t.soft, '--sa': t.accent, '--sd': t.deep }
-})
 
-interface DeckSlide {
-  kind: 'cover' | 'content' | 'end'
-  kicker: string
-  title: string
-  bullets: string[]
-  meta?: string
-}
 
-function splitBullets(text: unknown): string[] {
-  return String(text ?? '')
-    .split(/\n|[；;]/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-}
 
-const deckSlides = computed<DeckSlide[]>(() => {
-  const deck: DeckSlide[] = []
-  const items = outlineDraft.value
-  const coverTitle = pptTitle.value.trim() || activeConv.value?.title || '工作汇报'
-  const period = material.value.find((m) => m.period)?.period || ''
-  const firstIsCover = items.length > 0 && (items[0].kind === 'cover' || /封面|cover/i.test(items[0].title || ''))
-  deck.push({
-    kind: 'cover', kicker: 'COVER', title: firstIsCover ? (items[0].title || coverTitle) : coverTitle,
-    bullets: [], meta: period,
-  })
-  const contentItems = firstIsCover ? items.slice(1) : items
-  contentItems.forEach((o, i) => {
-    const sec = sectionPreview.value.find((s) => s.title === o.title) ?? sectionPreview.value[i]
-    let bullets = splitBullets(o.note)
-    if (!bullets.length && sec) bullets = splitBullets(sec.body)
-    deck.push({
-      kind: 'content', kicker: `PART ${String(i + 1).padStart(2, '0')}`,
-      title: o.title || (sec?.title ?? `第 ${i + 1} 页`), bullets,
-    })
-  })
-  deck.push({ kind: 'end', kicker: '', title: coverTitle, bullets: [] })
-  return deck
-})
 
-const todayStr = new Date().toISOString().slice(0, 10)
 
 /* —— 真实生成的 SVG 页：优先用 spec.slides 里「按文件名精确对齐到每页」的 url，
    这样大纲第 i 页 ↔ 它自己的那页 SVG，不再依赖两个数组的脆弱下标对齐；
@@ -510,19 +462,6 @@ function syncOutlineDraft() {
 const sectionPreview = ref<{ id?: string; title: string; body: string; open: boolean }[]>([])
 const sectionDirty = ref(false)
 
-function markSectionDirty() {
-  sectionDirty.value = true
-}
-
-function sendSectionsToAgent() {
-  if (!sectionPreview.value.length || streaming.value) return
-  const lines = sectionPreview.value.map((s, i) => `${i + 1}. ${s.title}\n${s.body}`.trim())
-  sectionDirty.value = false
-  void send({
-    text: `我已修改文案（共 ${sectionPreview.value.length} 页），请按此文案继续排版：\n${lines.join('\n\n')}`,
-    stage: activeConv.value?.stage ?? 'chat',
-  })
-}
 
 async function loadMaterial() {
   if (!activeConv.value) return

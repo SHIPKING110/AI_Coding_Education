@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 import { useRouter } from 'vue-router'
 
 import SearchableSelect from '@/components/SearchableSelect.vue'
@@ -495,8 +496,8 @@ async function submitSingle() {
     }
     showForm.value = false
     await load()
-  } catch (e: any) {
-    formError.value = e?.response?.data?.detail || '创建排课失败'
+  } catch (e: unknown) {
+    formError.value = apiErrorDetail(e, '创建排课失败')
   } finally {
     submitting.value = false
   }
@@ -538,8 +539,8 @@ async function submitRecurring() {
     }
     showForm.value = false
     await load()
-  } catch (e: any) {
-    formError.value = e?.response?.data?.detail || '创建循环排课失败'
+  } catch (e: unknown) {
+    formError.value = apiErrorDetail(e, '创建循环排课失败')
   } finally {
     submitting.value = false
   }
@@ -571,8 +572,8 @@ async function confirmCancel() {
   try {
     await cancelSchedule(cancelTarget.value.id)
     await load()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '取消排课失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '取消排课失败')
   }
 }
 

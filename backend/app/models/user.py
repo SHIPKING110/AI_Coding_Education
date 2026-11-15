@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum, Numeric, String, func
+from sqlalchemy import Boolean, DateTime, Enum, Numeric, String, false, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -51,8 +51,11 @@ class User(Base):
     # 基本工资（为空时取职务基本工资）
     base_salary: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     status: Mapped[str] = mapped_column(
-        Enum(UserStatus, native_enum=False, length=16, values_callable=_enum_values), default=UserStatus.ACTIVE
+        Enum(UserStatus, native_enum=False, length=16, values_callable=_enum_values),
+        default=UserStatus.ACTIVE,
     )
+    # 强制改密：管理员代建账号/重置密码后置 True，登录后仅可访问改密接口直至完成改密
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

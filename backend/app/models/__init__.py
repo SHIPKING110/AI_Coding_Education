@@ -23,6 +23,7 @@ from app.models.assignment import (
     Submission,
     SubmissionStatus,
 )
+from app.models.audit import AuditLog
 from app.models.business import (
     Campus,
     CommissionRule,
@@ -110,7 +111,14 @@ __all__ = [
     "AssignmentStatus",
     "Attendance",
     "AttendanceStatus",
+    "AuditLog",
     "Campus",
+    "CommissionRule",
+    "Invitation",
+    "InvitationStatus",
+    "PayrollEntry",
+    "SystemParentLLMConfig",
+    "TeacherLevel",
     "Class",
     "ClassPpt",
     "Evaluation",

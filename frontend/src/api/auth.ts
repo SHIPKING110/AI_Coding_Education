@@ -23,6 +23,10 @@ export interface UserOut {
   base_salary: string | null
   status: string
   created_at: string
+  /** 强制改密标记：为 true 时 App 级弹窗强制先改密（后端同步拦截其他接口） */
+  must_change_password?: boolean
+  /** 仅注册响应：代建账号时服务端一次性返回的随机临时密码 */
+  initial_password?: string | null
 }
 
 export interface LoginIn {
@@ -33,7 +37,8 @@ export interface LoginIn {
 export interface RegisterIn {
   role: UserRole
   username: string
-  password: string
+  /** 管理员/教务代建账号可不传：服务端生成随机临时密码（响应 initial_password） */
+  password?: string
   name: string
   phone?: string | null
   gender?: string | null

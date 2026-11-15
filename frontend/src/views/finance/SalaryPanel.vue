@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import PaginationBar from '@/components/PaginationBar.vue'
 import {
@@ -33,7 +34,7 @@ const showCompute = ref(false)
 const target = ref<WorkbenchItem | null>(null)
 const computing = ref(false)
 const result = ref<Record<string, string> | null>(null)
-const entries = ref<Record<string, any>[]>([])
+const entries = ref<Record<string, unknown>[]>([])
 
 const RULE_LABELS: Record<string, string> = {
   invite: '电话意向人头奖',
@@ -116,7 +117,7 @@ const maxTotal = computed(() =>
   filtered.value.reduce((m, u) => Math.max(m, Number(u.total || 0)), 0),
 )
 
-const entryOf = (uid: string) => entries.value.find((e) => e.user_id === uid) as Record<string, any> | undefined
+const entryOf = (uid: string) => entries.value.find((e) => e.user_id === uid)
 
 // 明细弹窗：结构化分解（金额 + 占比），供可视化展示
 const detailRows = computed(() => {
@@ -218,13 +219,13 @@ async function lockEntry() {
       convert_count: Number(e.convert_count || 0),
       renew_count: Number(e.renew_count || 0),
       refer_count: Number(e.refer_count || 0),
-      trial_lesson_count: Number((e as any).trial_lesson_count || 0),
+      trial_lesson_count: Number(e.trial_lesson_count || 0),
       lesson_commission: String(e.lesson_commission || '0'),
     })
     flash(`已锁定 ${target.value.name} ${month.value} 薪资（后续自动核算不再覆盖）`)
     await load(false)
-  } catch (err: any) {
-    alert(err?.response?.data?.detail || '锁定失败')
+  } catch (err: unknown) {
+    alert(apiErrorDetail(err, '锁定失败'))
   } finally {
     computing.value = false
   }
@@ -250,8 +251,8 @@ async function recomputeEntry() {
     // 重算后恢复自动态：再调一次自动核算把 auto 标回 true
     await autoComputePayroll(month.value)
     await load(false)
-  } catch (err: any) {
-    alert(err?.response?.data?.detail || '重算失败')
+  } catch (err: unknown) {
+    alert(apiErrorDetail(err, '重算失败'))
   } finally {
     computing.value = false
   }

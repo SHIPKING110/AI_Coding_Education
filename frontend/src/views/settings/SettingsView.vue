@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { myPermissions } from '@/api/permissions'
+import { apiErrorDetail } from '@/utils/errors'
 import { getSystemSettings, updateSystemSettings } from '@/api/system'
 import { useAuthStore } from '@/stores/auth'
 import PersonalizeView from '@/views/settings/PersonalizeView.vue'
@@ -86,8 +87,8 @@ async function saveParentService() {
       parent_escalated_idle_hours: Math.max(1, Math.min(720, Number(parentEscalatedIdleHours.value) || 48)),
     })
     flash('家长客服设置已保存')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
   }
 }
 
@@ -171,8 +172,8 @@ async function addCampus() {
     newCampus.value = ''
     campuses.value = await listCampuses(true)
     flash('校区已新增')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '新增失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '新增失败'))
   }
 }
 
@@ -188,8 +189,8 @@ async function saveCampus() {
     editingCampus.value = null
     campuses.value = await listCampuses(true)
     flash('校区已更新')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
   }
 }
 
@@ -197,8 +198,8 @@ async function toggleCampus(c: CampusOut) {
   try {
     await updateCampus(c.id, { active: !c.active })
     campuses.value = await listCampuses(true)
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '操作失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '操作失败'))
   }
 }
 
@@ -210,8 +211,8 @@ async function moveCampus(i: number, delta: number) {
   try {
     campuses.value = await reorderCampuses(ids)
     flash('校区顺序已更新')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '排序失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '排序失败'))
   }
 }
 
@@ -227,8 +228,8 @@ async function addSubject() {
     newSubject.value = { name: '', per_session: '2', commission_rate: '' }
     subjects.value = await listSubjects(true)
     flash('科目已新增')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '新增失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '新增失败'))
   }
 }
 
@@ -254,8 +255,8 @@ async function saveSubject() {
     editingSubject.value = null
     subjects.value = await listSubjects(true)
     flash('科目已更新')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
   }
 }
 
@@ -263,8 +264,8 @@ async function toggleSubject(s: SubjectOut) {
   try {
     await updateSubject(s.id, { active: !s.active })
     subjects.value = await listSubjects(true)
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '操作失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '操作失败'))
   }
 }
 
@@ -279,9 +280,9 @@ async function saveFinance() {
     overdraftMax.value = out.overdraft_max ?? '10'
     financeNote.value = out.note || ''
     flash('财务设置已保存（新消耗按此比例记账，历史账本不变）')
-  } catch (e: any) {
+  } catch (e: unknown) {
     saveDialogOk.value = false
-    saveDialogMsg.value = e?.response?.data?.detail || '保存失败'
+    saveDialogMsg.value = apiErrorDetail(e, '保存失败')
     showSaveDialog.value = true
     return
   }
@@ -302,8 +303,8 @@ async function addLevel() {
     newLevel.value = { name: '', ratioPct: '10' }
     levels.value = await listTeacherLevels(true)
     flash('教师级别已新增')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '新增失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '新增失败'))
   }
 }
 
@@ -322,8 +323,8 @@ async function saveLevel() {
     editingLevel.value = null
     levels.value = await listTeacherLevels(true)
     flash('教师级别已更新（新增账本按新比例，历史账本不变）')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
   }
 }
 
@@ -333,8 +334,8 @@ async function removeLevel(l: TeacherLevelOut) {
     await deleteTeacherLevel(l.id)
     levels.value = await listTeacherLevels(true)
     flash('级别已删除')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '删除失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '删除失败'))
   }
 }
 
@@ -346,8 +347,8 @@ async function addPost() {
     newPost.value = { name: '', baseSalary: '' }
     posts.value = await listPosts()
     flash(out.hint || '职务已新增（权限默认全关，请到权限管理授权）')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '新增失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '新增失败'))
   }
 }
 
@@ -366,8 +367,8 @@ async function savePost() {
     editingPost.value = null
     posts.value = await listPosts()
     flash('职务工资已更新（与权限管理职务预设同源）')
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    alert(apiErrorDetail(e, '保存失败'))
   }
 }
 
@@ -377,9 +378,9 @@ async function saveRules() {
       rules.value.map((r) => ({ key: r.key, label: r.label, amount: r.amount, unit: r.unit })),
     )
     flash('提成规则已保存（薪资核算按新单价）')
-  } catch (e: any) {
+  } catch (e: unknown) {
     saveDialogOk.value = false
-    saveDialogMsg.value = e?.response?.data?.detail || '保存失败'
+    saveDialogMsg.value = apiErrorDetail(e, '保存失败')
     showSaveDialog.value = true
     return
   }

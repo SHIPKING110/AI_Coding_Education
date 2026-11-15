@@ -1,3 +1,4 @@
+import json
 from asyncio import sleep
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -5,11 +6,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, Response
 
 from app.api import api_router
-from app.core.config import get_settings
+from app.core.config import get_settings, validate_startup_security
 from app.services.llm import LLMConfigError
 
 settings = get_settings()
@@ -89,11 +89,24 @@ async def _usage_meter_sweeper() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     import asyncio
+    import logging
 
     from app.core.database import engine
-    from app.core.schema_ensure import ensure_business_schema
+    from app.core.schema_ensure import ensure_business_schema, verify_business_schema
 
-    ensure_business_schema(engine)
+    # 生产环境安全配置强校验：密钥等不合规直接拒绝启动（dev/test 仅告警）
+    validate_startup_security(settings)
+    _schema_mode = (settings.SCHEMA_ENSURE_MODE or "auto").strip().lower()
+    if _schema_mode == "auto":
+        ensure_business_schema(engine)
+    elif _schema_mode == "verify":
+        _issues = verify_business_schema(engine)
+        if _issues:
+            logging.getLogger("app.startup").warning(
+                "schema 校验发现 %d 处差异（请执行 alembic upgrade head）：%s",
+                len(_issues),
+                "；".join(_issues[:10]),
+            )
     # Skill 适配脚本版本对齐（管理员/教师同一套自愈 + 出片质量，避免物化副本旧版本漂移）
     try:
         import asyncio as _aio
@@ -134,6 +147,62 @@ app.add_middleware(
 app.include_router(api_router, prefix=settings.API_PREFIX)
 
 
+def _security_headers(response):
+    """基础安全响应头（nginx 侧另有同类配置；后端直连/开发环境同样生效）。"""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+    )
+    return response
+
+
+@app.middleware("http")
+async def _security_headers_mw(request: Request, call_next):
+    return _security_headers(await call_next(request))
+
+
+@app.middleware("http")
+async def _sign_media_urls_mw(request: Request, call_next):
+    """API JSON 响应中的 /uploads/... 统一补短期签名，前端与历史数据零改动。"""
+    response = await call_next(request)
+    ctype = response.headers.get("content-type", "")
+    if not (
+        request.url.path.startswith(settings.API_PREFIX)
+        and ctype.startswith("application/json")
+        and response.status_code < 400
+    ):
+        return response
+    from app.core.media import sign_urls_in_json
+
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers={
+                k: v
+                for k, v in response.headers.items()
+                if k.lower() not in ("content-length", "content-type")
+            },
+            media_type=ctype,
+        )
+    headers = {
+        k: v
+        for k, v in response.headers.items()
+        if k.lower() not in ("content-length", "content-type")
+    }
+    return JSONResponse(
+        content=sign_urls_in_json(payload),
+        status_code=response.status_code,
+        headers=headers,
+    )
+
+
+
 @app.middleware("http")
 async def _no_store_api_cache(request: Request, call_next):
     """管理端高频变更的基础资料（校区/科目等）禁止浏览器启发式缓存，避免排序调整后下拉仍显示旧顺序。"""
@@ -143,9 +212,13 @@ async def _no_store_api_cache(request: Request, call_next):
     return response
 
 # 素材静态服务（反馈照片/视频等，本地存储 OQ-04 决策）
+# 安全：所有文件必须携带短期签名（响应中间件自动为 API 返回的 /uploads/ URL 补签名），
+# 匿名直链 / 过期链接一律 401，杜绝学员照片、家长聊天截图被外链传播。
 _upload_dir = Path(settings.UPLOAD_DIR)
 _upload_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=str(_upload_dir)), name="uploads")
+from app.core.media import SignedMediaFiles  # noqa: E402  (依赖 settings 初始化)
+
+app.mount("/uploads", SignedMediaFiles(directory=str(_upload_dir)), name="uploads")
 
 
 @app.get(f"{settings.API_PREFIX}/health", tags=["system"])

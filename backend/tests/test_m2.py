@@ -55,10 +55,10 @@ def _register(client, role, tag):
     username = f"{tag}-{uuid.uuid4().hex[:8]}"
     r = client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
     assert r.status_code == 201, r.text
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
 
@@ -433,7 +433,7 @@ def _register_with_campus(client, role, name, campus):
         json={
             "role": role,
             "username": username,
-            "password": "123456",
+            "password": "12345678a",
             "name": name,
             "campus": campus,
         },
@@ -677,10 +677,10 @@ def test_schedule_campus_filter(client, admin_token):
     t1 = _register_with_campus(client, "teacher", "一校排课教师", "一校")
     t2 = _register_with_campus(client, "teacher", "二校排课教师", "二校")
     login1 = client.post(
-        "/api/auth/login", json={"username": t1["username"], "password": "123456"}
+        "/api/auth/login", json={"username": t1["username"], "password": "12345678a"}
     ).json()
     login2 = client.post(
-        "/api/auth/login", json={"username": t2["username"], "password": "123456"}
+        "/api/auth/login", json={"username": t2["username"], "password": "12345678a"}
     ).json()
     h1 = {"Authorization": f"Bearer {login1['access_token']}"}
     h2 = {"Authorization": f"Bearer {login2['access_token']}"}

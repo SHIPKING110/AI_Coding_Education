@@ -1232,9 +1232,6 @@ def _collect_report_material(db: Session, rep: Report, payload: ReportAiDraftIn)
     - 年度=4 个季度总结（显式勾选优先）或回退口径。
     """
     if rep.type == ReportType.DAILY.value:
-        material = report_crud.collect_daily_material(
-            db, teacher_id=rep.teacher_id, day=rep.period_start
-        )
         lines = [f"- 日期：{rep.period_start.strftime('%Y-%m-%d')}"]
         lessons = report_crud.collect_daily_lesson_material(
             db, teacher_id=rep.teacher_id, day=rep.period_start

@@ -5,8 +5,14 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.agent_ext import AgentGlobalSetting, AgentMCP, AgentSkill, AgentSkillCollection, CustomAgent, SandboxSetting
-
+from app.models.agent_ext import (
+    AgentGlobalSetting,
+    AgentMCP,
+    AgentSkill,
+    AgentSkillCollection,
+    CustomAgent,
+    SandboxSetting,
+)
 
 # ---------------- 自定义 Agent ----------------
 

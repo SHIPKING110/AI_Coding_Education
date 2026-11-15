@@ -519,7 +519,7 @@ export async function listUsersApi(params: {
   include_inactive?: boolean
   limit?: number
   offset?: number
-} = {}): Promise<PageOut<{ id: string; name: string; username: string; role: string; phone: string | null }>> {
+} = {}): Promise<PageOut<{ id: string; name: string; username: string; role: string; phone: string | null; campus: string | null }>> {
   const { data } = await http.get('/auth/users', { params })
   return data
 }

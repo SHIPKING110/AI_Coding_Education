@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { apiErrorDetail, apiErrorStatus } from '@/utils/errors'
 
 import {
   parentChat,
@@ -89,9 +90,9 @@ async function sendText(text: string) {
     let r
     try {
       r = await parentChat(t, { thread_id: thread.value?.id, anon_key: anonKey() })
-    } catch (e: any) {
+    } catch (e: unknown) {
       // 旧 thread_id 不属于当前身份（常见于换账号/清缓存后残留）：清掉并重开一条
-      if (e?.response?.status === 403) {
+      if (apiErrorStatus(e) === 403) {
         localStorage.removeItem(THREAD_KEY)
         thread.value = null
         r = await parentChat(t, { anon_key: anonKey() })
@@ -116,8 +117,8 @@ async function sendText(text: string) {
         items.value.push({ id: `a-${Date.now()}`, role: 'assistant', content: '这个问题需要老师人工确认，已为您转接人工老师，请稍候。', created_at: null })
       }
     }
-  } catch (e: any) {
-    const detail = e?.response?.data?.detail || '发送失败，请稍后重试'
+  } catch (e: unknown) {
+    const detail = apiErrorDetail(e, '发送失败，请稍后重试')
     error.value = typeof detail === 'string' ? detail : '发送失败，请稍后重试'
   } finally {
     sending.value = false
@@ -137,8 +138,8 @@ async function toHuman() {
   try {
     await parentEscalate(thread.value.id)
     escalatedNote.value = '已为您转接人工老师，请稍候。'
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '转人工失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '转人工失败')
   }
 }
 

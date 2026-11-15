@@ -144,6 +144,9 @@ docker compose up -d --build
 
 - 产品需求：[docs/prd/PRD.md](docs/prd/PRD.md)
 - 架构决策：[docs/adr/README.md](docs/adr/README.md)
+- **API 端点总览（自动生成）**：[docs/api-overview.md](docs/api-overview.md)
+- **架构加固计划（M-A/WS1–WS6）**：[docs/plan/architecture-v2-hardening.md](docs/plan/architecture-v2-hardening.md)
+- **上线发布检查单**：[docs/release-checklist.md](docs/release-checklist.md)
 - 术语表：[docs/glossary.md](docs/glossary.md)
 - 评测导入规格：[docs/rag-eval-import-format.md](docs/rag-eval-import-format.md)
 

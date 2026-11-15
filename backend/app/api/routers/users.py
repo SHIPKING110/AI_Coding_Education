@@ -1,13 +1,13 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles, require_teacher_permission
 from app.core.database import get_db
-from app.core.security import hash_password, verify_password
+from app.core.security import hash_password, validate_password_strength, verify_password
 from app.crud import business as business_crud
 from app.crud import user as user_crud
 from app.models.user import Role, User, UserStatus
@@ -58,19 +58,28 @@ def update_my_profile(    payload: UserSelfUpdate,
 @router.post("/me/password", response_model=UserOut)
 def change_my_password(
     payload: ChangePasswordIn,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> UserOut:
     """修改本人密码：校验原密码后设置新密码。"""
     if not verify_password(payload.old_password, current_user.password_hash):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="原密码不正确")
-    return UserOut.model_validate(user_crud.set_password(db, current_user, payload.new_password))
+    updated = user_crud.set_password(db, current_user, payload.new_password, must_change_password=False)
+    from app.services import audit
+
+    audit.record(
+        db, current_user, "user.change_password",
+        target_type="user", target_id=str(current_user.id), request=request,
+    )
+    return UserOut.model_validate(updated)
 
 
 @router.patch("/users/{user_id}/password", response_model=UserOut)
 def reset_user_password(
     user_id: uuid.UUID,
     payload: AdminPasswordResetIn,
+    request: Request,
     db: Session = Depends(get_db),
     operator: User = Depends(get_current_user),
 ) -> UserOut:
@@ -86,7 +95,17 @@ def reset_user_password(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="账号不存在")
-    return UserOut.model_validate(user_crud.set_password(db, user, payload.new_password))
+    # 管理员重置后强制该账号下次登录改密（管理员知晓临时口令，不能让口令长期有效）
+    updated = user_crud.set_password(db, user, payload.new_password, must_change_password=True)
+    from app.services import audit
+
+    audit.record(
+        db, operator, "user.reset_password",
+        target_type="user", target_id=str(user_id),
+        after={"username": user.username, "must_change_password": True},
+        request=request,
+    )
+    return UserOut.model_validate(updated)
 
 
 class TeacherCreateIn(BaseModel):
@@ -100,12 +119,18 @@ class TeacherCreateIn(BaseModel):
     teacher_level_id: str | None = None
     base_salary: str | None = None
 
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, v):
+        return validate_password_strength(v)
+
 
 @router.post("/teachers", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def create_teacher(
     payload: TeacherCreateIn,
+    request: Request,
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("teacher_add")),
+    operator: User = Depends(require_teacher_permission("teacher_add")),
 ) -> UserOut:
     """新增教师（管理端）。管理员/教务直接放行；教师需 teacher_add 权限。
     若填写职务且存在同名职务预设，自动套用其权限（职务绑定语义）。"""
@@ -145,6 +170,14 @@ def create_teacher(
                     setattr(row, k, bool(preset.permissions[k]))
             db.commit()
             db.refresh(user)
+    from app.services import audit
+
+    audit.record(
+        db, operator, "user.create_teacher",
+        target_type="user", target_id=str(user.id),
+        after={"username": user.username, "title": user.title},
+        request=request,
+    )
     return UserOut.model_validate(user)
 
 
@@ -237,8 +270,9 @@ def get_teacher(
 def update_teacher(
     teacher_id: uuid.UUID,
     payload: UserUpdate,
+    request: Request,
     db: Session = Depends(get_db),
-    _: User = Depends(require_teacher_permission("teacher_edit")),
+    operator: User = Depends(require_teacher_permission("teacher_edit")),
 ) -> UserOut:
     user = db.get(User, teacher_id)
     if user is None or user.role != Role.TEACHER.value:
@@ -281,12 +315,27 @@ def update_teacher(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     if payload.password:
         user.password_hash = hash_password(payload.password)
+        # 管理员代设的密码视为临时口令：教师下次登录强制改密
+        user.must_change_password = True
     if payload.status is not None:
         if payload.status not in (UserStatus.ACTIVE.value, UserStatus.DISABLED.value):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="status 非法")
         user.status = payload.status
     db.commit()
     db.refresh(user)
+    from app.services import audit
+
+    audit.record(
+        db, operator, "user.update",
+        target_type="user", target_id=str(teacher_id),
+        after={
+            "fields": sorted(payload.model_fields_set),
+            "password_reset": bool(payload.password),
+            "status": user.status,
+            "title": user.title,
+        },
+        request=request,
+    )
     return UserOut.model_validate(user)
 
 
@@ -309,3 +358,10 @@ def delete_teacher(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="教师不存在")
     user.status = UserStatus.DISABLED
     db.commit()
+    from app.services import audit
+
+    audit.record(
+        db, operator, "user.disable",
+        target_type="user", target_id=str(teacher_id),
+        after={"username": user.username, "status": user.status},
+    )

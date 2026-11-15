@@ -172,9 +172,11 @@ def _scope_path(rel: str) -> str:
     while True:
         changed = False
         if rel.startswith("./"):
-            rel = rel[2:]; changed = True
+            rel = rel[2:]
+            changed = True
         if rel.startswith("/"):
-            rel = rel[1:]; changed = True
+            rel = rel[1:]
+            changed = True
         if not changed:
             break
     prefix = _conv_prefix()

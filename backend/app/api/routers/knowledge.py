@@ -389,6 +389,7 @@ def remove_document(doc_id: uuid.UUID, db: Session = Depends(get_db), user: User
     doc = kb_crud.get_document(db, doc_id=doc_id, owner_id=user.id)
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
+    before = {"title": doc.title, "file_path": doc.file_path}
     rag.delete_document_vectors(doc.id)
     rag.delete_document_vectors(doc.id, parent=True)
     try:
@@ -396,6 +397,12 @@ def remove_document(doc_id: uuid.UUID, db: Session = Depends(get_db), user: User
     except OSError:
         pass
     kb_crud.delete_document(db, doc)
+    from app.services import audit
+
+    audit.record(
+        db, user, "knowledge.delete",
+        target_type="knowledge_document", target_id=str(doc_id), before=before,
+    )
     return {"ok": True}
 
 

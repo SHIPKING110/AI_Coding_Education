@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -157,8 +158,8 @@ async function submitCreate() {
     showCreate.value = false
     await loadCampuses()
     await load()
-  } catch (e: any) {
-    formError.value = e?.response?.data?.detail || '创建教师失败'
+  } catch (e: unknown) {
+    formError.value = apiErrorDetail(e, '创建教师失败')
   } finally {
     submitting.value = false
   }
@@ -210,8 +211,8 @@ async function submitEdit() {
     showEdit.value = false
     await loadCampuses()
     await load()
-  } catch (e: any) {
-    formError.value = e?.response?.data?.detail || '保存失败'
+  } catch (e: unknown) {
+    formError.value = apiErrorDetail(e, '保存失败')
   } finally {
     submitting.value = false
   }
@@ -235,8 +236,8 @@ async function confirmRemove() {
   try {
     await deleteTeacherApi(delTarget.value.id)
     await load()
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '删除失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '删除失败')
   }
 }
 

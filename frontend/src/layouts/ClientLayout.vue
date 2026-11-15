@@ -14,7 +14,6 @@ const theme = useThemeStore()
 
 const meName = computed(() => auth.user?.name ?? '')
 const meRole = computed(() => auth.user?.role ?? '')
-const isStudent = computed(() => meRole.value === 'student')
 
 const students = computed(() => store.students)
 const activeStudentId = computed(() => store.activeStudentId)

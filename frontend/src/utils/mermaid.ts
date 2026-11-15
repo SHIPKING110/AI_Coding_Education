@@ -4,9 +4,12 @@
  * 渲染成功后图占比容器宽度自适应，点击图或「放大」进入灯箱预览（滚轮缩放 / 拖拽平移 / Esc 关闭）。
  */
 
-let mermaidPromise: Promise<any> | null = null
+/** Mermaid 模块类型（动态 import 的返回值） */
+type MermaidModule = (typeof import('mermaid'))['default']
 
-function loadMermaid(): Promise<any> {
+let mermaidPromise: Promise<MermaidModule> | null = null
+
+function loadMermaid(): Promise<MermaidModule> {
   if (!mermaidPromise) {
     mermaidPromise = import('mermaid').then((m) => {
       const mm = m.default
@@ -235,7 +238,7 @@ export async function renderMermaidNodes(root: ParentNode | null | undefined): P
   if (!boxes.length) return
   ensureDiagramStyles()
 
-  let mm: any = null
+  let mm: MermaidModule | null = null
   try {
     mm = await loadMermaid()
   } catch {

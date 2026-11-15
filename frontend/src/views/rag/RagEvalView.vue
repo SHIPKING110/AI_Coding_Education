@@ -93,31 +93,32 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-function normalizeImportRow(row: any): Record<string, unknown> {
+function normalizeImportRow(row: unknown): Record<string, unknown> {
   if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('行必须是对象')
-  const query = String(row.query ?? row['用户问题'] ?? '').trim()
+  const obj = row as Record<string, unknown>
+  const query = String(obj.query ?? obj['用户问题'] ?? '').trim()
   if (!query) throw new Error('query（用户问题）不能为空')
-  const toArray = (v: any): string[] => {
+  const toArray = (v: unknown): string[] => {
     if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean)
     if (typeof v === 'string') return v.split(/[;；]/).map((x) => x.trim()).filter(Boolean)
     return []
   }
   return {
     query,
-    relevant: toArray(row.relevant ?? row['应命中文档'] ?? row['相关文档']),
-    answerability: String(row.answerability ?? 'unlabeled').trim(),
-    split: String(row.split ?? 'regression').trim(),
-    business_criticality: String(row.business_criticality ?? 'normal').trim(),
-    gt_answer: String(row.gt_answer ?? row['标准答案'] ?? '').trim(),
-    gt_keywords: toArray(row.gt_keywords ?? row['关键词']),
-    query_type: String(row.query_type ?? 'fact').trim() || 'fact',
-    difficulty: String(row.difficulty ?? 'normal').trim() || 'normal',
-    notes: String(row.notes ?? row['备注'] ?? '').trim(),
-    source: String(row.source ?? importSource.value ?? 'import').trim() || 'import',
+    relevant: toArray(obj.relevant ?? obj['应命中文档'] ?? obj['相关文档']),
+    answerability: String(obj.answerability ?? 'unlabeled').trim(),
+    split: String(obj.split ?? 'regression').trim(),
+    business_criticality: String(obj.business_criticality ?? 'normal').trim(),
+    gt_answer: String(obj.gt_answer ?? obj['标准答案'] ?? '').trim(),
+    gt_keywords: toArray(obj.gt_keywords ?? obj['关键词']),
+    query_type: String(obj.query_type ?? 'fact').trim() || 'fact',
+    difficulty: String(obj.difficulty ?? 'normal').trim() || 'normal',
+    notes: String(obj.notes ?? obj['备注'] ?? '').trim(),
+    source: String(obj.source ?? importSource.value ?? 'import').trim() || 'import',
   }
 }
 
-function parseRowsWithIndex(items: any[], label: string): ImportParseResult {
+function parseRowsWithIndex(items: unknown[], label: string): ImportParseResult {
   const rows: Record<string, unknown>[] = []
   const errors: string[] = []
   items.forEach((item, idx) => {
@@ -134,7 +135,7 @@ function parseImportText(text: string, label = '粘贴内容'): ImportParseResul
   const t = text.trim()
   if (!t) return { rows: [], errors: [], files: [label] }
   if (t.startsWith('[')) {
-    let arr: any
+    let arr: unknown
     try {
       arr = JSON.parse(t)
     } catch (e) {
@@ -644,16 +645,16 @@ const judgeShort: Record<string, string> = {
 const SPLIT_LABELS: Record<string, string> = { tuning: '调优', regression: '回归', frozen: '冻结' }
 const CRIT_LABELS: Record<string, string> = { critical: '关键', important: '重要', normal: '普通' }
 const KIND_LABELS: Record<string, string> = { answerable: '可答', unanswerable: '不可答', unlabeled: '未标注' }
-function resultChips(m: any): Array<{ text: string; cls: string }> {
+function resultChips(m: Record<string, unknown> | null | undefined): Array<{ text: string; cls: string }> {
   const chips: Array<{ text: string; cls: string }> = []
-  if (m?.split) chips.push({ text: SPLIT_LABELS[m.split] || m.split, cls: m.split === 'frozen' ? 'crit' : '' })
+  if (m?.split) chips.push({ text: SPLIT_LABELS[m.split as string] || String(m.split), cls: m.split === 'frozen' ? 'crit' : '' })
   if (m?.business_criticality) {
     chips.push({
-      text: CRIT_LABELS[m.business_criticality] || m.business_criticality,
+      text: CRIT_LABELS[m.business_criticality as string] || String(m.business_criticality),
       cls: m.business_criticality === 'critical' ? 'crit' : m.business_criticality === 'important' ? 'warn' : '',
     })
   }
-  if (m?.case_kind) chips.push({ text: KIND_LABELS[m.case_kind] || m.case_kind, cls: m.case_kind === 'unanswerable' ? 'warn' : '' })
+  if (m?.case_kind) chips.push({ text: KIND_LABELS[m.case_kind as string] || String(m.case_kind), cls: m.case_kind === 'unanswerable' ? 'warn' : '' })
   return chips
 }
 function openReview(r: RagEvalResult) {
@@ -712,10 +713,14 @@ interface CompareRow {
   better: 'high' | 'low'
 }
 const compareRows = computed<CompareRow[]>(() => {
-  const cur: any = activeRun.value?.metrics
-  const base: any = compareRun.value?.metrics
+  const cur: unknown = activeRun.value?.metrics
+  const base: unknown = compareRun.value?.metrics
   if (!cur || !base) return []
-  const pick = (m: any, ...path: string[]) => path.reduce((acc, k) => (acc == null ? acc : acc[k]), m)
+  const pick = (m: unknown, ...path: string[]): unknown =>
+    path.reduce<unknown>(
+      (acc, k) => (acc !== null && typeof acc === 'object' ? (acc as Record<string, unknown>)[k] : undefined),
+      m,
+    )
   const rows: CompareRow[] = [
     { label: 'hit@3（on）', cur: pick(cur, 'on', 'hit@3'), base: pick(base, 'on', 'hit@3'), unit: 'pp', better: 'high' },
     { label: 'hit@1（on）', cur: pick(cur, 'on', 'hit@1'), base: pick(base, 'on', 'hit@1'), unit: 'pp', better: 'high' },

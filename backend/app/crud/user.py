@@ -52,6 +52,7 @@ def create_user(
     campus: str | None = None,
     title: str | None = None,
     gender: str | None = None,
+    must_change_password: bool = False,
 ) -> User:
     user = User(
         role=role.value,
@@ -63,6 +64,7 @@ def create_user(
         title=(title or None),
         gender=(gender or None),
         status=UserStatus.ACTIVE,
+        must_change_password=must_change_password,
     )
     db.add(user)
     db.commit()
@@ -135,9 +137,12 @@ def update_profile(
     return user
 
 
-def set_password(db: Session, user: User, password: str) -> User:
-    """设置（重置/修改）密码并持久化。"""
+def set_password(
+    db: Session, user: User, password: str, *, must_change_password: bool = False
+) -> User:
+    """设置（重置/修改）密码并持久化；管理员重置场景传 must_change_password=True。"""
     user.password_hash = hash_password(password)
+    user.must_change_password = must_change_password
     db.commit()
     db.refresh(user)
     return user

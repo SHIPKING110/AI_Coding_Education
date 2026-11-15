@@ -34,7 +34,6 @@ def test_engine():
 @pytest.fixture()
 def client(test_engine, tmp_path_factory):
     from app.api import deps
-    from app.api.routers import agent_ops as agent_ops_router
     from app.services import agent_ops, rag_trace
 
     TestSession = sessionmaker(bind=test_engine)
@@ -60,9 +59,9 @@ def _register(client, role: str, tag: str) -> dict:
     username = f"{tag}-{uuid.uuid4().hex[:8]}"
     client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     token = login.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
 

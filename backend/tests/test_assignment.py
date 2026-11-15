@@ -54,10 +54,10 @@ def _register(client, role, tag):
     username = f"{tag}-{uuid.uuid4().hex[:8]}"
     r = client.post(
         "/api/auth/register",
-        json={"role": role, "username": username, "password": "123456", "name": tag},
+        json={"role": role, "username": username, "password": "12345678a", "name": tag},
     )
     assert r.status_code == 201, r.text
-    login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    login = client.post("/api/auth/login", json={"username": username, "password": "12345678a"})
     return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
 

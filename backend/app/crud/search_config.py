@@ -5,7 +5,6 @@ Key 只进不出：加密存储，读取接口只返回掩码。
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import select

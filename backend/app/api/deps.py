@@ -1,19 +1,27 @@
 from collections.abc import Iterable
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.core import security
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.crud import user as user_crud
 from app.models.user import Role, User
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
+# 强制改密状态下仅放行的接口（其余接口一律 403 password_change_required）
+_PASSWORD_CHANGE_ALLOWED_PATHS = {
+    f"{get_settings().API_PREFIX}/auth/me",
+    f"{get_settings().API_PREFIX}/auth/me/password",
+}
+
 
 def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -37,7 +45,29 @@ def get_current_user(
     user = user_crud.get_by_id(db, subject)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if user.must_change_password and request.url.path not in _PASSWORD_CHANGE_ALLOWED_PATHS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="password_change_required",
+        )
     return user
+
+
+def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """可选登录态：无 token / token 无效时返回 None（用于注册等「登录与否策略不同」的接口）。"""
+    if credentials is None:
+        return None
+    try:
+        payload = security.decode_token(credentials.credentials, expected_type="access")
+        subject = payload.get("sub")
+        if subject is None:
+            return None
+    except jwt.PyJWTError:
+        return None
+    return user_crud.get_by_id(db, subject)
 
 
 def require_roles(*roles: Role):

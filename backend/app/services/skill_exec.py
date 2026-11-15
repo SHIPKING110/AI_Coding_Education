@@ -543,7 +543,7 @@ def dispatch(owner_id, skill_id, rel: str, args: list, *, provider: str = "local
         # 大包直接本地执行——与管理员一致、稳定、隔离。小包仍走远程沙箱。
         _bundled_big = False
         try:
-            from app.services.skill_bundle import skill_dir as _sd, get_settings_dir as _gsd  # noqa: F401
+            from app.services.skill_bundle import skill_dir as _sd  # noqa: F401
             _root = _sd(owner_id, skill_id)
             _cnt = 0
             for _p in _root.rglob("*"):

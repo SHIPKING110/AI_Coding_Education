@@ -4,10 +4,35 @@
 - 存量表补列/改型：students.lesson_balance、lesson_records.delta/balance_after 改数值型；
   lesson_packages 加 subject_id/tag/sale_start/sale_end/published_at；
   orders 加 expires_at；teacher_permissions 加 settings_manage/finance_view 及 nav_* 导航可见键。
+
+M-B（ADR-0029）之后由 alembic 基线接管；`SCHEMA_ENSURE_MODE=verify` 时只读校验不落 DDL。
 """
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
+
+
+def verify_business_schema(engine: Engine) -> list[str]:
+    """只读校验：模型与库内 schema 的差异（不执行任何 DDL）。
+
+    返回差异清单（空列表=一致）；调用方负责告警。校验口径：
+    - 模型里的表在库中缺失；
+    - 模型里的列在对应表中缺失。
+    """
+    from app.core.database import Base
+
+    issues: list[str] = []
+    insp = inspect(engine)
+    existing_tables = set(insp.get_table_names())
+    for table_name, table in Base.metadata.tables.items():
+        if table_name not in existing_tables:
+            issues.append(f"缺表：{table_name}")
+            continue
+        db_cols = {c["name"] for c in insp.get_columns(table_name)}
+        missing = [c.name for c in table.columns if c.name not in db_cols]
+        if missing:
+            issues.append(f"{table_name} 缺列：{', '.join(missing)}")
+    return issues
 
 
 def _cols(engine: Engine, table: str) -> set[str]:
@@ -72,6 +97,8 @@ def ensure_business_schema(engine: Engine) -> None:
     addcol("users", "teacher_level_id VARCHAR(64)", "teacher_level_id")
     addcol("users", "teacher_level_name VARCHAR(64)", "teacher_level_name")
     addcol("users", "base_salary NUMERIC(10,2)", "base_salary")
+    # 强制改密标记（管理员代建账号/重置密码后为 TRUE）
+    addcol("users", "must_change_password BOOLEAN NOT NULL DEFAULT FALSE", "must_change_password")
     # 教师权限新键
     addcol(
         "teacher_permissions",
@@ -174,7 +201,10 @@ def ensure_business_schema(engine: Engine) -> None:
                         "INSERT INTO teacher_levels (id, name, ratio, active, sort) VALUES "
                         "(:a,'P1',0.10,true,1),(:b,'P2',0.15,true,2),(:c,'P3',0.20,true,3)"
                     ),
-                    {"a": str(__import__("uuid").uuid4()), "b": str(__import__("uuid").uuid4()), "c": str(__import__("uuid").uuid4())},
+                    {
+                        k: str(__import__("uuid").uuid4())
+                        for k in "abc"
+                    },
                 )
         if "commission_rules" in inspect(conn).get_table_names():
             n = conn.execute(text("SELECT COUNT(*) FROM commission_rules")).scalar() or 0

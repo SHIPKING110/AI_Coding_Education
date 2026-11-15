@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +257,7 @@ def cleanup_expired() -> dict:
     from app.services import rag_settings
 
     cfg = rag_settings.get_config()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     success_before = now - timedelta(days=int(cfg.get("trace_retention_days", 30)))
     error_before = now - timedelta(days=int(cfg.get("trace_error_retention_days", 90)))
     factory = _session_factory()

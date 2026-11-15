@@ -4,10 +4,11 @@
  * 权限默认给管理员（后端 PUT 仅 admin）。
  */
 import { computed, onMounted, ref } from 'vue'
+import { apiErrorDetail } from '@/utils/errors'
 
 import PageHead from '@/components/PageHead.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
-import { getSystemSettings, updateSystemSettings, uploadSettingImage } from '@/api/system'
+import { getSystemSettings, uploadSettingImage } from '@/api/system'
 import { DESKTOP_BGS, LOGIN_THEMES, SIDEBAR_THEMES, UI_THEMES, useThemeStore } from '@/stores/theme'
 import BrandLogo from '@/components/BrandLogo.vue'
 import { LOGO_ICONS } from '@/components/brandLogos'
@@ -82,8 +83,8 @@ async function onBgFile(e: Event) {
   try {
     customBg.value = await uploadSettingImage(file)
     desktopBg.value = '__custom__'
-  } catch (err: any) {
-    uploadError.value = err?.response?.data?.detail || '上传失败'
+  } catch (err: unknown) {
+    uploadError.value = apiErrorDetail(err, '上传失败')
   } finally {
     uploading.value = false
     if (bgFileInput.value) bgFileInput.value.value = ''
@@ -97,8 +98,8 @@ async function onLogoFile(e: Event) {
   uploadError.value = ''
   try {
     loginLogo.value = await uploadSettingImage(file)
-  } catch (err: any) {
-    uploadError.value = err?.response?.data?.detail || '上传失败'
+  } catch (err: unknown) {
+    uploadError.value = apiErrorDetail(err, '上传失败')
   } finally {
     uploading.value = false
     if (logoFileInput.value) logoFileInput.value.value = ''
@@ -165,8 +166,8 @@ async function save() {
     resultOk.value = true
     resultMsg.value = '个性化设置已保存，全局生效（含登录页与各端桌面背景）。'
     showResult.value = true
-  } catch (e: any) {
-    error.value = e?.response?.data?.detail || '保存失败'
+  } catch (e: unknown) {
+    error.value = apiErrorDetail(e, '保存失败')
     resultOk.value = false
     resultMsg.value = error.value
     showResult.value = true

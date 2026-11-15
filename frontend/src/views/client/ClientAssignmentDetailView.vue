@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { apiErrorDetail, apiErrorStatus } from '@/utils/errors'
 import { useRoute, useRouter } from 'vue-router'
 
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
@@ -9,7 +10,6 @@ import {
   submitClientAssignment,
   type ClientAssignmentDetail,
   type ClientQuestionOut,
-  type ClientSubmissionOut,
 } from '@/api/client'
 import { useClientStore } from '@/stores/client'
 
@@ -127,11 +127,6 @@ function isCurrent(orderNo: number): boolean {
 }
 
 // ---------- 答案读写 ----------
-function currentAnswer() {
-  if (!activeQ.value) return undefined
-  return answers[activeQ.value.order_no]
-}
-
 function onAnswerChange() {
   if (!activeQ.value) return
   const no = activeQ.value.order_no
@@ -173,9 +168,9 @@ async function save(manual = false) {
     if (manual) {
       setTimeout(() => (saveTip.value = ''), 2000)
     }
-  } catch (e: any) {
-    if (e?.response?.status === 400) {
-      saveTip.value = e.response.data.detail || '保存失败（可能已截止）'
+  } catch (e: unknown) {
+    if (apiErrorStatus(e) === 400) {
+      saveTip.value = apiErrorDetail(e, '保存失败（可能已截止）')
     } else {
       saveTip.value = '保存失败，请重试'
     }
@@ -258,9 +253,9 @@ async function doSubmit() {
     submitResult.score = result.submission.score
     submitResult.total = result.submission.total
     showSubmitResult.value = true
-  } catch (e: any) {
+  } catch (e: unknown) {
     tipDialog.title = '提交失败'
-    tipDialog.message = e?.response?.data?.detail || '提交失败，请重试'
+    tipDialog.message = apiErrorDetail(e, '提交失败，请重试')
     tipDialog.confirmText = '知道了'
     tipDialog.kind = 'error'
     showTipDialog.value = true
@@ -270,10 +265,21 @@ async function doSubmit() {
 }
 
 // ---------- 判题结果展示 ----------
-function judgeResult(orderNo: number) {
+interface JudgeEntry {
+  judged?: boolean
+  correct?: boolean
+  score?: number
+  max_score?: number
+  expected?: unknown
+  actual?: unknown
+  feedback?: string | null
+}
+
+function judgeResult(orderNo: number): JudgeEntry | null {
   const results = assignment.value?.submission?.judge_results
   if (!results) return null
-  return (results as Record<string, any>)[String(orderNo)] ?? null
+  const v = (results as Record<string, unknown>)[String(orderNo)]
+  return v && typeof v === 'object' ? (v as JudgeEntry) : null
 }
 
 /** 把被转义成 \n 字面量的换行还原为真实换行，避免代码挤成一行 */
@@ -555,13 +561,13 @@ function toggleMulti(oi: number) {
         </div>
 
         <!-- 判题结果（提交后展示） -->
-        <div v-if="submitted && judgeResult(activeQ.order_no)" class="judge-box" :class="judgeResult(activeQ.order_no).correct ? 'correct' : judgeResult(activeQ.order_no).correct === false ? 'wrong' : 'manual'">
+        <div v-if="submitted && judgeResult(activeQ.order_no)" class="judge-box" :class="judgeResult(activeQ.order_no)?.correct ? 'correct' : judgeResult(activeQ.order_no)?.correct === false ? 'wrong' : 'manual'">
           <div class="judge-head">
-            <span v-if="judgeResult(activeQ.order_no).correct === true">✓ 回答正确</span>
-            <span v-else-if="judgeResult(activeQ.order_no).correct === false">✗ 回答错误</span>
+            <span v-if="judgeResult(activeQ.order_no)?.correct === true">✓ 回答正确</span>
+            <span v-else-if="judgeResult(activeQ.order_no)?.correct === false">✗ 回答错误</span>
             <span v-else>⏳ 待教师批改</span>
             <span class="judge-score">
-              得分 {{ judgeResult(activeQ.order_no).score ?? '—' }} / {{ judgeResult(activeQ.order_no).max_score ?? 1 }}
+              得分 {{ judgeResult(activeQ.order_no)?.score ?? '—' }} / {{ judgeResult(activeQ.order_no)?.max_score ?? 1 }}
             </span>
           </div>
 
@@ -572,7 +578,7 @@ function toggleMulti(oi: number) {
           </div>
 
           <!-- 我的答案（答错时对比展示） -->
-          <div v-if="judgeResult(activeQ.order_no).correct === false" class="judge-actual">
+          <div v-if="judgeResult(activeQ.order_no)?.correct === false" class="judge-actual">
             <span class="label">我的答案：</span>
             <span>{{ formatAnswerForJudge(activeQ.order_no, activeQ.type) }}</span>
           </div>

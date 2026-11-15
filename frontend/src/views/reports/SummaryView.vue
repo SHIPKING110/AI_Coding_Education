@@ -22,7 +22,6 @@ import {
   periodStatsComparison,
   periodStatsMonthly,
   periodStatsPreview,
-  pptDownloadUrl,
   publishReport,
   unpublishReport,
   updateReport,
@@ -33,6 +32,8 @@ import {
   type ReportOut,
 } from '@/api/report'
 import { useAuthStore } from '@/stores/auth'
+import { apiErrorDetail } from '@/utils/errors'
+import { openMedia } from '@/api/media'
 import { listPromptTemplates, type PromptTemplateOut } from '@/api/prompt'
 import { dayKeyFromIso, parseServerTime } from '@/utils/date'
 
@@ -273,8 +274,8 @@ async function submitAiJob() {
     showAiModal.value = false
     showNotice('AI 正在后台生成（约 20-60 秒），可继续编辑，完成后自动回填')
     startAiPoll()
-  } catch (e: any) {
-    aiError.value = e?.response?.data?.detail || 'AI 任务提交失败'
+  } catch (e: unknown) {
+    aiError.value = apiErrorDetail(e, 'AI 任务提交失败')
   }
 }
 
@@ -614,8 +615,8 @@ async function doDeleteReport() {
     showNotice('已删除')
     loadHistory()
     loadPptBoard()
-  } catch (e: any) {
-    showError(e?.response?.data?.detail || '删除失败')
+  } catch (e: unknown) {
+    showError(apiErrorDetail(e, '删除失败'))
   } finally {
     deletingId.value = ''
   }
@@ -636,10 +637,10 @@ async function save() {
         }))
       : aiQuarters.value.map((q, i) => ({
           label: `Q${i + 1} ${(q.title || '').trim()}`.trim(),
-          consumed_lessons: Number((q.stats as any)?.consumed_lessons ?? 0),
-          expected_lessons: Number((q.stats as any)?.expected_lessons ?? 0),
-          attendance_rate: Number((q.stats as any)?.attendance_rate ?? 0),
-          summary: String((q.content as any)?.summary ?? ''),
+          consumed_lessons: Number((q.stats as Record<string, unknown>)?.consumed_lessons ?? 0),
+          expected_lessons: Number((q.stats as Record<string, unknown>)?.expected_lessons ?? 0),
+          attendance_rate: Number((q.stats as Record<string, unknown>)?.attendance_rate ?? 0),
+          summary: String(q.content?.summary ?? ''),
         }))
   const contentWithSnapshot = { ...content, ppt_breakdown: breakdown }
   saving.value = true
@@ -663,8 +664,8 @@ async function save() {
     form.value.title = r.title ?? title
     showNotice('已保存草稿')
     loadHistory()
-  } catch (e: any) {
-    showError(e?.response?.data?.detail || '保存失败')
+  } catch (e: unknown) {
+    showError(apiErrorDetail(e, '保存失败'))
   } finally {
     saving.value = false
   }
@@ -680,8 +681,8 @@ async function publish() {
     report.value = await publishReport(report.value.id)
     showNotice('总结已提交')
     loadHistory()
-  } catch (e: any) {
-    showError(e?.response?.data?.detail || '发布失败')
+  } catch (e: unknown) {
+    showError(apiErrorDetail(e, '发布失败'))
   } finally {
     publishing.value = false
   }
@@ -699,8 +700,8 @@ async function doUnpublish() {
     report.value = await unpublishReport(report.value.id)
     showNotice('已撤回为草稿')
     loadHistory()
-  } catch (e: any) {
-    showError(e?.response?.data?.detail || '撤回失败')
+  } catch (e: unknown) {
+    showError(apiErrorDetail(e, '撤回失败'))
   }
 }
 
@@ -818,8 +819,8 @@ async function confirmGenPpt() {
     pptUrl.value = r.ppt_url
     if (r.title) form.value.title = r.title
     pptResult.value = { ok: true, message: 'PPT 草稿已生成，可下载预览。如需调整内容可修改后重新生成。' }
-  } catch (e: any) {
-    pptResult.value = { ok: false, message: e?.response?.data?.detail || 'PPT 生成失败，请稍后重试' }
+  } catch (e: unknown) {
+    pptResult.value = { ok: false, message: apiErrorDetail(e, 'PPT 生成失败，请稍后重试') }
   } finally {
     pptGenerating.value = false
     showPptResult.value = true
@@ -838,7 +839,7 @@ const aiDoneMsg = ref('')
 function confirmPptResult() {
   showPptResult.value = false
   if (pptResult.value?.ok && pptUrl.value) {
-    window.open(pptDownloadUrl(pptUrl.value), '_blank', 'noopener')
+    openMedia(pptUrl.value)
   }
 }
 
@@ -1131,7 +1132,7 @@ onBeforeUnmount(() => {
           AI 定制 PPT
         </button>
         <button v-if="pptUrl" class="btn primary download">
-          <a :href="pptDownloadUrl(pptUrl)" target="_blank" rel="noopener">
+          <a href="#" @click.prevent="openMedia(pptUrl)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
             下载/预览 PPT
           </a>
@@ -1205,9 +1206,8 @@ onBeforeUnmount(() => {
             <a
               v-if="r.ppt_url"
               class="btn download ppt-dl"
-              :href="pptDownloadUrl(r.ppt_url)"
-              target="_blank"
-              rel="noopener"
+              href="#"
+              @click.prevent="openMedia(r.ppt_url)"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" /></svg>
               查看 PPT

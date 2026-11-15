@@ -3,17 +3,17 @@ import { computed, onMounted, ref } from 'vue'
 
 import PageHead from '@/components/PageHead.vue'
 import RagTabs from '@/components/RagTabs.vue'
-import { getParentSession, listParentSessions } from '@/api/ragAdmin'
+import { getParentSession, listParentSessions, type ParentSessionDetail, type ParentSessionThreadRow } from '@/api/ragAdmin'
 
 const loading = ref(false)
 const error = ref('')
-const items = ref<any[]>([])
+const items = ref<ParentSessionThreadRow[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = 20
 const status = ref('')
 const risk = ref('')
-const selected = ref<any>(null)
+const selected = ref<ParentSessionDetail | null>(null)
 const detailLoading = ref(false)
 
 const totalPages = ref(1)
@@ -56,8 +56,8 @@ async function load() {
   }
 }
 
-async function open(t: any) {
-  selected.value = t
+async function open(t: ParentSessionThreadRow) {
+  selected.value = null
   detailLoading.value = true
   try {
     selected.value = await getParentSession(t.thread_id)
@@ -84,7 +84,7 @@ function fmt(iso: string | null | undefined) {
 // 家长客服的 tokens 仅为「回复字数/2」的粗略估算，单独标注以免管理员误读
 const estTokens = computed(() => {
   const msgs = selected.value?.messages || []
-  return msgs.reduce((sum: number, m: any) => sum + (m.role === 'assistant' ? (m.tokens || 0) : 0), 0)
+  return msgs.reduce((sum: number, m) => sum + (m.role === 'assistant' ? (m.tokens || 0) : 0), 0)
 })
 
 onMounted(load)
@@ -165,7 +165,7 @@ onMounted(load)
       <div class="drawer-head">
         <div>
           <h3>会话详情</h3>
-          <p class="muted mono">线程 {{ (selected.thread?.id || selected.thread_id || '').slice(0, 8) }}</p>
+          <p class="muted mono">线程 {{ (selected.thread.thread_id || '').slice(0, 8) }}</p>
         </div>
         <button class="mini" @click="selected = null">关闭</button>
       </div>

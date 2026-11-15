@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """视觉输入 + 设置权限对齐 回归测试：
 
 1) `llm.stream_text` 收到图片时构造 OpenAI 兼容多模态内容块（image_url / data URL），

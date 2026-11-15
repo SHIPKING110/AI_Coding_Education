@@ -6,6 +6,7 @@ from app.api.routers import (
     agents,
     agents_ext,
     assignments,
+    audit,
     auth,
     business,
     classes,
@@ -16,6 +17,7 @@ from app.api.routers import (
     knowledge,
     lessons,
     llm_configs,
+    media,
     notifications,
     orders,
     packages,
@@ -36,6 +38,7 @@ from app.api.routers import (
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+api_router.include_router(audit.router)
 api_router.include_router(agent_ops.router)
 api_router.include_router(agents.router)
 api_router.include_router(agents_ext.router)
@@ -60,6 +63,7 @@ api_router.include_router(system_settings.router)
 api_router.include_router(business.router)
 api_router.include_router(finance.router)
 api_router.include_router(llm_configs.router)
+api_router.include_router(media.router)
 api_router.include_router(retrieval_configs.router)
 api_router.include_router(rag_admin.router)
 api_router.include_router(agent_eval.router)

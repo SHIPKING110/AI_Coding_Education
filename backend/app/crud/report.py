@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -554,7 +554,6 @@ def collect_daily_lesson_material(
                 "attended": attended,
                 "leave": leave,
                 "expected": (attended or 0) + (leave or 0),
-                "expected": (attended or 0) + (leave or 0),
                 "topics": topics,
                 "feedback_done": feedback_done,
             }
@@ -633,7 +632,6 @@ def collect_period_lesson_material(
                 "subject": cls.subject if cls else "",
                 "attended": attended,
                 "leave": leave,
-                "expected": (attended or 0) + (leave or 0),
                 "expected": (attended or 0) + (leave or 0),
                 "topics": topics,
                 "feedback_done": feedback_done,
