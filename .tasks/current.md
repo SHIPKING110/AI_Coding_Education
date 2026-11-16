@@ -4,6 +4,11 @@
 
 ## 进行中
 
+- [x] **发布收尾（2026-11-15，完成）**
+  - [x] PR #5 合并入 main（2500c5e）；本地 main 对齐（丢弃无用 tsbuildinfo checkpoint 提交）
+  - [x] 打 tag **v2.0.0** 并推送；main 上 `ci`（4m38s）+ `eval-regression`（30s）推事件全绿
+  - [ ] **发布窗口运维动作（待执行，见 docs/release-checklist.md）**：8080 存量库备份→stamp a00000000000→切 SCHEMA_ENSURE_MODE=verify；备份 cron 接入验收；发布后冒烟 A–F
+
 - [x] **WS6 上线检查单（2026-11-15，完成）**
   - [x] 新增 `docs/release-checklist.md`：三道闸（CI/评测/备份）→ 发布窗口（stamp/环境变量/启动观察）→ 发版后 15 分钟验证 → 回滚预案 → 发布记录模板
   - [x] `DEPLOY.md` 修正三处过时内容：§3 迁移流程（stamp + SCHEMA_ENSURE_MODE）、§5 备份脚本化、§6/§7 checklist 与回滚规则
