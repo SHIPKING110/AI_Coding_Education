@@ -120,8 +120,13 @@ npm run dev                   # http://127.0.0.1:5173，/api 代理到 8000
 
 ```bash
 cp .env.prod.example .env.prod   # 填写 POSTGRES_PASSWORD 等
+# 本地/服务器都可用：默认 http://127.0.0.1:8080
 docker compose up -d --build
+docker compose exec backend .venv/bin/python scripts/seed_admin.py
 ```
+
+公网部署（云服务器选择、域名/备案、宝塔反代、HTTPS、备份与排障）请看 [新手公网部署全流程](docs/deploy-beginner.md)。
+
 
 ## 文档导航
 
@@ -146,6 +151,7 @@ docker compose up -d --build
 - 架构决策：[docs/adr/README.md](docs/adr/README.md)
 - **API 端点总览（自动生成）**：[docs/api-overview.md](docs/api-overview.md)
 - **架构加固计划（M-A/WS1–WS6）**：[docs/plan/architecture-v2-hardening.md](docs/plan/architecture-v2-hardening.md)
+- **新手公网部署全流程（云服务器/域名/备案/HTTPS/堡塔多机管理）**：[docs/deploy-beginner.md](docs/deploy-beginner.md)
 - **上线发布检查单**：[docs/release-checklist.md](docs/release-checklist.md)
 - 术语表：[docs/glossary.md](docs/glossary.md)
 - 评测导入规格：[docs/rag-eval-import-format.md](docs/rag-eval-import-format.md)
@@ -168,10 +174,12 @@ deploy/    部署相关
 ## 质量保障
 
 ```bash
-cd backend && uv run pytest
 cd backend && uv run ruff check .
-cd frontend && npm run build
+cd backend && uv run pytest            # 全量 + 覆盖率护栏（CI 阈值 62%）
+cd frontend && npm run lint && npm run test && npm run build
 ```
+
+CI（GitHub Actions）在每次推送运行：后端 ruff + 空库迁移重放 + pytest 覆盖率护栏；前端 eslint + vitest + 类型检查/构建；镜像构建冒烟。
 
 ## 许可证
 
