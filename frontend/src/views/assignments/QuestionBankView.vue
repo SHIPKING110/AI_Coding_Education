@@ -1,0 +1,1382 @@
+﻿<template>
+  <div class="qb-view">
+    <PageHead title="题库" eyebrow="QUESTION BANK" sub="真题文档导入 → 人工审核 → 发布到练习与模拟考试">
+      <template #actions>
+        <button v-if="canManage" class="btn primary" @click="openUpload">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0 4 4m-4-4-4 4M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" /></svg>
+          上传题库文档
+        </button>
+      </template>
+    </PageHead>
+
+    <AssignmentsTabs active="bank" />
+
+    <div v-if="canManage" class="stats-row">
+      <div class="stat-card">
+        <span class="stat-label">套卷</span>
+        <strong>{{ stats.sets }}</strong>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">题目</span>
+        <strong>{{ stats.questions }}</strong>
+      </div>
+      <div class="stat-card warn">
+        <span class="stat-label">待审核</span>
+        <strong>{{ stats.pending_review }}</strong>
+      </div>
+      <div class="stat-tip">解析结果只进入草稿，全部题目审核通过后才能发布到学生端</div>
+    </div>
+
+    <div class="qb-workspace">
+      <aside class="set-pane">
+        <div class="filter-bar">
+          <select v-model="filter.institution" class="fld" @change="loadSets">
+            <option value="">全部机构</option>
+            <option v-for="v in institutions" :key="v" :value="v">{{ v }}</option>
+          </select>
+          <select v-model="filter.subject" class="fld" @change="loadSets">
+            <option value="">全部科目</option>
+            <option v-for="v in subjects" :key="v" :value="v">{{ v }}</option>
+          </select>
+          <select v-model="filter.level" class="fld" @change="loadSets">
+            <option value="">全部等级</option>
+            <option v-for="v in levels" :key="v" :value="v">{{ v }}</option>
+          </select>
+          <select v-model="filter.year" class="fld" @change="loadSets">
+            <option value="">全部年份</option>
+            <option v-for="v in years" :key="v" :value="v">{{ v }}</option>
+          </select>
+          <select v-model="filter.status" class="fld" @change="loadSets">
+            <option value="">全部状态</option>
+            <option value="draft">待审核</option>
+            <option value="published">已发布</option>
+            <option value="archived">已归档</option>
+          </select>
+        </div>
+
+        <div v-if="loading" class="pane-empty">加载中…</div>
+        <div v-else-if="loadError" class="pane-empty">{{ loadError }}</div>
+        <div v-else-if="sets.length === 0" class="pane-empty">
+          暂无题库套卷{{ canManage ? '，点击右上角上传 DOCX' : '' }}
+        </div>
+        <div v-else class="set-list">
+          <button
+            v-for="s in sets"
+            :key="s.id"
+            class="set-card"
+            :class="{ active: s.id === selectedId }"
+            @click="selectSet(s.id)"
+          >
+            <div class="set-top">
+              <span class="set-name" :title="s.name">{{ s.name }}</span>
+              <span class="stamp" :class="s.status">{{ statusLabel[s.status] }}</span>
+            </div>
+            <div class="set-meta">
+              <span v-if="s.institution">{{ s.institution }}</span>
+              <span v-if="s.subject">{{ s.subject }}</span>
+              <span v-if="s.level">{{ s.level }}</span>
+              <span v-if="s.exam_year">{{ s.exam_year }}</span>
+            </div>
+            <div class="set-foot">
+              <span>{{ s.question_count ?? 0 }} 题</span>
+              <span v-if="s.total_score">{{ s.total_score }} 分</span>
+              <span v-if="s.import_meta?.warnings?.length" class="warn-text">
+                {{ s.import_meta.warnings.length }} 条提示
+              </span>
+            </div>
+          </button>
+        </div>
+      </aside>
+
+      <section class="detail-pane">
+        <div v-if="detailLoading" class="pane-empty">加载套卷…</div>
+        <div v-else-if="!selected" class="pane-empty">从左侧选择一套题库开始审核</div>
+        <template v-else>
+          <div class="paper-head">
+            <div class="paper-title-row">
+              <input v-if="canManage" v-model="selected.name" class="paper-title-input" @blur="saveMeta" />
+              <h2 v-else>{{ selected.name }}</h2>
+              <span class="stamp large" :class="selected.status">{{ statusLabel[selected.status] }}</span>
+            </div>
+            <div class="meta-grid">
+              <label>机构<input v-model="selected.institution" :disabled="!canManage" @blur="saveMeta" /></label>
+              <label>科目<input v-model="selected.subject" :disabled="!canManage" @blur="saveMeta" /></label>
+              <label>等级<input v-model="selected.level" :disabled="!canManage" @blur="saveMeta" /></label>
+              <label>年份<input v-model.number="selected.exam_year" type="number" :disabled="!canManage" @blur="saveMeta" /></label>
+            </div>
+            <div v-if="selected.import_meta?.warnings?.length" class="warn-box">
+              <strong>解析提示</strong>
+              <ul>
+                <li v-for="w in selected.import_meta.warnings" :key="w">{{ w }}</li>
+              </ul>
+            </div>
+            <div v-if="canManage" class="paper-actions">
+              <button class="btn" :disabled="selected.status === 'archived'" @click="onReviewAll">全部通过审核</button>
+              <button class="btn primary" :disabled="selected.status === 'published'" @click="onPublish">发布题库</button>
+              <button v-if="selected.status === 'published'" class="btn" @click="onToAssignment">生成作业草稿</button>
+              <button class="btn danger-ghost" :disabled="selected.status === 'archived'" @click="onArchive">归档</button>
+              <button v-if="canManage" class="btn" @click="openBlueprints">组卷规则</button>
+            </div>
+          </div>
+
+          <div class="review-layout">
+            <nav class="q-index" aria-label="题号">
+              <button
+                v-for="q in selected.questions"
+                :key="q.id"
+                class="q-no"
+                :class="[q.status, { active: q.id === activeQuestionId }]"
+                :title="`${QUESTION_TYPE_LABELS[q.type]} · ${statusLabel[q.status]}`"
+                @click="activeQuestionId = q.id"
+              >
+                {{ q.order_no }}
+              </button>
+            </nav>
+
+            <div v-if="!activeQuestion" class="pane-empty">这套题库暂无题目</div>
+            <article v-else class="q-paper">
+              <div class="q-head">
+                <div class="q-title">
+                  第 {{ activeQuestion.order_no }} 题
+                  <span class="q-type">{{ QUESTION_TYPE_LABELS[activeQuestion.type] }}</span>
+                  <span class="stamp" :class="activeQuestion.status">{{ statusLabel[activeQuestion.status] }}</span>
+                </div>
+                <div v-if="canManage" class="q-actions">
+                  <button class="btn ghost" :disabled="aiCleaning" @click="onAiClean">
+                    {{ aiCleaning ? '清洗中…' : 'AI 清洗' }}
+                  </button>
+                  <button class="btn" :disabled="saving" @click="saveQuestion(false)">保存</button>
+                  <button class="btn primary" :disabled="saving" @click="saveQuestion(true)">保存并通过</button>
+                </div>
+              </div>
+              <p v-if="activeQuestion.review_note" class="review-note">{{ activeQuestion.review_note }}</p>
+
+              <label class="fld-block">
+                <span>题干</span>
+                <textarea v-model="edit.stem" rows="4" :disabled="!canManage"></textarea>
+              </label>
+
+              <div v-if="['single_choice', 'multiple_choice'].includes(edit.type)" class="options-editor">
+                <div class="options-head">
+                  <span>选项（每行一个，按 A/B/C/D 顺序）</span>
+                  <span class="hint">图片选项可留空文字</span>
+                </div>
+                <div v-for="(opt, i) in edit.optionsText.split('\n')" :key="i" class="option-row">
+                  <span class="opt-label">{{ optionLabel(i) }}</span>
+                  <input
+                    :value="opt"
+                    :disabled="!canManage"
+                    @input="(e) => {
+                      const parts = edit.optionsText.split('\n')
+                      parts[i] = (e.target as HTMLInputElement).value
+                      edit.optionsText = parts.join('\n')
+                    }"
+                  />
+                  <img v-for="url in mediaFor(`option:${optionLabel(i)}`)" :key="url" :src="url" class="opt-img" alt="" />
+                </div>
+              </div>
+
+              <div class="answer-grid">
+                <label class="fld-block">
+                  <span>答案{{ edit.type === 'multiple_choice' ? '（如 A,C）' : edit.type === 'judgement' ? '（正确/错误）' : '' }}</span>
+                  <input v-model="edit.answerText" :disabled="!canManage" :placeholder="edit.type === 'single_choice' ? '如 C' : ''" />
+                </label>
+                <label class="fld-block small">
+                  <span>难度</span>
+                  <input v-model.number="edit.difficulty" type="number" min="1" max="10" :disabled="!canManage" />
+                </label>
+                <label class="fld-block small">
+                  <span>分值</span>
+                  <input v-model.number="edit.score" type="number" min="1" :disabled="!canManage" />
+                </label>
+                <label class="fld-block small">
+                  <span>语言</span>
+                  <select v-model="edit.language" :disabled="!canManage">
+                    <option value="">无</option>
+                    <option value="python">Python</option>
+                    <option value="cpp">C++</option>
+                  </select>
+                </label>
+              </div>
+
+              <label v-if="['programming', 'code_fill'].includes(edit.type)" class="fld-block">
+                <span>参考代码</span>
+                <textarea v-model="edit.referenceCode" rows="6" class="code-area" :disabled="!canManage"></textarea>
+              </label>
+
+              <label class="fld-block">
+                <span>解析</span>
+                <textarea v-model="edit.analysis" rows="3" :disabled="!canManage"></textarea>
+              </label>
+
+              <label class="fld-block">
+                <span>知识点（逗号分隔）</span>
+                <input v-model="edit.knowledgeText" :disabled="!canManage" placeholder="如 列表, 条件语句" />
+              </label>
+
+              <div v-if="activeQuestion.media?.length" class="media-strip">
+                <span class="media-label">配图</span>
+                <div class="media-items">
+                  <figure v-for="m in activeQuestion.media" :key="m.scope + m.url" class="media-item">
+                    <img :src="m.url" alt="" />
+                    <figcaption>{{ m.scope === 'stem' ? '题干' : m.scope.replace('option:', '选项 ') }}</figcaption>
+                  </figure>
+                </div>
+              </div>
+
+              <details v-if="activeQuestion.source_excerpt" class="source-box">
+                <summary>原文对照</summary>
+                <pre>{{ activeQuestion.source_excerpt }}</pre>
+              </details>
+            </article>
+          </div>
+        </template>
+      </section>
+    </div>
+
+    <div v-if="blueprintOpen" class="modal-mask" @click.self="blueprintOpen = false">
+      <div class="upload-modal">
+        <h3>组卷规则</h3>
+        <p class="modal-sub">标准模考蓝图：按题型配额从已发布题库随机抽题；学生模考时只会看到规则，不暴露答案。</p>
+        <div class="blueprint-list">
+          <div v-for="bp in blueprints" :key="bp.id" class="blueprint-row">
+            <div>
+              <strong>{{ bp.name }}</strong>
+              <span class="bp-meta">{{ bp.subject || '不限科目' }} · {{ bp.level || '不限等级' }}</span>
+            </div>
+            <div class="bp-rules">
+              <span v-for="(count, type) in bp.rules" :key="type">{{ typeLabel(type) }} {{ count }}</span>
+            </div>
+            <button class="btn ghost" @click="removeBlueprint(bp.id)">删除</button>
+          </div>
+          <p v-if="blueprints.length === 0" class="pane-empty small">暂无规则，先创建一条标准模考蓝图</p>
+        </div>
+        <div class="bp-form">
+          <label>名称<input v-model="blueprintForm.name" placeholder="如 Python 二级标准模考" /></label>
+          <label>科目<input v-model="blueprintForm.subject" placeholder="Python" /></label>
+          <label>等级<input v-model="blueprintForm.level" placeholder="二级" /></label>
+          <label>单选<input v-model.number="blueprintForm.single_choice" type="number" min="0" /></label>
+          <label>多选<input v-model.number="blueprintForm.multiple_choice" type="number" min="0" /></label>
+          <label>判断<input v-model.number="blueprintForm.judgement" type="number" min="0" /></label>
+          <label>编程<input v-model.number="blueprintForm.programming" type="number" min="0" /></label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" @click="blueprintOpen = false">关闭</button>
+          <button class="btn primary" :disabled="blueprintSaving" @click="addBlueprint">添加规则</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="uploadOpen" class="modal-mask" @click.self="uploadOpen = false">
+      <div class="upload-modal">
+        <h3>上传题库文档</h3>
+        <p class="modal-sub">支持 DOCX。系统先按试卷标记解析，异常题目进入待审核；全部题目人工复核后才能发布。</p>
+        <label class="file-drop">
+          <input type="file" accept=".docx" @change="onFileChange" />
+          <span>{{ uploadFile?.name || '选择 DOCX 文件' }}</span>
+        </label>
+        <div class="upload-grid">
+          <label>套卷名称<input v-model="uploadMeta.name" placeholder="留空则自动识别" /></label>
+          <label>机构<input v-model="uploadMeta.institution" /></label>
+          <label>年份<input v-model="uploadMeta.exam_year" placeholder="如 2025" /></label>
+          <label>科目<input v-model="uploadMeta.subject" placeholder="Python / C++ / 图形化 / 机器人" /></label>
+          <label>等级<input v-model="uploadMeta.level" placeholder="如 二级" /></label>
+        </div>
+        <ul v-if="uploadWarnings.length" class="upload-warnings">
+          <li v-for="w in uploadWarnings" :key="w">{{ w }}</li>
+        </ul>
+        <div class="modal-actions">
+          <button class="btn" @click="uploadOpen = false">取消</button>
+          <button class="btn primary" :disabled="uploading" @click="submitUpload">
+            {{ uploading ? '解析中…' : '上传并解析' }}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+
+import AssignmentsTabs from '@/components/AssignmentsTabs.vue'
+import PageHead from '@/components/PageHead.vue'
+import { QUESTION_TYPE_LABELS } from '@/api/assignment'
+import {
+  aiCleanQuestion,
+  archiveBankSet,
+  bankSetToAssignment,
+  createBankBlueprint,
+  deleteBankBlueprint,
+  getBankSet,
+  getBankStats,
+  importBankDocx,
+  listBankBlueprints,
+  listBankSets,
+  publishBankSet,
+  reviewAllQuestions,
+  updateBankQuestion,
+  updateBankSet,
+  type BankBlueprint,
+  type BankQuestion,
+  type BankSet,
+} from '@/api/questionBank'
+import { answerFromText, answerToText } from '@/utils/questionBank'
+import { useAuthStore } from '@/stores/auth'
+import { useToastStore } from '@/stores/toast'
+
+const auth = useAuthStore()
+const toast = useToastStore()
+const router = useRouter()
+const canManage = computed(() => ['admin', 'staff'].includes(auth.user?.role ?? ''))
+
+const stats = ref({ sets: 0, questions: 0, pending_review: 0 })
+const sets = ref<BankSet[]>([])
+const loading = ref(false)
+const loadError = ref('')
+const filter = reactive({ institution: '', subject: '', level: '', year: '', status: '' })
+
+const institutions = computed(() => [...new Set(sets.value.map((s) => s.institution).filter(Boolean))] as string[])
+const subjects = computed(() => [...new Set(sets.value.map((s) => s.subject).filter(Boolean))] as string[])
+const levels = computed(() => [...new Set(sets.value.map((s) => s.level).filter(Boolean))] as string[])
+const years = computed(() => [...new Set(sets.value.map((s) => s.exam_year).filter(Boolean))] as number[])
+
+const selectedId = ref('')
+const selected = ref<BankSet | null>(null)
+const detailLoading = ref(false)
+const activeQuestionId = ref('')
+const activeQuestion = computed(() => selected.value?.questions?.find((q) => q.id === activeQuestionId.value) ?? null)
+
+const edit = reactive({
+  type: '',
+  stem: '',
+  optionsText: '',
+  answerText: '',
+  analysis: '',
+  difficulty: 3,
+  score: 2,
+  language: '',
+  referenceCode: '',
+  knowledgeText: '',
+})
+const saving = ref(false)
+const aiCleaning = ref(false)
+
+const statusLabel: Record<string, string> = {
+  draft: '待审核',
+  reviewed: '已审核',
+  published: '已发布',
+  archived: '已归档',
+}
+
+function loadEdit(q: BankQuestion | null) {
+  if (!q) return
+  edit.type = q.type
+  edit.stem = q.stem
+  edit.optionsText = (q.options ?? []).join('\n')
+  edit.answerText = answerToText(q.type, q.answer)
+  edit.difficulty = q.difficulty
+  edit.score = q.score
+  edit.language = q.language ?? ''
+  edit.referenceCode = q.reference_code ?? ''
+  edit.knowledgeText = (q.knowledge_points ?? []).join('，')
+}
+
+watch(activeQuestion, (q) => loadEdit(q))
+
+function optionLabel(i: number): string {
+  return String.fromCharCode(65 + i)
+}
+
+function typeLabel(t: string): string {
+  return QUESTION_TYPE_LABELS[t as keyof typeof QUESTION_TYPE_LABELS] ?? t
+}
+
+function mediaFor(scope: string): string[] {
+  return (activeQuestion.value?.media ?? []).filter((m) => m.scope === scope).map((m) => m.url)
+}
+
+async function loadStats() {
+  try {
+    stats.value = await getBankStats()
+  } catch {
+    /* 非管理角色可能无权限，静默 */
+  }
+}
+
+async function loadSets() {
+  loading.value = true
+  loadError.value = ''
+  try {
+    const params: Record<string, string | number> = {}
+    if (filter.institution) params.institution = filter.institution
+    if (filter.subject) params.subject = filter.subject
+    if (filter.level) params.level = filter.level
+    if (filter.year) params.exam_year = Number(filter.year)
+    if (filter.status) params.status = filter.status
+    const data = await listBankSets(params)
+    sets.value = data.items
+    if (!selectedId.value && data.items[0]) {
+      await selectSet(data.items[0].id)
+    }
+  } catch {
+    loadError.value = '加载题库失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function selectSet(id: string) {
+  selectedId.value = id
+  detailLoading.value = true
+  try {
+    selected.value = await getBankSet(id)
+    activeQuestionId.value = selected.value.questions?.[0]?.id ?? ''
+  } catch {
+    toast.error('加载套卷详情失败')
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+async function saveMeta() {
+  if (!selected.value) return
+  try {
+    const updated = await updateBankSet(selected.value.id, {
+      name: selected.value.name,
+      institution: selected.value.institution,
+      exam_year: selected.value.exam_year,
+      subject: selected.value.subject,
+      level: selected.value.level,
+    })
+    selected.value = { ...selected.value, ...updated }
+    toast.success('套卷信息已保存')
+    await loadSets()
+  } catch {
+    toast.error('保存套卷信息失败')
+  }
+}
+
+async function saveQuestion(markReviewed = false) {
+  const q = activeQuestion.value
+  if (!q || !selected.value) return
+  saving.value = true
+  try {
+    const payload: Partial<BankQuestion> = {
+      type: edit.type as BankQuestion['type'],
+      stem: edit.stem,
+      options: ['single_choice', 'multiple_choice'].includes(edit.type)
+        ? edit.optionsText.split('\n').map((x) => x.trim())
+        : null,
+      answer: answerFromText(edit.type, edit.answerText),
+      analysis: edit.analysis || null,
+      difficulty: edit.difficulty,
+      score: edit.score,
+      language: edit.language || null,
+      reference_code: edit.referenceCode || null,
+      knowledge_points: edit.knowledgeText
+        ? edit.knowledgeText.split(/[，,]/).map((x) => x.trim()).filter(Boolean)
+        : [],
+    }
+    if (markReviewed) payload.status = 'reviewed'
+    const updated = await updateBankQuestion(selected.value.id, q.id, payload)
+    q.type = updated.type
+    q.stem = updated.stem
+    q.options = updated.options
+    q.answer = updated.answer
+    q.analysis = updated.analysis
+    q.difficulty = updated.difficulty
+    q.score = updated.score
+    q.language = updated.language
+    q.reference_code = updated.reference_code
+    q.knowledge_points = updated.knowledge_points
+    q.status = updated.status
+    toast.success(markReviewed ? '已保存并通过审核' : '题目已保存')
+    if (markReviewed) await refreshSetQuietly()
+  } catch {
+    toast.error('保存题目失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function refreshSetQuietly() {
+  if (!selected.value) return
+  try {
+    const data = await getBankSet(selected.value.id)
+    selected.value = data
+    await loadStats()
+  } catch {
+    /* ignore */
+  }
+}
+
+async function onReviewAll() {
+  if (!selected.value) return
+  try {
+    const res = await reviewAllQuestions(selected.value.id)
+    toast.success(`已通过 ${res.reviewed} 道题`)
+    await refreshSetQuietly()
+    await loadSets()
+  } catch {
+    toast.error('批量审核失败')
+  }
+}
+
+async function onPublish() {
+  if (!selected.value) return
+  try {
+    await publishBankSet(selected.value.id)
+    toast.success('题库套卷已发布')
+    await selectSet(selected.value.id)
+    await loadStats()
+    await loadSets()
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+    if (detail && typeof detail === 'object' && 'message' in detail) {
+      const nums = (detail as { question_numbers?: number[] }).question_numbers ?? []
+      toast.error(`${(detail as { message?: string }).message ?? '仍有题目未审核'}：第 ${nums.slice(0, 12).join('、')} 题`)
+    } else {
+      toast.error('发布失败，请确认全部题目已审核')
+    }
+  }
+}
+
+async function onArchive() {
+  if (!selected.value) return
+  try {
+    await archiveBankSet(selected.value.id)
+    toast.success('套卷已归档')
+    await loadStats()
+    await loadSets()
+  } catch {
+    toast.error('归档失败')
+  }
+}
+
+async function onToAssignment() {
+  if (!selected.value) return
+  try {
+    const res = await bankSetToAssignment(selected.value.id, { title: selected.value.name })
+    toast.success(`已生成作业草稿：${res.title}（${res.question_count} 题）`)
+    router.push({ path: '/assignments', query: { draft: res.assignment_id } })
+  } catch (e: unknown) {
+    toast.error((e as Error).message || '生成作业草稿失败')
+  }
+}
+
+// —— 组卷规则 ——
+const blueprints = ref<BankBlueprint[]>([])
+const blueprintOpen = ref(false)
+const blueprintSaving = ref(false)
+const blueprintForm = reactive({
+  name: '',
+  subject: '',
+  level: '',
+  single_choice: 35,
+  multiple_choice: 0,
+  judgement: 10,
+  programming: 2,
+})
+
+async function loadBlueprints() {
+  try {
+    blueprints.value = await listBankBlueprints()
+  } catch {
+    blueprints.value = []
+  }
+}
+
+function openBlueprints() {
+  blueprintOpen.value = true
+  void loadBlueprints()
+}
+
+async function addBlueprint() {
+  if (!blueprintForm.name.trim()) {
+    toast.error('请填写规则名称')
+    return
+  }
+  blueprintSaving.value = true
+  try {
+    await createBankBlueprint({
+      name: blueprintForm.name.trim(),
+      subject: blueprintForm.subject || null,
+      level: blueprintForm.level || null,
+      rules: {
+        single_choice: blueprintForm.single_choice,
+        multiple_choice: blueprintForm.multiple_choice,
+        judgement: blueprintForm.judgement,
+        programming: blueprintForm.programming,
+      },
+    })
+    toast.success('组卷规则已保存')
+    blueprintForm.name = ''
+    await loadBlueprints()
+  } catch (e: unknown) {
+    toast.error((e as Error).message || '保存组卷规则失败')
+  } finally {
+    blueprintSaving.value = false
+  }
+}
+
+async function removeBlueprint(id: string) {
+  try {
+    await deleteBankBlueprint(id)
+    await loadBlueprints()
+  } catch {
+    toast.error('删除组卷规则失败')
+  }
+}
+
+async function onAiClean() {
+  const q = activeQuestion.value
+  if (!q) return
+  aiCleaning.value = true
+  try {
+    const updated = await aiCleanQuestion(q.id)
+    q.type = updated.type
+    q.stem = updated.stem
+    q.options = updated.options
+    q.answer = updated.answer
+    q.analysis = updated.analysis
+    q.difficulty = updated.difficulty
+    q.reference_code = updated.reference_code
+    q.review_note = updated.review_note
+    q.status = updated.status
+    loadEdit(q)
+    toast.success('AI 清洗建议已生成，请逐项复核后再通过')
+  } catch (e: unknown) {
+    toast.error((e as Error).message || 'AI 清洗失败')
+  } finally {
+    aiCleaning.value = false
+  }
+}
+
+// —— 上传 ——
+const uploadOpen = ref(false)
+const uploadFile = ref<File | null>(null)
+const uploading = ref(false)
+const uploadWarnings = ref<string[]>([])
+const uploadMeta = reactive({ name: '', institution: '', exam_year: '', subject: '', level: '' })
+
+function openUpload() {
+  uploadFile.value = null
+  uploadWarnings.value = []
+  uploadMeta.name = ''
+  uploadMeta.institution = '中国电子学会'
+  uploadMeta.exam_year = ''
+  uploadMeta.subject = ''
+  uploadMeta.level = ''
+  uploadOpen.value = true
+}
+
+function onFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  uploadFile.value = input.files?.[0] ?? null
+}
+
+async function submitUpload() {
+  if (!uploadFile.value) {
+    toast.error('请选择 DOCX 文件')
+    return
+  }
+  uploading.value = true
+  uploadWarnings.value = []
+  try {
+    const res = await importBankDocx(uploadFile.value, {
+      name: uploadMeta.name || undefined,
+      institution: uploadMeta.institution || undefined,
+      exam_year: uploadMeta.exam_year ? Number(uploadMeta.exam_year) : undefined,
+      subject: uploadMeta.subject || undefined,
+      level: uploadMeta.level || undefined,
+    })
+    uploadWarnings.value = res.warnings
+    toast.success(`导入 ${res.question_count} 道题，待人工审核`)
+    uploadOpen.value = false
+    await loadStats()
+    await loadSets()
+    await selectSet(res.set_id)
+  } catch (e: unknown) {
+    toast.error((e as Error).message || '导入失败')
+  } finally {
+    uploading.value = false
+  }
+}
+
+onMounted(async () => {
+  if (!auth.user) await auth.fetchMe().catch(() => null)
+  await Promise.all([loadStats(), loadSets()])
+})
+</script>
+
+<style scoped>
+.qb-view {
+  min-height: 100%;
+}
+
+.stats-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.stat-card {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 118px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-xs);
+}
+.stat-card.warn strong {
+  color: #b45309;
+}
+.stat-label {
+  font-size: 12px;
+  color: var(--ink-3);
+  font-weight: 600;
+}
+.stat-card strong {
+  font-size: 22px;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  line-height: 1;
+}
+.stat-tip {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.qb-workspace {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.set-pane,
+.detail-pane {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+  min-height: 520px;
+}
+.set-pane {
+  padding: 14px;
+  position: sticky;
+  top: 16px;
+}
+.detail-pane {
+  padding: 16px;
+  background: #fffdf8;
+}
+.filter-bar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.fld {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+.set-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: calc(100vh - 330px);
+  overflow: auto;
+  padding-right: 2px;
+}
+.set-card {
+  text-align: left;
+  padding: 12px 12px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid #d8cbb4;
+  border-radius: 10px;
+  background: #fffdf8;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.set-card:hover {
+  border-color: #c9b98f;
+  box-shadow: var(--shadow-sm);
+}
+.set-card.active {
+  border-left-color: #b8860b;
+  box-shadow: 0 0 0 2px rgba(184, 134, 11, 0.16);
+  background: #fffaf0;
+}
+.set-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.set-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.set-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  margin-top: 6px;
+}
+.set-foot {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+}
+.warn-text {
+  color: #b45309;
+}
+.stamp {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+}
+.stamp.draft {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #f6d365;
+}
+.stamp.reviewed {
+  color: #0f766e;
+  background: #ccfbf1;
+  border-color: #99f6e4;
+}
+.stamp.published {
+  color: #166534;
+  background: #dcfce7;
+  border-color: #86efac;
+}
+.stamp.archived {
+  color: var(--ink-3);
+  background: var(--bg-soft);
+  border-color: var(--line);
+}
+.stamp.large {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+.pane-empty {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 13px;
+}
+
+.paper-head {
+  border: 1px solid #e7dcc6;
+  border-radius: 12px;
+  background: #fffaf0;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.paper-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.paper-title-row h2,
+.paper-title-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 18px;
+  font-weight: 800;
+  color: #3f2f14;
+  font-family: 'Songti SC', 'Noto Serif SC', 'SimSun', serif;
+}
+.paper-title-input {
+  border: 1px dashed transparent;
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 6px;
+}
+.paper-title-input:hover,
+.paper-title-input:focus {
+  border-color: #d8c48f;
+  background: #fff;
+  outline: none;
+}
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.meta-grid label,
+.upload-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: #7c6a4a;
+  font-weight: 600;
+}
+.meta-grid input,
+.upload-grid input {
+  padding: 6px 8px;
+  border: 1px solid #e2d5bb;
+  border-radius: 7px;
+  background: #fff;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.meta-grid input:disabled {
+  background: transparent;
+  border-color: transparent;
+  color: #5c4a2a;
+}
+.warn-box {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  font-size: 12px;
+  color: #92400e;
+}
+.warn-box ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.paper-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.review-layout {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.q-index {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  max-height: calc(100vh - 360px);
+  overflow: auto;
+  padding: 4px 2px;
+}
+.q-no {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 700;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  cursor: pointer;
+}
+.q-no.reviewed {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+  color: #0f766e;
+}
+.q-no.published {
+  border-color: #86efac;
+  background: #f0fdf4;
+  color: #166534;
+}
+.q-no.active {
+  outline: 2px solid #b8860b;
+  outline-offset: 1px;
+}
+.q-paper {
+  border: 1px solid #eadfc9;
+  border-radius: 12px;
+  background: #fffdf7;
+  padding: 16px 18px 20px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+.q-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.q-title {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  color: #3f2f14;
+  font-size: 14px;
+}
+.q-type {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #f1e7d2;
+  color: #7c5a1e;
+  font-size: 11px;
+  font-weight: 700;
+}
+.q-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.review-note {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 12px;
+}
+.fld-block {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #7c6a4a;
+  font-weight: 600;
+}
+.fld-block span {
+  font-size: 11.5px;
+}
+.fld-block textarea,
+.fld-block input,
+.fld-block select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #e2d5bb;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+  color: var(--ink);
+  font-family: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+.fld-block textarea:disabled,
+.fld-block input:disabled {
+  background: #fbf7ee;
+}
+.code-area {
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  font-size: 12.5px;
+  background: #1e293b !important;
+  color: #e2e8f0 !important;
+  border-color: #0f172a !important;
+}
+.options-editor {
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px dashed #e2d5bb;
+  border-radius: 9px;
+  background: #fffcf5;
+}
+.options-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: #7c6a4a;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.hint {
+  font-weight: 400;
+  color: var(--ink-3);
+}
+.option-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.opt-label {
+  width: 20px;
+  text-align: center;
+  font-weight: 800;
+  font-size: 12px;
+  color: #7c5a1e;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+}
+.option-row input {
+  flex: 1;
+  padding: 7px 9px;
+  border: 1px solid #e2d5bb;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+.opt-img {
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+.answer-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(70px, 1fr));
+  gap: 10px;
+}
+.answer-grid .fld-block {
+  margin-bottom: 10px;
+}
+.media-strip {
+  margin: 10px 0;
+  padding-top: 10px;
+  border-top: 1px dashed #e2d5bb;
+}
+.media-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #7c6a4a;
+}
+.media-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+.media-item {
+  margin: 0;
+  text-align: center;
+}
+.media-item img {
+  max-width: 150px;
+  max-height: 110px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.media-item figcaption {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  margin-top: 3px;
+}
+.source-box {
+  margin-top: 12px;
+  border-top: 1px dashed #e2d5bb;
+  padding-top: 10px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.source-box summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: #7c6a4a;
+}
+.source-box pre {
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11.5px;
+  line-height: 1.7;
+  background: #f8f4ea;
+  border: 1px solid #e7dcc6;
+  border-radius: 8px;
+  padding: 10px;
+  color: var(--ink-2);
+}
+.btn.danger-ghost {
+  color: #b91c1c;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+.btn.ghost {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--ink-2);
+}
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(15, 23, 42, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.upload-modal {
+  width: min(620px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  background: #fffdf8;
+  border: 1px solid #e7dcc6;
+  border-radius: 16px;
+  padding: 22px;
+  box-shadow: var(--shadow-lg);
+}
+.upload-modal h3 {
+  font-size: 18px;
+  color: #3f2f14;
+  font-family: 'Songti SC', 'Noto Serif SC', 'SimSun', serif;
+}
+.modal-sub {
+  margin: 6px 0 14px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+.file-drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  border: 1.5px dashed #d8c48f;
+  border-radius: 10px;
+  background: #fffaf0;
+  cursor: pointer;
+  font-size: 13px;
+  color: #7c5a1e;
+  font-weight: 600;
+}
+.file-drop input {
+  display: none;
+}
+.upload-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 14px;
+}
+.upload-warnings {
+  margin: 12px 0 0;
+  padding: 10px 12px 10px 28px;
+  border-radius: 8px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+  font-size: 12px;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.blueprint-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+.blueprint-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid #e7dcc6;
+  border-radius: 9px;
+  background: #fffaf0;
+  font-size: 12.5px;
+}
+.blueprint-row > div:first-child {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bp-meta {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.bp-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 11px;
+  color: #7c5a1e;
+}
+.bp-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.bp-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: #7c6a4a;
+  font-weight: 600;
+}
+.bp-form input {
+  padding: 6px 8px;
+  border: 1px solid #e2d5bb;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+.pane-empty.small {
+  padding: 18px;
+}
+
+@media (max-width: 1100px) {
+  .qb-workspace {
+    grid-template-columns: 290px minmax(0, 1fr);
+  }
+  .meta-grid,
+  .answer-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@media (max-width: 760px) {
+  .qb-workspace {
+    grid-template-columns: 1fr;
+  }
+  .set-pane {
+    position: static;
+  }
+  .review-layout {
+    grid-template-columns: 1fr;
+  }
+  .q-index {
+    grid-template-columns: repeat(auto-fill, 32px);
+    max-height: 140px;
+  }
+  .meta-grid,
+  .upload-grid,
+  .answer-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+

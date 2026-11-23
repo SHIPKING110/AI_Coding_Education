@@ -1,14 +1,16 @@
 """题库导入、审核、发布与基础组卷 API。"""
 from __future__ import annotations
 
+import json
 import random
+import re
 import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
@@ -75,6 +77,7 @@ def _serialize_question(q: QuestionBankQuestion, *, include_answer: bool = True)
         "test_cases": q.test_cases,
         "media": q.media,
         "knowledge_points": q.knowledge_points,
+        "source_excerpt": q.source_excerpt,
         "status": q.status,
         "review_note": q.review_note,
     }
@@ -113,6 +116,11 @@ def _ensure_docx(file: UploadFile) -> str:
 @router.post("/imports", response_model=BankImportOut, status_code=status.HTTP_201_CREATED)
 def import_docx(
     file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+    institution: str | None = Form(default=None),
+    exam_year: int | None = Form(default=None),
+    subject: str | None = Form(default=None),
+    level: str | None = Form(default=None),
     current_user: User = Depends(require_roles(Role.ADMIN, Role.STAFF)),
     db: Session = Depends(get_db),
 ) -> BankImportOut:
@@ -143,11 +151,11 @@ def import_docx(
         paper = parse_docx(source_path, media_dir=root / "media", media_url_prefix=f"/uploads/question_bank/{root.name}/media")
         bank_set = QuestionBankSet(
             source_id=source.id,
-            name=paper.name,
-            institution=paper.institution,
-            exam_year=paper.exam_year,
-            subject=paper.subject,
-            level=paper.level,
+            name=name or paper.name,
+            institution=institution or paper.institution,
+            exam_year=exam_year or paper.exam_year,
+            subject=subject or paper.subject,
+            level=level or paper.level,
             total_score=paper.total_score,
             status=BankSetStatus.DRAFT,
             import_meta={"sections": paper.sections, "warnings": paper.warnings, "parser": "rules-v1"},
@@ -208,7 +216,7 @@ def list_sets(
     if status_filter:
         query = query.where(QuestionBankSet.status == status_filter)
     items = db.scalars(query).all()
-    if _user.role in {Role.PARENT.value, Role.STUDENT.value}:
+    if _user.role in {Role.PARENT.value, Role.STUDENT.value, Role.TEACHER.value}:
         items = [x for x in items if x.status == BankSetStatus.PUBLISHED.value]
     return {"items": [_serialize_set(x) for x in items], "total": len(items)}
 
@@ -218,7 +226,11 @@ def get_set(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User
     bank_set = db.scalar(select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id))
     if not bank_set:
         raise HTTPException(status_code=404, detail="套卷不存在")
-    if bank_set.status != BankSetStatus.PUBLISHED.value and current_user.role in {Role.PARENT.value, Role.STUDENT.value}:
+    if bank_set.status != BankSetStatus.PUBLISHED.value and current_user.role in {
+        Role.PARENT.value,
+        Role.STUDENT.value,
+        Role.TEACHER.value,
+    }:
         raise HTTPException(status_code=404, detail="套卷不存在")
     include_answer = current_user.role not in {Role.PARENT.value, Role.STUDENT.value}
     data = _serialize_set(bank_set, include_questions=False)
@@ -250,6 +262,82 @@ def update_question(set_id: uuid.UUID, question_id: uuid.UUID, payload: BankQues
     if changes.get("status") == BankQuestionStatus.REVIEWED.value:
         q.reviewed_by = _user.id
         q.reviewed_at = datetime.now(UTC)
+    db.commit()
+    return _serialize_question(q)
+
+
+@router.post("/sets/{set_id}/review-all")
+def review_all(set_id: uuid.UUID, db: Session = Depends(get_db), _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF))):
+    bank_set = db.scalar(select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id))
+    if not bank_set:
+        raise HTTPException(status_code=404, detail="套卷不存在")
+    now = datetime.now(UTC)
+    count = 0
+    for q in bank_set.questions:
+        if q.status == BankQuestionStatus.DRAFT.value:
+            q.status = BankQuestionStatus.REVIEWED
+            q.reviewed_by = _user.id
+            q.reviewed_at = now
+            count += 1
+    db.commit()
+    return {"reviewed": count}
+
+
+@router.post("/questions/{question_id}/ai-clean")
+def ai_clean_question(
+    question_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF)),
+):
+    """AI 兜底清洗：仅生成草稿建议，必须人工复核后才能发布。"""
+    from app.services import llm
+
+    q = db.get(QuestionBankQuestion, question_id)
+    if not q:
+        raise HTTPException(status_code=404, detail="题目不存在")
+    if not llm.is_llm_configured():
+        raise HTTPException(status_code=503, detail="未配置大模型，无法使用 AI 清洗")
+    prompt = (
+        "你是少儿编程考级题库编辑。请根据下面的原始试卷片段，抽取成严格 JSON："
+        '{"type":"single_choice|multiple_choice|judgement|code_fill|programming",'
+        '"stem":"题干（保留代码/输入输出说明）","options":["A 选项","B 选项"]或null,'
+        '"answer":"单选填A/B/C/D；多选填A,C；判断填正确/错误；编程题填参考代码",'
+        '"analysis":"解析或评分标准","difficulty":1-10,"language":"python/cpp/null",'
+        '"reference_code":"编程题参考代码或null"}。'
+        "只输出 JSON，不要解释。原始片段：\n" + (q.source_excerpt or q.stem)
+    )
+    try:
+        raw = llm.invoke_text("你是严谨的题库结构化助手，只输出 JSON。", prompt, temperature=0.0, timeout=90)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=llm.friendly_llm_error(exc)) from exc
+    match = re.search(r"\{.*\}", raw, re.S)
+    if not match:
+        raise HTTPException(status_code=502, detail="AI 未返回可解析的 JSON")
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="AI 返回 JSON 解析失败") from exc
+    if data.get("type"):
+        q.type = str(data["type"])[:24]
+    if data.get("stem"):
+        q.stem = str(data["stem"])
+    if "options" in data:
+        q.options = data.get("options")
+    if data.get("answer") is not None:
+        q.answer = data.get("answer")
+    if data.get("analysis"):
+        q.analysis = str(data["analysis"])
+    if data.get("difficulty") is not None:
+        try:
+            q.difficulty = min(10, max(1, int(data["difficulty"])))
+        except (TypeError, ValueError):
+            pass
+    if data.get("language"):
+        q.language = str(data["language"])[:16]
+    if data.get("reference_code"):
+        q.reference_code = str(data["reference_code"])
+    q.status = BankQuestionStatus.DRAFT
+    q.review_note = "AI 清洗建议，请人工复核"
     db.commit()
     return _serialize_question(q)
 

@@ -165,6 +165,11 @@ const router = createRouter({
           component: () => import('@/views/assignments/AssignmentsView.vue'),
         },
         {
+          path: 'question-bank',
+          name: 'question-bank',
+          component: () => import('@/views/assignments/QuestionBankView.vue'),
+        },
+        {
           path: 'grading',
           name: 'grading-center',
           component: () => import('@/views/assignments/GradingCenterView.vue'),
@@ -266,6 +271,16 @@ const router = createRouter({
           path: 'assignments',
           name: 'client-assignments',
           component: () => import('@/views/client/ClientAssignmentsView.vue'),
+        },
+        {
+          path: 'question-bank',
+          name: 'client-question-bank',
+          component: () => import('@/views/client/ClientQuestionBankView.vue'),
+        },
+        {
+          path: 'practice/:id',
+          name: 'client-practice',
+          component: () => import('@/views/client/ClientPracticeView.vue'),
         },
         {
           path: 'assignments/:id',

@@ -40,6 +40,7 @@ import { useAuthStore } from '@/stores/auth'
 import { myPermissions } from '@/api/permissions'
 import { fmtDateTimeFromIso } from '@/utils/date'
 import PageHead from '@/components/PageHead.vue'
+import AssignmentsTabs from '@/components/AssignmentsTabs.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
@@ -1323,6 +1324,9 @@ onMounted(async () => {
       </div>
       </template>
     </PageHead>
+
+    <AssignmentsTabs active="assignments" />
+
 
     <div class="workspace">
       <!-- 左侧：作业列表（分组折叠视图，默认收起） -->

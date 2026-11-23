@@ -25,6 +25,7 @@ from app.api.routers import (
     permissions,
     prompts,
     question_bank,
+    question_bank_practice,
     rag_admin,
     reports,
     retrieval_configs,
@@ -55,6 +56,7 @@ api_router.include_router(schedules.router)
 api_router.include_router(feedbacks.router)
 api_router.include_router(prompts.router)
 api_router.include_router(question_bank.router)
+api_router.include_router(question_bank_practice.router)
 api_router.include_router(reports.router)
 api_router.include_router(assignments.router)
 api_router.include_router(orders.router)
