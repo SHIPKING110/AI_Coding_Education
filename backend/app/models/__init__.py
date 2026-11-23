@@ -54,6 +54,18 @@ from app.models.parent_quick_reply import ParentQuickReply
 from app.models.parent_service import ParentServiceMessage, ParentServiceThread
 from app.models.ppt_task import AgentPptTask, AgentPptTaskEvent
 from app.models.prompt import PromptScope, PromptTemplate
+from app.models.question_bank import (
+    AttemptStatus,
+    BankQuestionStatus,
+    BankSetStatus,
+    BankSourceStatus,
+    PracticeAttempt,
+    PracticeMode,
+    QuestionBankBlueprint,
+    QuestionBankQuestion,
+    QuestionBankSet,
+    QuestionBankSource,
+)
 from app.models.rag_admin import (
     AgentEvalCase,
     AgentEvalResult,
@@ -141,6 +153,16 @@ __all__ = [
     "PackageStatus",
     "PromptScope",
     "PromptTemplate",
+    "PracticeAttempt",
+    "PracticeMode",
+    "QuestionBankBlueprint",
+    "QuestionBankQuestion",
+    "QuestionBankSet",
+    "QuestionBankSource",
+    "BankQuestionStatus",
+    "BankSetStatus",
+    "BankSourceStatus",
+    "AttemptStatus",
     "RagAdminAudit",
     "RagConfigVersion",
     "RagEvalCase",

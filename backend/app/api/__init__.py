@@ -24,6 +24,7 @@ from app.api.routers import (
     parent_service,
     permissions,
     prompts,
+    question_bank,
     rag_admin,
     reports,
     retrieval_configs,
@@ -53,6 +54,7 @@ api_router.include_router(lessons.router)
 api_router.include_router(schedules.router)
 api_router.include_router(feedbacks.router)
 api_router.include_router(prompts.router)
+api_router.include_router(question_bank.router)
 api_router.include_router(reports.router)
 api_router.include_router(assignments.router)
 api_router.include_router(orders.router)
