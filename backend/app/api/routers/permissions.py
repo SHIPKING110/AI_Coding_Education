@@ -46,6 +46,12 @@ class PermissionUpdate(BaseModel):
     package_off: bool | None = None
     assignment_ai: bool | None = None
     assignment_create: bool | None = None
+    question_bank_import: bool | None = None
+    question_bank_review: bool | None = None
+    question_bank_publish: bool | None = None
+    question_bank_assignment: bool | None = None
+    question_bank_blueprint: bool | None = None
+    question_bank_archive: bool | None = None
     agent_skill_import: bool | None = None
     agent_doc_upload: bool | None = None
     order_visible: bool | None = None

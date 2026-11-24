@@ -428,12 +428,18 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         q_match = QUESTION_START_RE.match(text)
         if q_match:
             number = int(q_match.group(1))
-            if number == expected_no or number == expected_no + 1:
+            if block:
+                if number != expected_no:
+                    comments.append(f"题号从 {expected_no} 跳到 {number}，请核对是否漏题")
                 flush_block(block, current_no)
                 block = [line]
                 current_no = number
                 expected_no = number + 1
                 continue
+            block = [line]
+            current_no = number
+            expected_no = number + 1
+            continue
         if block:
             block.append(line)
     flush_block(block, current_no)

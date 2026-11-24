@@ -87,6 +87,12 @@ PERMISSION_KEYS: dict[str, str] = {
     "rag_parent_sessions_view": "后台管理-家长会话-查看",
     "rag_settings_view": "后台管理-设置-查看",
     "rag_settings_save": "后台管理-设置-保存配置",
+    "question_bank_import": "AI习题-上传题库文档",
+    "question_bank_review": "AI习题-全部通过审核",
+    "question_bank_publish": "AI习题-发布题库",
+    "question_bank_assignment": "AI习题-生成作业草稿",
+    "question_bank_blueprint": "AI习题-组卷规则",
+    "question_bank_archive": "AI习题-归档题库",
     "usage_view": "用量与成本-查看",
     "usage_price_create": "用量与成本-新增价格",
     "usage_budget_save": "用量与成本-保存预算",
@@ -163,6 +169,12 @@ KEY_DEFAULTS: dict[str, bool] = {
     "rag_parent_sessions_view": False,
     "rag_settings_view": False,
     "rag_settings_save": False,
+    "question_bank_import": False,
+    "question_bank_review": False,
+    "question_bank_publish": False,
+    "question_bank_assignment": False,
+    "question_bank_blueprint": False,
+    "question_bank_archive": False,
     # 用量与成本细粒度权限
     "usage_view": False,
     "usage_price_create": False,
@@ -215,6 +227,12 @@ class TeacherPermission(Base):
     package_off: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     assignment_ai: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     assignment_create: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    question_bank_import: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    question_bank_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    question_bank_publish: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    question_bank_assignment: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    question_bank_blueprint: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    question_bank_archive: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     agent_skill_import: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     agent_doc_upload: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     settings_manage: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")

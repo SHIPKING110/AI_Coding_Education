@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_current_user, require_roles
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.models.permission import check as permission_check
 from app.models.question_bank import (
     BankQuestionStatus,
     BankSetStatus,
@@ -30,6 +31,31 @@ from app.models.user import Role, User
 from app.services.question_bank_parser import file_hash, parse_docx
 
 router = APIRouter(prefix="/question-bank", tags=["question-bank"])
+
+QB_PERMISSION_KEYS = {
+    "question_bank_import",
+    "question_bank_review",
+    "question_bank_publish",
+    "question_bank_assignment",
+    "question_bank_blueprint",
+    "question_bank_archive",
+}
+
+
+def _require_qb_permission(db: Session, user: User, key: str) -> None:
+    """管理员/教务放行；教师须拥有对应题库开关；其他角色一律拒绝。"""
+    if user.role in {Role.ADMIN.value, Role.STAFF.value}:
+        return
+    if user.role != Role.TEACHER.value or not permission_check(db, user, key):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无该题库操作权限，请联系管理员")
+
+
+def _can_manage_question_bank(db: Session, user: User) -> bool:
+    if user.role in {Role.ADMIN.value, Role.STAFF.value}:
+        return True
+    if user.role == Role.TEACHER.value:
+        return any(permission_check(db, user, key) for key in QB_PERMISSION_KEYS)
+    return False
 
 
 class BankQuestionUpdate(BaseModel):
@@ -51,6 +77,7 @@ class BankSetMetaUpdate(BaseModel):
     name: str | None = None
     institution: str | None = None
     exam_year: int | None = None
+    exam_month: str | None = None
     subject: str | None = None
     level: str | None = None
 
@@ -93,6 +120,7 @@ def _serialize_set(bank_set: QuestionBankSet, include_questions: bool = False) -
         "name": bank_set.name,
         "institution": bank_set.institution,
         "exam_year": bank_set.exam_year,
+        "exam_month": bank_set.exam_month,
         "subject": bank_set.subject,
         "level": bank_set.level,
         "total_score": bank_set.total_score,
@@ -120,6 +148,13 @@ def _parse_year(value: str | None) -> int | None:
     return int(match.group(0)) if match else None
 
 
+def _parse_month(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = re.search(r"((?:19|20)\d{2})\s*(?:年|[-/.])\s*(0?[1-9]|1[0-2])\s*(?:月)?", value)
+    return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}" if match else None
+
+
 @router.post("/imports", response_model=BankImportOut, status_code=status.HTTP_201_CREATED)
 def import_docx(
     file: UploadFile = File(...),
@@ -128,10 +163,11 @@ def import_docx(
     exam_year: str | None = Form(default=None),
     subject: str | None = Form(default=None),
     level: str | None = Form(default=None),
-    current_user: User = Depends(require_roles(Role.ADMIN, Role.STAFF)),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> BankImportOut:
     """上传并解析 DOCX。解析结果永远是草稿，须人工审核后发布。"""
+    _require_qb_permission(db, current_user, "question_bank_import")
     filename = _ensure_docx(file)
     settings = get_settings()
     root = Path(settings.UPLOAD_DIR) / "question_bank" / uuid.uuid4().hex
@@ -161,6 +197,7 @@ def import_docx(
             name=name or paper.name,
             institution=institution or paper.institution,
             exam_year=_parse_year(exam_year) or paper.exam_year,
+            exam_month=_parse_month(exam_year),
             subject=subject or paper.subject,
             level=level or paper.level,
             total_score=paper.total_score,
@@ -206,7 +243,8 @@ def list_sets(
     institution: str | None = None,
     subject: str | None = None,
     level: str | None = None,
-    exam_year: int | None = None,
+    exam_year: int | None = Query(default=None),
+    exam_month: str | None = Query(default=None),
     status_filter: str | None = Query(default=None, alias="status"),
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
@@ -220,10 +258,14 @@ def list_sets(
         query = query.where(QuestionBankSet.level == level)
     if exam_year:
         query = query.where(QuestionBankSet.exam_year == exam_year)
+    if exam_month:
+        query = query.where(QuestionBankSet.exam_month == exam_month)
     if status_filter:
         query = query.where(QuestionBankSet.status == status_filter)
     items = db.scalars(query).all()
-    if _user.role in {Role.PARENT.value, Role.STUDENT.value, Role.TEACHER.value}:
+    if _user.role in {Role.PARENT.value, Role.STUDENT.value}:
+        items = [x for x in items if x.status == BankSetStatus.PUBLISHED.value]
+    elif _user.role == Role.TEACHER.value and not _can_manage_question_bank(db, _user):
         items = [x for x in items if x.status == BankSetStatus.PUBLISHED.value]
     return {"items": [_serialize_set(x) for x in items], "total": len(items)}
 
@@ -233,11 +275,13 @@ def get_set(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User
     bank_set = db.scalar(select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id))
     if not bank_set:
         raise HTTPException(status_code=404, detail="套卷不存在")
-    if bank_set.status != BankSetStatus.PUBLISHED.value and current_user.role in {
-        Role.PARENT.value,
-        Role.STUDENT.value,
-        Role.TEACHER.value,
-    }:
+    if bank_set.status != BankSetStatus.PUBLISHED.value and (
+        current_user.role in {Role.PARENT.value, Role.STUDENT.value}
+        or (
+            current_user.role == Role.TEACHER.value
+            and not _can_manage_question_bank(db, current_user)
+        )
+    ):
         raise HTTPException(status_code=404, detail="套卷不存在")
     include_answer = current_user.role not in {Role.PARENT.value, Role.STUDENT.value}
     data = _serialize_set(bank_set, include_questions=False)
@@ -246,7 +290,8 @@ def get_set(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User
 
 
 @router.patch("/sets/{set_id}")
-def update_set(set_id: uuid.UUID, payload: BankSetMetaUpdate, db: Session = Depends(get_db), _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF))):
+def update_set(set_id: uuid.UUID, payload: BankSetMetaUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _require_qb_permission(db, current_user, "question_bank_import")
     bank_set = db.get(QuestionBankSet, set_id)
     if not bank_set:
         raise HTTPException(status_code=404, detail="套卷不存在")
@@ -257,7 +302,8 @@ def update_set(set_id: uuid.UUID, payload: BankSetMetaUpdate, db: Session = Depe
 
 
 @router.patch("/sets/{set_id}/questions/{question_id}")
-def update_question(set_id: uuid.UUID, question_id: uuid.UUID, payload: BankQuestionUpdate, db: Session = Depends(get_db), _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF))):
+def update_question(set_id: uuid.UUID, question_id: uuid.UUID, payload: BankQuestionUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _require_qb_permission(db, current_user, "question_bank_review")
     q = db.scalar(select(QuestionBankQuestion).where(QuestionBankQuestion.id == question_id, QuestionBankQuestion.bank_set_id == set_id))
     if not q:
         raise HTTPException(status_code=404, detail="题目不存在")
@@ -267,14 +313,15 @@ def update_question(set_id: uuid.UUID, question_id: uuid.UUID, payload: BankQues
     for key, value in changes.items():
         setattr(q, key, value)
     if changes.get("status") == BankQuestionStatus.REVIEWED.value:
-        q.reviewed_by = _user.id
+        q.reviewed_by = current_user.id
         q.reviewed_at = datetime.now(UTC)
     db.commit()
     return _serialize_question(q)
 
 
 @router.post("/sets/{set_id}/review-all")
-def review_all(set_id: uuid.UUID, db: Session = Depends(get_db), _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF))):
+def review_all(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _require_qb_permission(db, current_user, "question_bank_review")
     bank_set = db.scalar(select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id))
     if not bank_set:
         raise HTTPException(status_code=404, detail="套卷不存在")
@@ -283,7 +330,7 @@ def review_all(set_id: uuid.UUID, db: Session = Depends(get_db), _user: User = D
     for q in bank_set.questions:
         if q.status == BankQuestionStatus.DRAFT.value:
             q.status = BankQuestionStatus.REVIEWED
-            q.reviewed_by = _user.id
+            q.reviewed_by = current_user.id
             q.reviewed_at = now
             count += 1
     db.commit()
@@ -294,9 +341,10 @@ def review_all(set_id: uuid.UUID, db: Session = Depends(get_db), _user: User = D
 def ai_clean_question(
     question_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF)),
+    current_user: User = Depends(get_current_user),
 ):
     """AI 兜底清洗：仅生成草稿建议，必须人工复核后才能发布。"""
+    _require_qb_permission(db, current_user, "question_bank_review")
     from app.services import llm
 
     q = db.get(QuestionBankQuestion, question_id)
@@ -350,7 +398,8 @@ def ai_clean_question(
 
 
 @router.post("/sets/{set_id}/publish")
-def publish_set(set_id: uuid.UUID, db: Session = Depends(get_db), _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF))):
+def publish_set(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _require_qb_permission(db, current_user, "question_bank_publish")
     bank_set = db.scalar(select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id))
     if not bank_set:
         raise HTTPException(status_code=404, detail="套卷不存在")
@@ -367,7 +416,8 @@ def publish_set(set_id: uuid.UUID, db: Session = Depends(get_db), _user: User = 
 
 
 @router.post("/sets/{set_id}/archive")
-def archive_set(set_id: uuid.UUID, db: Session = Depends(get_db), _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF))):
+def archive_set(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _require_qb_permission(db, current_user, "question_bank_archive")
     bank_set = db.get(QuestionBankSet, set_id)
     if not bank_set:
         raise HTTPException(status_code=404, detail="套卷不存在")

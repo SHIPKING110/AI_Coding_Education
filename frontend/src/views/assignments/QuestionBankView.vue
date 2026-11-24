@@ -2,7 +2,7 @@
   <div class="qb-view">
     <PageHead title="题库" eyebrow="QUESTION BANK" sub="真题文档导入 → 人工审核 → 发布到练习与模拟考试">
       <template #actions>
-        <button v-if="canManage" class="btn primary" @click="openUpload">
+        <button v-if="canUpload" class="btn primary" @click="openUpload">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0 4 4m-4-4-4 4M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" /></svg>
           上传题库文档
         </button>
@@ -42,9 +42,9 @@
             <option value="">全部等级</option>
             <option v-for="v in levels" :key="v" :value="v">{{ v }}</option>
           </select>
-          <select v-model="filter.year" class="fld" @change="loadSets">
-            <option value="">全部年份</option>
-            <option v-for="v in years" :key="v" :value="v">{{ v }}</option>
+          <select v-model="filter.month" class="fld" @change="loadSets">
+            <option value="">全部年月</option>
+            <option v-for="v in months" :key="v" :value="v">{{ v }}</option>
           </select>
           <select v-model="filter.status" class="fld" @change="loadSets">
             <option value="">全部状态</option>
@@ -94,15 +94,15 @@
         <template v-else>
           <div class="paper-head">
             <div class="paper-title-row">
-              <input v-if="canManage" v-model="selected.name" class="paper-title-input" @blur="saveMeta" />
+              <input v-if="canUpload" v-model="selected.name" class="paper-title-input" @blur="saveMeta" />
               <h2 v-else>{{ selected.name }}</h2>
               <span class="stamp large" :class="selected.status">{{ statusLabel[selected.status] }}</span>
             </div>
             <div class="meta-grid">
-              <label>机构<input v-model="selected.institution" :disabled="!canManage" @blur="saveMeta" /></label>
-              <label>科目<input v-model="selected.subject" :disabled="!canManage" @blur="saveMeta" /></label>
-              <label>等级<input v-model="selected.level" :disabled="!canManage" @blur="saveMeta" /></label>
-              <label>年份<input v-model.number="selected.exam_year" type="number" :disabled="!canManage" @blur="saveMeta" /></label>
+              <label>机构<input v-model="selected.institution" :disabled="!canUpload" @blur="saveMeta" /></label>
+              <label>科目<input v-model="selected.subject" :disabled="!canUpload" @blur="saveMeta" /></label>
+              <label>等级<input v-model="selected.level" :disabled="!canUpload" @blur="saveMeta" /></label>
+              <label>年月<input v-model="selected.exam_month" type="month" :disabled="!canUpload" @blur="saveMeta" /></label>
             </div>
             <div v-if="selected.import_meta?.warnings?.length" class="warn-box">
               <strong>解析提示</strong>
@@ -114,13 +114,16 @@
               <button class="btn practice-entry" :disabled="!selected.questions?.length" @click="openPractice">
                 刷题练习
               </button>
-              <template v-if="canManage">
-                <button class="btn" :disabled="selected.status === 'archived'" @click="onReviewAll">全部通过审核</button>
-                <button class="btn primary" :disabled="selected.status === 'published'" @click="onPublish">发布题库</button>
-                <button v-if="selected.status === 'published'" class="btn" @click="onToAssignment">生成作业草稿</button>
-                <button class="btn" @click="openBlueprints">组卷规则</button>
-                <button class="btn danger-ghost" :disabled="selected.status === 'archived'" @click="onArchive">归档</button>
-              </template>
+              <button class="btn practice-entry" @click="aggregateOpen = true">
+                综合练习
+              </button>
+              <button class="btn practice-entry" @click="startMarkedPractice('wrong')">错题本</button>
+              <button class="btn practice-entry" @click="startMarkedPractice('favorite')">我的收藏</button>
+              <button v-if="canReview" class="btn" :disabled="selected.status === 'archived'" @click="onReviewAll">全部通过审核</button>
+              <button v-if="canPublish" class="btn primary" :disabled="selected.status === 'published'" @click="onPublish">发布题库</button>
+              <button v-if="canAssignment && selected.status === 'published'" class="btn" @click="onToAssignment">生成作业草稿</button>
+              <button v-if="canBlueprint" class="btn" @click="openBlueprints">组卷规则</button>
+              <button v-if="canArchive" class="btn danger-ghost" :disabled="selected.status === 'archived'" @click="onArchive">归档</button>
             </div>
           </div>
 
@@ -150,7 +153,7 @@
                   <span class="q-type">{{ QUESTION_TYPE_LABELS[activeQuestion.type] }}</span>
                   <span class="stamp" :class="activeQuestion.status">{{ statusLabel[activeQuestion.status] }}</span>
                 </div>
-                <div v-if="canManage" class="q-actions">
+                <div v-if="canReview" class="q-actions">
                   <button class="btn ghost" :disabled="aiCleaning" @click="onAiClean">
                     {{ aiCleaning ? '清洗中…' : 'AI 清洗' }}
                   </button>
@@ -162,7 +165,7 @@
 
               <label class="fld-block">
                 <span>题干</span>
-                <textarea v-model="edit.stem" rows="4" :disabled="!canManage"></textarea>
+                <textarea v-autogrow v-model="edit.stem" rows="4" :disabled="!canReview"></textarea>
               </label>
 
               <div v-if="['single_choice', 'multiple_choice'].includes(edit.type)" class="options-editor">
@@ -287,7 +290,7 @@
         <div class="upload-grid">
           <label>套卷名称<input v-model="uploadMeta.name" placeholder="留空则自动识别" /></label>
           <label>机构<input v-model="uploadMeta.institution" /></label>
-          <label>年份<input v-model="uploadMeta.exam_year" placeholder="如 2025 或 2025年12月" /></label>
+          <label>年月<input v-model="uploadMeta.exam_year" placeholder="如 2025年12月 或 2025-12" /></label>
           <label>科目<input v-model="uploadMeta.subject" placeholder="Python / C++ / 图形化 / 机器人" /></label>
           <label>等级<input v-model="uploadMeta.level" placeholder="如 二级" /></label>
         </div>
@@ -303,11 +306,56 @@
       </div>
     </div>
 
+    <div v-if="aggregateOpen" class="modal-mask" @click.self="aggregateOpen = false">
+      <div class="upload-modal">
+        <h3>综合练习</h3>
+        <p class="modal-sub">按已发布题库的科目、等级和题型汇总抽题；答对自动进入下一题，答错会留在当前题并加入错题本。</p>
+        <div class="aggregate-form">
+          <div class="aggregate-select">
+            <span class="select-label">科目</span>
+            <SearchableSelect
+              v-model="aggregateForm.subject"
+              :options="subjectOptions"
+              placeholder="不限科目"
+              group="qb-aggregate-subject"
+            />
+          </div>
+          <div class="aggregate-select">
+            <span class="select-label">等级</span>
+            <SearchableSelect
+              v-model="aggregateForm.level"
+              :options="levelOptions"
+              placeholder="不限等级"
+              group="qb-aggregate-level"
+            />
+          </div>
+          <label>单选<input v-model.number="aggregateForm.single_choice" type="number" min="0" /></label>
+          <label>多选<input v-model.number="aggregateForm.multiple_choice" type="number" min="0" /></label>
+          <label>判断<input v-model.number="aggregateForm.judgement" type="number" min="0" /></label>
+          <label>编程<input v-model.number="aggregateForm.programming" type="number" min="0" /></label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn" @click="aggregateOpen = false">取消</button>
+          <button class="btn primary" :disabled="aggregateLoading" @click="startAggregatePractice">
+            {{ aggregateLoading ? '抽题中…' : '开始练习' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <TeacherPracticeDialog
       v-if="practiceOpen && selected"
       :bank-set="selected"
       :start-index="practiceStartIndex"
       @close="practiceOpen = false"
+    />
+    <TeacherPracticeDialog
+      v-if="aggregateQuestions.length"
+      :questions="aggregateQuestions"
+      title="综合练习"
+      eyebrow="教师综合练习"
+      :meta="`${aggregateForm.subject || '不限科目'} · ${aggregateForm.level || '不限等级'}`"
+      @close="aggregateQuestions = []"
     />
   </div>
 </template>
@@ -318,10 +366,12 @@ import { useRouter } from 'vue-router'
 
 import AssignmentsTabs from '@/components/AssignmentsTabs.vue'
 import PageHead from '@/components/PageHead.vue'
+import SearchableSelect from '@/components/SearchableSelect.vue'
 import TeacherPracticeDialog from '@/components/TeacherPracticeDialog.vue'
 import { QUESTION_TYPE_LABELS } from '@/api/assignment'
 import {
   aiCleanQuestion,
+  aggregatePractice,
   archiveBankSet,
   bankSetToAssignment,
   createBankBlueprint,
@@ -338,6 +388,7 @@ import {
   type BankBlueprint,
   type BankQuestion,
   type BankSet,
+  type PracticeQuestion,
 } from '@/api/questionBank'
 import { answerFromText, answerToText } from '@/utils/questionBank'
 import { useAuthStore } from '@/stores/auth'
@@ -346,18 +397,47 @@ import { useToastStore } from '@/stores/toast'
 const auth = useAuthStore()
 const toast = useToastStore()
 const router = useRouter()
-const canManage = computed(() => ['admin', 'staff'].includes(auth.user?.role ?? ''))
+
+function hasPerm(key: string): boolean {
+  if (['admin', 'staff'].includes(auth.user?.role ?? '')) return true
+  return auth.perms?.[key] === true
+}
+
+const canUpload = computed(() => hasPerm('question_bank_import'))
+const canReview = computed(() => hasPerm('question_bank_review'))
+const canPublish = computed(() => hasPerm('question_bank_publish'))
+const canAssignment = computed(() => hasPerm('question_bank_assignment'))
+const canBlueprint = computed(() => hasPerm('question_bank_blueprint'))
+const canArchive = computed(() => hasPerm('question_bank_archive'))
+const canManage = computed(
+  () =>
+    canUpload.value ||
+    canReview.value ||
+    canPublish.value ||
+    canAssignment.value ||
+    canBlueprint.value ||
+    canArchive.value,
+)
 
 const stats = ref({ sets: 0, questions: 0, pending_review: 0 })
 const sets = ref<BankSet[]>([])
 const loading = ref(false)
 const loadError = ref('')
-const filter = reactive({ institution: '', subject: '', level: '', year: '', status: '' })
+const filter = reactive({ institution: '', subject: '', level: '', month: '', status: '' })
 
 const institutions = computed(() => [...new Set(sets.value.map((s) => s.institution).filter(Boolean))] as string[])
 const subjects = computed(() => [...new Set(sets.value.map((s) => s.subject).filter(Boolean))] as string[])
 const levels = computed(() => [...new Set(sets.value.map((s) => s.level).filter(Boolean))] as string[])
-const years = computed(() => [...new Set(sets.value.map((s) => s.exam_year).filter(Boolean))] as number[])
+const months = computed(
+  () =>
+    [
+      ...new Set(
+        sets.value
+          .map((s) => s.exam_month || (s.exam_year ? String(s.exam_year) : ''))
+          .filter(Boolean),
+      ),
+    ] as string[],
+)
 
 const selectedId = ref('')
 const selected = ref<BankSet | null>(null)
@@ -367,10 +447,65 @@ const activeQuestionIndex = computed(() => selected.value?.questions?.findIndex(
 const activeQuestion = computed(() => selected.value?.questions?.find((q) => q.id === activeQuestionId.value) ?? null)
 const practiceOpen = ref(false)
 const practiceStartIndex = ref(0)
+const aggregateOpen = ref(false)
+const aggregateLoading = ref(false)
+const aggregateQuestions = ref<PracticeQuestion[]>([])
+const aggregateForm = reactive({ subject: '', level: '', single_choice: 5, multiple_choice: 3, judgement: 5, programming: 1 })
+const subjectOptions = computed(() => subjects.value.map((value) => ({ id: value, label: value })))
+const levelOptions = computed(() => levels.value.map((value) => ({ id: value, label: value })))
 
 function openPractice() {
   practiceStartIndex.value = Math.max(0, activeQuestionIndex.value)
   practiceOpen.value = true
+}
+
+function actionErrorText(e: unknown, fallback: string): string {
+  const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object' && 'gaps' in detail) {
+    const gaps = (detail as { gaps?: Record<string, string> }).gaps ?? {}
+    const text = Object.values(gaps).filter(Boolean).join('；')
+    if (text) return text
+  }
+  return (e as Error).message || fallback
+}
+
+async function startMarkedPractice(kind: 'favorite' | 'wrong') {
+  aggregateLoading.value = true
+  try {
+    const qs = await aggregatePractice({ mark_kind: kind })
+    if (!qs.length) {
+      toast.error(kind === 'wrong' ? '错题本还是空的' : '还没有收藏题目')
+      return
+    }
+    aggregateQuestions.value = qs
+    aggregateOpen.value = false
+  } catch (e: unknown) {
+    toast.error(actionErrorText(e, '读取标记题目失败'))
+  } finally {
+    aggregateLoading.value = false
+  }
+}
+
+async function startAggregatePractice() {
+  aggregateLoading.value = true
+  try {
+    aggregateQuestions.value = await aggregatePractice({
+      subject: aggregateForm.subject || undefined,
+      level: aggregateForm.level || undefined,
+      rules: {
+        single_choice: aggregateForm.single_choice,
+        multiple_choice: aggregateForm.multiple_choice,
+        judgement: aggregateForm.judgement,
+        programming: aggregateForm.programming,
+      },
+    })
+    aggregateOpen.value = false
+  } catch (e: unknown) {
+    toast.error(actionErrorText(e, '综合练习抽题失败，请检查已发布题目库存'))
+  } finally {
+    aggregateLoading.value = false
+  }
 }
 
 const edit = reactive({
@@ -401,6 +536,7 @@ function loadEdit(q: BankQuestion | null) {
   edit.stem = q.stem
   edit.optionsText = (q.options ?? []).join('\n')
   edit.answerText = answerToText(q.type, q.answer)
+  edit.analysis = q.analysis ?? ''
   edit.difficulty = q.difficulty
   edit.score = q.score
   edit.language = q.language ?? ''
@@ -438,7 +574,7 @@ async function loadSets() {
     if (filter.institution) params.institution = filter.institution
     if (filter.subject) params.subject = filter.subject
     if (filter.level) params.level = filter.level
-    if (filter.year) params.exam_year = Number(filter.year)
+    if (filter.month) params.exam_month = filter.month
     if (filter.status) params.status = filter.status
     const data = await listBankSets(params)
     sets.value = data.items
@@ -467,11 +603,17 @@ async function selectSet(id: string) {
 
 async function saveMeta() {
   if (!selected.value) return
+  if (selected.value.exam_month) {
+    selected.value.exam_year = Number(selected.value.exam_month.slice(0, 4)) || null
+  } else {
+    selected.value.exam_year = null
+  }
   try {
     const updated = await updateBankSet(selected.value.id, {
       name: selected.value.name,
       institution: selected.value.institution,
       exam_year: selected.value.exam_year,
+      exam_month: selected.value.exam_month,
       subject: selected.value.subject,
       level: selected.value.level,
     })
@@ -747,6 +889,7 @@ async function submitUpload() {
 
 onMounted(async () => {
   if (!auth.user) await auth.fetchMe().catch(() => null)
+  await auth.fetchPerms()
   await Promise.all([loadStats(), loadSets()])
 })
 </script>
@@ -1055,6 +1198,9 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 .q-no {
   width: 30px;
@@ -1163,6 +1309,10 @@ onMounted(async () => {
   background: #1e293b !important;
   color: #e2e8f0 !important;
   border-color: #0f172a !important;
+}
+.fld-block textarea.autogrow-ta {
+  resize: none;
+  overflow-y: hidden;
 }
 .options-editor {
   margin-bottom: 10px;
@@ -1392,8 +1542,47 @@ onMounted(async () => {
   font-size: 11px;
   color: #7c5a1e;
 }
-.bp-form {
+
+.aggregate-form {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.aggregate-select {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.select-label {
+  color: #7c6a4a;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+.aggregate-select :deep(.ssel-trigger) {
+  width: 100%;
+  min-height: 34px;
+  border-color: #e2d5bb;
+  border-radius: 9px;
+  background: #fff;
+}
+.aggregate-form > label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #7c6a4a;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+.aggregate-form > label input {
+  padding: 7px 9px;
+  border: 1px solid #e2d5bb;
+  border-radius: 9px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 13px;
+}
+.bp-form {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin-top: 12px;

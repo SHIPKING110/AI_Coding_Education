@@ -169,6 +169,17 @@ def ensure_business_schema(engine: Engine) -> None:
     # 用量与成本细粒度权限（默认关闭）
     for _usage_col in ("usage_view", "usage_price_create", "usage_budget_save", "usage_recon_upsert"):
         addcol("teacher_permissions", f"{_usage_col} BOOLEAN NOT NULL DEFAULT FALSE", _usage_col)
+    # 题库操作细粒度权限，存量库按权限默认值放行，后续可由管理员逐项收紧
+    for _qb_col in (
+        "question_bank_import",
+        "question_bank_review",
+        "question_bank_publish",
+        "question_bank_assignment",
+        "question_bank_blueprint",
+        "question_bank_archive",
+    ):
+        addcol("teacher_permissions", f"{_qb_col} BOOLEAN NOT NULL DEFAULT FALSE", _qb_col)
+    addcol("question_bank_sets", "exam_month VARCHAR(7)", "exam_month")
     # 整数余额 → 数值（支持半课时），仅当还是 INTEGER 时执行
     if _col_type(engine, "students", "lesson_balance").startswith("INTEGER"):
         stmts.append(

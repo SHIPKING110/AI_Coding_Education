@@ -38,6 +38,7 @@ export interface BankSet {
   name: string
   institution: string | null
   exam_year: number | null
+  exam_month: string | null
   subject: string | null
   level: string | null
   total_score: number | null
@@ -73,6 +74,7 @@ export async function listBankSets(params: {
   subject?: string
   level?: string
   exam_year?: number
+  exam_month?: string
   status?: string
 } = {}): Promise<{ items: BankSet[]; total: number }> {
   const { data } = await http.get('/question-bank/sets', { params })
@@ -86,7 +88,7 @@ export async function getBankSet(id: string): Promise<BankSet> {
 
 export async function updateBankSet(
   id: string,
-  payload: Partial<Pick<BankSet, 'name' | 'institution' | 'exam_year' | 'subject' | 'level'>>,
+  payload: Partial<Pick<BankSet, 'name' | 'institution' | 'exam_year' | 'exam_month' | 'subject' | 'level'>>,
 ): Promise<BankSet> {
   const { data } = await http.patch(`/question-bank/sets/${id}`, payload)
   return data
@@ -153,6 +155,38 @@ export async function composeBankQuestions(payload: {
   exam_year?: number
 }): Promise<{ questions: AttemptQuestion[] }> {
   const { data } = await http.post('/question-bank/compose', payload)
+  return data
+}
+
+export async function aggregateSubjects(): Promise<{ subjects: string[]; levels: string[] }> {
+  const { data } = await http.get('/question-bank/aggregates/subjects')
+  return data
+}
+
+export async function aggregatePractice(payload: AggregatePracticeIn): Promise<AggregateQuestionOut[]> {
+  const { data } = await http.post('/question-bank/aggregates/practice', payload)
+  return data
+}
+
+export async function toggleAggregateMark(
+  questionId: string,
+  kind: 'favorite' | 'wrong',
+  enabled: boolean,
+): Promise<{ saved: boolean; kind: string; enabled: boolean }> {
+  const { data } = await http.post(`/question-bank/aggregates/${questionId}/mark`, { kind, enabled })
+  return data
+}
+
+export async function listAggregateMarks(kind?: 'favorite' | 'wrong'): Promise<AggregateMark[]> {
+  const { data } = await http.get('/question-bank/aggregates/marks', { params: kind ? { kind } : undefined })
+  return data
+}
+
+export async function checkAggregateAnswer(
+  questionId: string,
+  answer: unknown,
+): Promise<AggregateCheckOut> {
+  const { data } = await http.post('/question-bank/aggregates/check', { question_id: questionId, answer })
   return data
 }
 
@@ -296,6 +330,69 @@ export interface PracticeAttemptOut {
   } | null
   answers: Record<string, unknown>
   questions: AttemptQuestion[]
+}
+
+export interface AggregateQuestionOut {
+  id: string
+  order_no: number
+  type: BankQuestionType
+  stem: string
+  options: string[] | null
+  difficulty: number
+  score: number
+  language: string | null
+  media: BankMedia[] | null
+  knowledge_points: string[] | null
+  favorite: boolean
+  wrong: boolean
+}
+
+/** 练习面板使用的轻量题目；试卷题目与聚合抽取题目均可兼容 */
+export interface PracticeQuestion {
+  id: string
+  order_no: number
+  type: BankQuestionType
+  stem: string
+  options: string[] | null
+  difficulty: number
+  score: number
+  language: string | null
+  media: BankMedia[] | null
+  knowledge_points: string[] | null
+  answer?: unknown
+  favorite?: boolean
+  wrong?: boolean
+  analysis?: string | null
+  reference_code?: string | null
+  test_cases?: unknown[] | null
+  source_excerpt?: string | null
+  status?: BankQuestion['status']
+  review_note?: string | null
+  marked?: boolean
+}
+
+export interface AggregatePracticeIn {
+  subject?: string | null
+  level?: string | null
+  institution?: string | null
+  exam_year?: number | null
+  mark_kind?: 'favorite' | 'wrong' | null
+  rules?: Record<string, number>
+  exclude_ids?: string[]
+}
+
+export interface AggregateMark {
+  kind: 'favorite' | 'wrong'
+  question_id: string
+}
+
+export interface AggregateCheckOut {
+  is_correct: boolean | null
+  correct_answer: unknown
+  analysis: string | null
+  reference_code: string | null
+  score: number
+  max_score: number
 }
 
 export interface AttemptSummary {

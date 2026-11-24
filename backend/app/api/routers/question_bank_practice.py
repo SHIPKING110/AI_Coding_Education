@@ -11,10 +11,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_roles
+from app.api.deps import get_current_user, require_roles
 from app.core.database import get_db
 from app.models.assignment import Assignment, Question
 from app.models.enrollment import Student
+from app.models.permission import check as permission_check
 from app.models.question_bank import (
     AttemptStatus,
     BankQuestionStatus,
@@ -28,6 +29,13 @@ from app.models.question_bank import (
 from app.models.user import Role, User
 
 router = APIRouter(prefix="/question-bank", tags=["question-bank-practice"])
+
+
+def _require_qb_permission(db: Session, user: User, key: str) -> None:
+    if user.role in {Role.ADMIN.value, Role.STAFF.value}:
+        return
+    if user.role != Role.TEACHER.value or not permission_check(db, user, key):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无该题库操作权限，请联系管理员")
 
 OBJECTIVE_TYPES = {"single_choice", "multiple_choice", "judgement", "code_fill"}
 ALL_TYPES = OBJECTIVE_TYPES | {"programming"}
@@ -271,8 +279,9 @@ def _attempt_out(attempt: PracticeAttempt, *, reveal: bool) -> dict[str, Any]:
 @router.get("/blueprints")
 def list_blueprints(
     db: Session = Depends(get_db),
-    _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF, Role.TEACHER)),
+    current_user: User = Depends(get_current_user),
 ):
+    _require_qb_permission(db, current_user, "question_bank_blueprint")
     rows = db.scalars(select(QuestionBankBlueprint).order_by(QuestionBankBlueprint.created_at.desc())).all()
     return [
         {
@@ -291,8 +300,9 @@ def list_blueprints(
 def create_blueprint(
     payload: BlueprintIn,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(Role.ADMIN, Role.STAFF, Role.TEACHER)),
+    user: User = Depends(get_current_user),
 ):
+    _require_qb_permission(db, user, "question_bank_blueprint")
     rules = _normalize_rules(payload.rules)
     bp = QuestionBankBlueprint(
         name=payload.name,
@@ -311,8 +321,9 @@ def update_blueprint(
     blueprint_id: uuid.UUID,
     payload: BlueprintIn,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF, Role.TEACHER)),
+    current_user: User = Depends(get_current_user),
 ):
+    _require_qb_permission(db, current_user, "question_bank_blueprint")
     bp = db.get(QuestionBankBlueprint, blueprint_id)
     if not bp:
         raise HTTPException(status_code=404, detail="组卷规则不存在")
@@ -328,8 +339,9 @@ def update_blueprint(
 def delete_blueprint(
     blueprint_id: uuid.UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF, Role.TEACHER)),
+    current_user: User = Depends(get_current_user),
 ):
+    _require_qb_permission(db, current_user, "question_bank_blueprint")
     bp = db.get(QuestionBankBlueprint, blueprint_id)
     if not bp:
         raise HTTPException(status_code=404, detail="组卷规则不存在")
@@ -626,8 +638,9 @@ def bank_to_assignment(
     set_id: uuid.UUID,
     payload: ToAssignmentIn,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles(Role.ADMIN, Role.STAFF, Role.TEACHER)),
+    user: User = Depends(get_current_user),
 ):
+    _require_qb_permission(db, user, "question_bank_assignment")
     bank_set = db.get(QuestionBankSet, set_id)
     if not bank_set or bank_set.status != BankSetStatus.PUBLISHED.value:
         raise HTTPException(status_code=404, detail="套卷不存在或未发布")

@@ -1,67 +1,168 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { QUESTION_TYPE_LABELS } from '@/api/assignment'
-import type { BankQuestion, BankSet } from '@/api/questionBank'
+import {
+  checkAggregateAnswer,
+  toggleAggregateMark,
+  type BankSet,
+  type PracticeQuestion,
+} from '@/api/questionBank'
 
 const props = defineProps<{
-  bankSet: BankSet
+  bankSet?: BankSet
+  questions?: PracticeQuestion[]
   startIndex?: number
+  title?: string
+  eyebrow?: string
+  meta?: string
 }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
-const questions = computed(() => props.bankSet.questions ?? [])
+const questionList = computed<PracticeQuestion[]>(() => {
+  if (props.questions?.length) return props.questions
+  return props.bankSet?.questions ?? []
+})
+watch(
+  questionList,
+  () => {
+    favoriteSet.value = new Set(questionList.value.filter((q) => q.favorite).map((q) => q.id))
+    wrongSet.value = new Set(questionList.value.filter((q) => q.wrong).map((q) => q.id))
+  },
+  { immediate: true, deep: true },
+)
 const index = ref(startPosition(props.startIndex ?? 0))
 const picked = ref<Record<string, unknown>>({})
-const revealed = ref<Record<string, boolean>>({})
+const feedback = ref<{
+  is_correct: boolean | null
+  correct_answer?: unknown
+  analysis?: string | null
+  reference_code?: string | null
+} | null>(null)
+const wrongSet = ref<Set<string>>(new Set())
+const favoriteSet = ref<Set<string>>(new Set())
 
-const question = computed<BankQuestion | null>(() => questions.value[index.value] ?? null)
-const answeredCount = computed(() => questions.value.filter(hasAnswer).length)
-const metaLine = computed(() => [props.bankSet.institution, props.bankSet.subject, props.bankSet.level, props.bankSet.exam_year ? `${props.bankSet.exam_year} 年` : ''].filter(Boolean).join(' · '))
+const question = computed<PracticeQuestion | null>(() => questionList.value[index.value] ?? null)
+const answeredCount = computed(() => questionList.value.filter(hasAnswer).length)
+const title = computed(() => props.title ?? props.bankSet?.name ?? '综合练习')
+const eyebrow = computed(() => props.eyebrow ?? '教师试做 · 不计入学习数据')
+const metaLine = computed(() => {
+  if (props.meta) return props.meta
+  const b = props.bankSet
+  if (!b) return ''
+  return [b.institution, b.subject, b.level, b.exam_year ? `${b.exam_year} 年` : ''].filter(Boolean).join(' · ')
+})
 
 function startPosition(value: number): number {
-  const max = Math.max(0, (props.bankSet.questions?.length ?? 1) - 1)
+  const max = Math.max(0, questionList.value.length - 1)
   return Math.min(Math.max(value, 0), max)
 }
 
-function hasAnswer(q: BankQuestion): boolean {
+function hasAnswer(q: PracticeQuestion): boolean {
   const value = picked.value[q.id]
   if (Array.isArray(value)) return value.length > 0
   return value !== undefined && value !== null && value !== ''
 }
 
-function textValue(q: BankQuestion): string {
+function textValue(q: PracticeQuestion): string {
   const value = picked.value[q.id]
   return typeof value === 'string' ? value : ''
 }
 
-function setText(q: BankQuestion, value: string) {
+function setText(q: PracticeQuestion, value: string) {
   picked.value[q.id] = value
 }
 
-function optionSelected(q: BankQuestion, optionIndex: number): boolean {
+function optionSelected(q: PracticeQuestion, optionIndex: number): boolean {
   const value = picked.value[q.id]
   if (q.type === 'multiple_choice') return Array.isArray(value) && value.includes(optionIndex)
   return value === optionIndex
 }
 
-function toggleOption(q: BankQuestion, optionIndex: number) {
+function toggleOption(q: PracticeQuestion, optionIndex: number) {
   if (q.type === 'multiple_choice') {
     const current = Array.isArray(picked.value[q.id]) ? [...(picked.value[q.id] as number[])] : []
     const pos = current.indexOf(optionIndex)
     if (pos >= 0) current.splice(pos, 1)
     else current.push(optionIndex)
     picked.value[q.id] = current.sort((a, b) => a - b)
-    return
+  } else {
+    picked.value[q.id] = optionIndex
   }
-  picked.value[q.id] = optionIndex
 }
 
-function judge(q: BankQuestion, value: boolean) {
+function judge(q: PracticeQuestion, value: boolean) {
   picked.value[q.id] = value
 }
 
-function mediaFor(q: BankQuestion, scope: string) {
+async function judgeCurrent() {
+  const q = question.value
+  if (!q) return
+  const value = picked.value[q.id]
+  if (!hasAnswer(q)) return
+  feedback.value = null
+  if (q.type === 'programming') {
+    try {
+      const res = await checkAggregateAnswer(q.id, value)
+      feedback.value = {
+        is_correct: null,
+        correct_answer: res.correct_answer,
+        analysis: res.analysis,
+        reference_code: res.reference_code,
+      }
+    } catch {
+      feedback.value = { is_correct: null }
+    }
+    return
+  }
+  try {
+    const res = await checkAggregateAnswer(q.id, value)
+    feedback.value = {
+      is_correct: res.is_correct ?? null,
+      correct_answer: res.correct_answer,
+      analysis: res.analysis,
+      reference_code: res.reference_code,
+    }
+    if (res.is_correct === false) {
+      wrongSet.value.add(q.id)
+      await toggleAggregateMark(q.id, 'wrong', true)
+    } else if (res.is_correct === true) {
+      wrongSet.value.delete(q.id)
+      if (index.value < questionList.value.length - 1) go(1)
+    }
+  } catch {
+    /* 网络失败时保留当前作答，交给宿主页面提示 */
+  }
+}
+
+async function markSelf(correct: boolean) {
+  const q = question.value
+  if (!q) return
+  if (correct) {
+    wrongSet.value.delete(q.id)
+    await toggleAggregateMark(q.id, 'wrong', false)
+    feedback.value = { is_correct: true }
+    if (index.value < questionList.value.length - 1) go(1)
+  } else {
+    wrongSet.value.add(q.id)
+    await toggleAggregateMark(q.id, 'wrong', true)
+    feedback.value = { is_correct: false }
+  }
+}
+
+async function toggleFavorite() {
+  const q = question.value
+  if (!q) return
+  const enabled = !favoriteSet.value.has(q.id)
+  try {
+    await toggleAggregateMark(q.id, 'favorite', enabled)
+    if (enabled) favoriteSet.value.add(q.id)
+    else favoriteSet.value.delete(q.id)
+  } catch {
+    /* Mark state remains unchanged when persistence fails. */
+  }
+}
+function mediaFor(q: PracticeQuestion, scope: string) {
   return (q.media ?? []).filter((item) => item.scope === scope).map((item) => item.url)
 }
 
@@ -75,7 +176,7 @@ function answerText(value: unknown): string {
   return String(value)
 }
 
-function referenceAnswer(q: BankQuestion): string {
+function referenceAnswer(q: PracticeQuestion): string {
   if (q.type === 'programming') {
     if (q.reference_code) return q.reference_code
     return typeof q.answer === 'string' ? q.answer : ''
@@ -84,23 +185,9 @@ function referenceAnswer(q: BankQuestion): string {
   return answerText(q.answer)
 }
 
-function isCorrect(q: BankQuestion): boolean | null {
-  if (!hasAnswer(q)) return null
-  if (!['single_choice', 'multiple_choice', 'judgement'].includes(q.type)) return null
-  return JSON.stringify(normalizeAnswer(picked.value[q.id])) === JSON.stringify(normalizeAnswer(q.answer))
-}
-
-function normalizeAnswer(value: unknown): unknown {
-  if (Array.isArray(value)) return [...value].sort((a, b) => Number(a) - Number(b))
-  return value
-}
-
-function toggleReveal(q: BankQuestion) {
-  revealed.value[q.id] = !revealed.value[q.id]
-}
-
 function go(step: number) {
   index.value = startPosition(index.value + step)
+  feedback.value = null
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -117,8 +204,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       <section class="practice-modal" role="dialog" aria-modal="true" aria-labelledby="teacher-practice-title">
         <header class="practice-head">
           <div class="head-copy">
-            <span class="eyebrow">教师试做 · 不计入学习数据</span>
-            <h2 id="teacher-practice-title">{{ bankSet.name }}</h2>
+            <span class="eyebrow">{{ eyebrow }}</span>
+            <h2 id="teacher-practice-title">{{ title }}</h2>
             <p v-if="metaLine" class="meta">{{ metaLine }}</p>
           </div>
           <button type="button" class="close-btn" aria-label="关闭试做" @click="emit('close')">×</button>
@@ -127,19 +214,19 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <div class="practice-toolbar">
           <nav class="answer-card" aria-label="答题卡">
             <button
-              v-for="(q, idx) in questions"
+              v-for="(q, idx) in questionList"
               :key="q.id"
               type="button"
               class="answer-no"
-              :class="{ active: idx === index, answered: hasAnswer(q) }"
+              :class="{ active: idx === index, answered: hasAnswer(q), wrong: wrongSet.has(q.id) }"
               :aria-current="idx === index ? 'true' : undefined"
-              :title="`第 ${idx + 1} 题 · ${QUESTION_TYPE_LABELS[q.type]}`"
+              :title="`第 ${idx + 1} 题 · ${QUESTION_TYPE_LABELS[q.type]}${wrongSet.has(q.id) ? ' · 错题' : ''}`"
               @click="index = idx"
             >
               {{ idx + 1 }}
             </button>
           </nav>
-          <span class="progress">已答 {{ answeredCount }} / {{ questions.length }}</span>
+          <span class="progress">已答 {{ answeredCount }} / {{ questionList.length }}</span>
         </div>
 
         <div class="practice-body">
@@ -149,6 +236,18 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               <span class="q-no">第 {{ index + 1 }} 题</span>
               <span class="q-type">{{ QUESTION_TYPE_LABELS[question.type] }}</span>
               <span class="q-score">{{ question.score }} 分</span>
+              <button
+                type="button"
+                class="favorite-btn"
+                :class="{ active: favoriteSet.has(question.id) }"
+                :title="favoriteSet.has(question.id) ? '取消收藏' : '收藏本题'"
+                @click="toggleFavorite"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 3.6l2.63 5.33 5.88.86-4.25 4.14 1 5.86L12 17.02l-5.26 2.77 1-5.86L3.49 9.79l5.88-.86z" />
+                </svg>
+                <span>{{ favoriteSet.has(question.id) ? '已收藏' : '收藏' }}</span>
+              </button>
             </div>
 
             <pre class="stem">{{ question.stem }}</pre>
@@ -164,7 +263,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                 type="button"
                 class="option"
                 :class="{ selected: optionSelected(question, optIdx) }"
-                @click="toggleOption(question, optIdx)"
+                @click="toggleOption(question, optIdx); judgeCurrent()"
               >
                 <span class="opt-mark">{{ String.fromCharCode(65 + optIdx) }}</span>
                 <span class="opt-text">{{ option || '（图片选项）' }}</span>
@@ -179,8 +278,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             </div>
 
             <div v-else-if="question.type === 'judgement'" class="judge-options">
-              <button type="button" class="judge-btn" :class="{ selected: picked[question.id] === true }" @click="judge(question, true)">正确</button>
-              <button type="button" class="judge-btn" :class="{ selected: picked[question.id] === false }" @click="judge(question, false)">错误</button>
+              <button type="button" class="judge-btn" :class="{ selected: picked[question.id] === true }" @click="judge(question, true); judgeCurrent()">正确</button>
+              <button type="button" class="judge-btn" :class="{ selected: picked[question.id] === false }" @click="judge(question, false); judgeCurrent()">错误</button>
             </div>
 
             <textarea
@@ -190,28 +289,55 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               rows="7"
               :placeholder="question.type === 'programming' ? '在此编写代码' : '填写答案'"
               @input="setText(question, ($event.target as HTMLTextAreaElement).value)"
+              @blur="judgeCurrent()"
             ></textarea>
 
-            <div v-if="revealed[question.id]" class="feedback" :class="{ wrong: isCorrect(question) === false }">
+            <div v-if="feedback" class="feedback" :class="{ wrong: feedback.is_correct === false }">
               <strong>
-                {{ isCorrect(question) === null ? '参考答案' : isCorrect(question) ? '回答正确' : '回答错误' }}
+                {{ feedback.is_correct === null ? '参考答案' : feedback.is_correct ? '回答正确' : '回答错误' }}
               </strong>
               <p v-if="question.type !== 'programming' && question.type !== 'code_fill'" class="feedback-line">
-                正确答案：{{ answerText(question.answer) }}
+                正确答案：{{ answerText(feedback.correct_answer) }}
               </p>
               <template v-else>
                 <p class="feedback-line">参考{{ question.type === 'programming' ? '代码' : '答案' }}：</p>
                 <pre class="ref-code">{{ referenceAnswer(question) }}</pre>
               </template>
-              <p v-if="question.analysis" class="feedback-line">解析：{{ question.analysis }}</p>
+              <p v-if="feedback.analysis" class="feedback-line">解析：{{ feedback.analysis }}</p>
+              <p v-else-if="feedback.is_correct !== null" class="feedback-line muted">暂无解析，可联系教师补充。</p>
+              <div v-if="feedback.is_correct === null && question.type === 'programming'" class="self-mark">
+                <button type="button" class="btn" @click="markSelf(true)">我做对了</button>
+                <button type="button" class="btn danger" @click="markSelf(false)">标记错误</button>
+              </div>
             </div>
 
             <footer class="q-actions">
               <button type="button" class="btn" :disabled="index === 0" @click="go(-1)">上一题</button>
-              <button type="button" class="btn" :class="{ primary: !revealed[question.id] }" @click="toggleReveal(question)">
-                {{ revealed[question.id] ? '收起答案' : '查看答案' }}
+              <button
+                v-if="!feedback"
+                type="button"
+                class="btn primary"
+                :disabled="!hasAnswer(question)"
+                @click="judgeCurrent"
+              >
+                判断答案
               </button>
-              <button type="button" class="btn primary" :disabled="index >= questions.length - 1" @click="go(1)">下一题</button>
+              <button
+                v-if="feedback && feedback.is_correct !== true"
+                type="button"
+                class="btn"
+                @click="feedback = null"
+              >
+                再作答
+              </button>
+              <button
+                type="button"
+                class="btn primary"
+                :disabled="!!(index >= questionList.length - 1 || (feedback && feedback.is_correct === false))"
+                @click="go(1)"
+              >
+                下一题
+              </button>
             </footer>
           </article>
         </div>
@@ -324,6 +450,11 @@ h2 {
   outline: 2px solid #b8860b;
   outline-offset: 1px;
 }
+.answer-no.wrong {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
 .progress {
   flex-shrink: 0;
   padding-top: 8px;
@@ -354,6 +485,44 @@ h2 {
   gap: 8px;
   color: var(--ink-3);
   font-size: 12px;
+}
+.q-head button {
+  margin-left: auto;
+}
+.favorite-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid #fde68a;
+  border-radius: 999px;
+  background: #fffbeb;
+  color: #b45309;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.favorite-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.favorite-btn:hover {
+  border-color: #f59e0b;
+  background: #fef3c7;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 14px rgba(245, 158, 11, 0.18);
+}
+.favorite-btn.active {
+  border-color: #fbbf24;
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  color: #92400e;
+  box-shadow: 0 6px 16px rgba(245, 158, 11, 0.22);
+}
+.favorite-btn.active svg {
+  fill: #f59e0b;
 }
 .q-no {
   color: var(--ink);
@@ -502,6 +671,16 @@ h2 {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 16px;
+}
+.self-mark {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.btn.danger {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
 }
 .practice-modal :focus-visible {
   outline: 2px solid #b8860b;

@@ -2863,14 +2863,19 @@ onMounted(async () => {
   margin-top: 16px;
 }
 .qnav {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  align-items: center;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
+  gap: 7px;
+  align-items: start;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 .qnum {
-  width: 38px;
-  height: 38px;
+  width: auto;
+  min-height: 38px;
+  height: auto;
+  aspect-ratio: 1;
   border-radius: 10px;
   border: 1px solid var(--line);
   background: var(--surface);

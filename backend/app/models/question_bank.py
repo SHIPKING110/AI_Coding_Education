@@ -68,6 +68,7 @@ class QuestionBankSet(Base):
     name: Mapped[str] = mapped_column(String(200))
     institution: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     exam_year: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    exam_month: Mapped[str | None] = mapped_column(String(7), nullable=True, index=True)
     subject: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     level: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     total_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -116,6 +117,18 @@ class QuestionBankBlueprint(Base):
     level: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     rules: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class QuestionBankUserMark(Base):
+    __tablename__ = "question_bank_user_marks"
+    __table_args__ = (UniqueConstraint("user_id", "student_id", "question_id", "kind"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    student_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("students.id", ondelete="CASCADE"), nullable=True, index=True)
+    question_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("question_bank_questions.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
