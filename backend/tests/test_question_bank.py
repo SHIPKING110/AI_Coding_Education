@@ -128,6 +128,7 @@ def test_parse_docx_rules_and_images(tmp_path):
     assert paper.institution == "中国电子学会"
     assert len(paper.questions) == 3
     first, second, third = paper.questions
+    assert [q.order_no for q in paper.questions] == [1, 2, 3]
     assert first.type == "single_choice"
     assert first.answer == 1
     assert first.options == ["1a", "_name", "a b", "for"]
@@ -149,7 +150,7 @@ def test_import_review_publish_and_visibility(client, admin_token, tmp_path):
             "/api/question-bank/imports",
             headers=admin_token,
             files={"file": (path.name, fh, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
-            data={"institution": "中国电子学会", "subject": "Python", "level": "二级", "exam_year": "2025"},
+            data={"institution": "中国电子学会", "subject": "Python", "level": "二级", "exam_year": "2025年12月"},
         )
     assert r.status_code == 201, r.text
     body = r.json()
@@ -159,6 +160,8 @@ def test_import_review_publish_and_visibility(client, admin_token, tmp_path):
     detail = client.get(f"/api/question-bank/sets/{set_id}", headers=admin_token)
     assert detail.status_code == 200
     assert detail.json()["status"] == "draft"
+    assert detail.json()["exam_year"] == 2025
+    assert [q["order_no"] for q in detail.json()["questions"]] == [1, 2, 3]
 
     parent_token = _register(client, "parent", "qb-parent")
     teacher_token = _register(client, "teacher", "qb-teacher")

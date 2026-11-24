@@ -121,6 +121,10 @@ watch(() => store.activeStudentId, load)
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2" /></svg>
         <span>我的订单</span>
       </RouterLink>
+      <RouterLink v-if="store.me?.role !== 'student'" to="/client/service" class="quick-card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2zM8 9h8M8 12h5" /></svg>
+        <span>在线客服</span>
+      </RouterLink>
     </div>
 
     <!-- 最新学习评估 -->
@@ -290,7 +294,7 @@ watch(() => store.activeStudentId, load)
 
 .quick-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
   margin-bottom: 18px;
 }

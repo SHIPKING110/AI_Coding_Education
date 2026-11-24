@@ -110,34 +110,43 @@
                 <li v-for="w in selected.import_meta.warnings" :key="w">{{ w }}</li>
               </ul>
             </div>
-            <div v-if="canManage" class="paper-actions">
-              <button class="btn" :disabled="selected.status === 'archived'" @click="onReviewAll">全部通过审核</button>
-              <button class="btn primary" :disabled="selected.status === 'published'" @click="onPublish">发布题库</button>
-              <button v-if="selected.status === 'published'" class="btn" @click="onToAssignment">生成作业草稿</button>
-              <button class="btn danger-ghost" :disabled="selected.status === 'archived'" @click="onArchive">归档</button>
-              <button v-if="canManage" class="btn" @click="openBlueprints">组卷规则</button>
+            <div class="paper-actions">
+              <button class="btn practice-entry" :disabled="!selected.questions?.length" @click="openPractice">
+                刷题练习
+              </button>
+              <template v-if="canManage">
+                <button class="btn" :disabled="selected.status === 'archived'" @click="onReviewAll">全部通过审核</button>
+                <button class="btn primary" :disabled="selected.status === 'published'" @click="onPublish">发布题库</button>
+                <button v-if="selected.status === 'published'" class="btn" @click="onToAssignment">生成作业草稿</button>
+                <button class="btn" @click="openBlueprints">组卷规则</button>
+                <button class="btn danger-ghost" :disabled="selected.status === 'archived'" @click="onArchive">归档</button>
+              </template>
             </div>
           </div>
 
           <div class="review-layout">
-            <nav class="q-index" aria-label="题号">
-              <button
-                v-for="q in selected.questions"
-                :key="q.id"
-                class="q-no"
-                :class="[q.status, { active: q.id === activeQuestionId }]"
-                :title="`${QUESTION_TYPE_LABELS[q.type]} · ${statusLabel[q.status]}`"
-                @click="activeQuestionId = q.id"
-              >
-                {{ q.order_no }}
-              </button>
-            </nav>
+            <div class="q-nav-block">
+              <span class="q-nav-label">题号 · {{ selected.questions?.length ?? 0 }} 题</span>
+              <nav class="q-index" aria-label="题号">
+                <button
+                  v-for="(q, idx) in selected.questions"
+                  :key="q.id"
+                  class="q-no"
+                  :class="[q.status, { active: q.id === activeQuestionId }]"
+                  :title="`${QUESTION_TYPE_LABELS[q.type]} · ${statusLabel[q.status]}`"
+                  :aria-current="q.id === activeQuestionId ? 'true' : undefined"
+                  @click="activeQuestionId = q.id"
+                >
+                  {{ idx + 1 }}
+                </button>
+              </nav>
+            </div>
 
             <div v-if="!activeQuestion" class="pane-empty">这套题库暂无题目</div>
             <article v-else class="q-paper">
               <div class="q-head">
                 <div class="q-title">
-                  第 {{ activeQuestion.order_no }} 题
+                  第 {{ activeQuestionIndex + 1 }} 题
                   <span class="q-type">{{ QUESTION_TYPE_LABELS[activeQuestion.type] }}</span>
                   <span class="stamp" :class="activeQuestion.status">{{ statusLabel[activeQuestion.status] }}</span>
                 </div>
@@ -278,7 +287,7 @@
         <div class="upload-grid">
           <label>套卷名称<input v-model="uploadMeta.name" placeholder="留空则自动识别" /></label>
           <label>机构<input v-model="uploadMeta.institution" /></label>
-          <label>年份<input v-model="uploadMeta.exam_year" placeholder="如 2025" /></label>
+          <label>年份<input v-model="uploadMeta.exam_year" placeholder="如 2025 或 2025年12月" /></label>
           <label>科目<input v-model="uploadMeta.subject" placeholder="Python / C++ / 图形化 / 机器人" /></label>
           <label>等级<input v-model="uploadMeta.level" placeholder="如 二级" /></label>
         </div>
@@ -293,6 +302,13 @@
         </div>
       </div>
     </div>
+
+    <TeacherPracticeDialog
+      v-if="practiceOpen && selected"
+      :bank-set="selected"
+      :start-index="practiceStartIndex"
+      @close="practiceOpen = false"
+    />
   </div>
 </template>
 
@@ -302,6 +318,7 @@ import { useRouter } from 'vue-router'
 
 import AssignmentsTabs from '@/components/AssignmentsTabs.vue'
 import PageHead from '@/components/PageHead.vue'
+import TeacherPracticeDialog from '@/components/TeacherPracticeDialog.vue'
 import { QUESTION_TYPE_LABELS } from '@/api/assignment'
 import {
   aiCleanQuestion,
@@ -346,7 +363,15 @@ const selectedId = ref('')
 const selected = ref<BankSet | null>(null)
 const detailLoading = ref(false)
 const activeQuestionId = ref('')
+const activeQuestionIndex = computed(() => selected.value?.questions?.findIndex((q) => q.id === activeQuestionId.value) ?? -1)
 const activeQuestion = computed(() => selected.value?.questions?.find((q) => q.id === activeQuestionId.value) ?? null)
+const practiceOpen = ref(false)
+const practiceStartIndex = ref(0)
+
+function openPractice() {
+  practiceStartIndex.value = Math.max(0, activeQuestionIndex.value)
+  practiceOpen.value = true
+}
 
 const edit = reactive({
   type: '',
@@ -677,6 +702,21 @@ function onFileChange(e: Event) {
   uploadFile.value = input.files?.[0] ?? null
 }
 
+function uploadErrorText(e: unknown): string {
+  const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        const row = item as { loc?: unknown[]; msg?: string }
+        const field = (row.loc ?? []).filter((x) => x !== 'body').join('.')
+        return field ? `${field}: ${row.msg ?? '参数有误'}` : (row.msg ?? '参数有误')
+      })
+      .join('；')
+  }
+  return (e as Error).message || '导入失败'
+}
+
 async function submitUpload() {
   if (!uploadFile.value) {
     toast.error('请选择 DOCX 文件')
@@ -688,7 +728,7 @@ async function submitUpload() {
     const res = await importBankDocx(uploadFile.value, {
       name: uploadMeta.name || undefined,
       institution: uploadMeta.institution || undefined,
-      exam_year: uploadMeta.exam_year ? Number(uploadMeta.exam_year) : undefined,
+      exam_year: uploadMeta.exam_year || undefined,
       subject: uploadMeta.subject || undefined,
       level: uploadMeta.level || undefined,
     })
@@ -699,7 +739,7 @@ async function submitUpload() {
     await loadSets()
     await selectSet(res.set_id)
   } catch (e: unknown) {
-    toast.error((e as Error).message || '导入失败')
+    toast.error(uploadErrorText(e))
   } finally {
     uploading.value = false
   }
@@ -975,31 +1015,58 @@ onMounted(async () => {
   margin-top: 12px;
   flex-wrap: wrap;
 }
+.practice-entry {
+  border-color: #99f6e4;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-weight: 700;
+}
+.practice-entry:hover {
+  border-color: #2f6f73;
+  color: #115e59;
+}
 
 .review-layout {
   display: grid;
-  grid-template-columns: 62px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   align-items: start;
 }
+.q-nav-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #eadfc9;
+  border-radius: 12px;
+  background: #fffdf7;
+}
+.q-nav-label {
+  flex-shrink: 0;
+  padding-top: 7px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
 .q-index {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  max-height: calc(100vh - 360px);
-  overflow: auto;
-  padding: 4px 2px;
 }
 .q-no {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   border: 1px solid var(--line);
   background: #fff;
   color: var(--ink-2);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  line-height: 1;
   cursor: pointer;
 }
 .q-no.reviewed {
@@ -1368,9 +1435,19 @@ onMounted(async () => {
   .review-layout {
     grid-template-columns: 1fr;
   }
+  .q-nav-block {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .q-nav-label {
+    padding-top: 0;
+  }
   .q-index {
-    grid-template-columns: repeat(auto-fill, 32px);
-    max-height: 140px;
+    gap: 5px;
+  }
+  .q-no {
+    width: 28px;
+    height: 28px;
   }
   .meta-grid,
   .upload-grid,

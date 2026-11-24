@@ -113,12 +113,19 @@ def _ensure_docx(file: UploadFile) -> str:
     return Path(filename).name
 
 
+def _parse_year(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = re.search(r"(?:19|20)\d{2}", value)
+    return int(match.group(0)) if match else None
+
+
 @router.post("/imports", response_model=BankImportOut, status_code=status.HTTP_201_CREATED)
 def import_docx(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
     institution: str | None = Form(default=None),
-    exam_year: int | None = Form(default=None),
+    exam_year: str | None = Form(default=None),
     subject: str | None = Form(default=None),
     level: str | None = Form(default=None),
     current_user: User = Depends(require_roles(Role.ADMIN, Role.STAFF)),
@@ -153,7 +160,7 @@ def import_docx(
             source_id=source.id,
             name=name or paper.name,
             institution=institution or paper.institution,
-            exam_year=exam_year or paper.exam_year,
+            exam_year=_parse_year(exam_year) or paper.exam_year,
             subject=subject or paper.subject,
             level=level or paper.level,
             total_score=paper.total_score,
@@ -162,11 +169,11 @@ def import_docx(
         )
         db.add(bank_set)
         db.flush()
-        for parsed in paper.questions:
+        for idx, parsed in enumerate(paper.questions, start=1):
             db.add(
                 QuestionBankQuestion(
                     bank_set_id=bank_set.id,
-                    order_no=parsed.order_no,
+                    order_no=idx,
                     type=parsed.type,
                     stem=parsed.stem or "待补充题干",
                     options=parsed.options,

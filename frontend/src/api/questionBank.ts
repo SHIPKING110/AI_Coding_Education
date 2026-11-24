@@ -54,17 +54,17 @@ export interface BankSet {
 
 export async function importBankDocx(
   file: File,
-  meta: { name?: string; institution?: string; exam_year?: number; subject?: string; level?: string } = {},
+  meta: { name?: string; institution?: string; exam_year?: number | string; subject?: string; level?: string } = {},
 ): Promise<{ source_id: string; set_id: string; question_count: number; warnings: string[] }> {
   const form = new FormData()
   form.append('file', file)
   Object.entries(meta).forEach(([k, v]) => {
-    if (v !== undefined && v !== null && v !== '') form.append(k, String(v))
+    if (v === undefined || v === null) return
+    const text = String(v).trim()
+    if (!text || text === 'NaN') return
+    form.append(k, text)
   })
-  const { data } = await http.post('/question-bank/imports', form, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 120000,
-  })
+  const { data } = await http.post('/question-bank/imports', form, { timeout: 120000 })
   return data
 }
 

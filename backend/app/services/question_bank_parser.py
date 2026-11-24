@@ -408,11 +408,12 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         )
 
     block: list[ParsedLine] = []
+    current_no = 0
     for line in lines:
         text = line.text.strip()
         section_match = SECTION_RE.match(text) or SECTION_RE_NO_SCORE.match(text)
         if section_match:
-            flush_block(block, expected_no)
+            flush_block(block, current_no)
             block = []
             current_section = section_match.group(1).strip()
             current_section_count = int(section_match.group(2))
@@ -428,13 +429,14 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         if q_match:
             number = int(q_match.group(1))
             if number == expected_no or number == expected_no + 1:
-                flush_block(block, expected_no)
+                flush_block(block, current_no)
                 block = [line]
+                current_no = number
                 expected_no = number + 1
                 continue
         if block:
             block.append(line)
-    flush_block(block, expected_no)
+    flush_block(block, current_no)
 
     if not questions:
         comments.append("未识别到题目，请检查文档结构或使用 AI 清洗")
