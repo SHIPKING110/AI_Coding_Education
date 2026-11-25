@@ -153,10 +153,8 @@ class AggregateQuestionOut(BaseModel):
 
 
 def _visible_user_student(db: Session, user: User) -> tuple[uuid.UUID | None, uuid.UUID | None]:
-    """返回 (user_id, student_id)。教师端以本人归属；家长/学生端取可见学员。"""
-    if user.role == Role.TEACHER.value:
-        return user.id, None
-    if user.role == Role.STUDENT.value:
+    """返回 (user_id, student_id)。教师/管理员以本人归属；家长端取可见学员。"""
+    if user.role in {Role.TEACHER.value, Role.STUDENT.value, Role.ADMIN.value, Role.STAFF.value}:
         return user.id, None
     # 家长：当前前端没有学生上下文时，取该家长下第一个可用学员作为练习归属
     stu = db.scalars(select(Student).where(Student.parent_user_id == user.id)).first()

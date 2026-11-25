@@ -309,7 +309,7 @@
     <div v-if="aggregateOpen" class="modal-mask" @click.self="aggregateOpen = false">
       <div class="upload-modal">
         <h3>综合练习</h3>
-        <p class="modal-sub">按已发布题库的科目、等级和题型汇总抽题；答对自动进入下一题，答错会留在当前题并加入错题本。</p>
+        <p class="modal-sub">按已发布题库的科目、等级和题型汇总抽题；答对自动进入下一题，答错会加入错题本，也可直接点「下一题」继续。</p>
         <div class="aggregate-form">
           <div class="aggregate-select">
             <span class="select-label">科目</span>

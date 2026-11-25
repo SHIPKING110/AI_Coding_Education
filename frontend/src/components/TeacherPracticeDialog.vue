@@ -190,6 +190,15 @@ function go(step: number) {
   feedback.value = null
 }
 
+function selectQuestion(target: number) {
+  index.value = startPosition(target)
+  feedback.value = null
+}
+
+watch(index, () => {
+  feedback.value = null
+})
+
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') emit('close')
 }
@@ -212,6 +221,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         </header>
 
         <div class="practice-toolbar">
+          <span class="toolbar-label">答题卡</span>
           <nav class="answer-card" aria-label="答题卡">
             <button
               v-for="(q, idx) in questionList"
@@ -221,12 +231,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               :class="{ active: idx === index, answered: hasAnswer(q), wrong: wrongSet.has(q.id) }"
               :aria-current="idx === index ? 'true' : undefined"
               :title="`第 ${idx + 1} 题 · ${QUESTION_TYPE_LABELS[q.type]}${wrongSet.has(q.id) ? ' · 错题' : ''}`"
-              @click="index = idx"
+              @click="selectQuestion(idx)"
             >
               {{ idx + 1 }}
             </button>
           </nav>
           <span class="progress">已答 {{ answeredCount }} / {{ questionList.length }}</span>
+          <div class="quick-nav">
+            <button type="button" class="mini-btn" :disabled="index === 0" title="上一题" @click="go(-1)">‹</button>
+            <button type="button" class="mini-btn" :disabled="index >= questionList.length - 1" title="下一题" @click="go(1)">›</button>
+          </div>
         </div>
 
         <div class="practice-body">
@@ -333,7 +347,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               <button
                 type="button"
                 class="btn primary"
-                :disabled="!!(index >= questionList.length - 1 || (feedback && feedback.is_correct === false))"
+                :disabled="index >= questionList.length - 1"
                 @click="go(1)"
               >
                 下一题
@@ -415,18 +429,52 @@ h2 {
 }
 .practice-toolbar {
   display: flex;
-  align-items: flex-start;
-  gap: 14px;
+  align-items: center;
+  gap: 10px;
   padding: 12px 22px;
   border-bottom: 1px solid #f0e6d3;
   background: #fffdf7;
 }
+.toolbar-label {
+  flex-shrink: 0;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
 .answer-card {
   flex: 1;
   min-width: 0;
+  max-height: 100px;
+  overflow-y: auto;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  padding: 2px;
+}
+.quick-nav {
+  flex-shrink: 0;
+  display: flex;
+  gap: 4px;
+}
+.mini-btn {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink-2);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mini-btn:hover:not(:disabled) {
+  border-color: #0f766e;
+  color: #0f766e;
+}
+.mini-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .answer-no {
   width: 30px;
