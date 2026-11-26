@@ -232,6 +232,7 @@ export async function startPracticeAttempt(payload: {
   institution?: string
   exam_year?: number
   mark_kind?: 'favorite' | 'wrong'
+  exam_minutes?: number
 }): Promise<PracticeAttemptOut> {
   const { data } = await http.post('/question-bank/attempts', payload)
   return data
@@ -574,5 +575,51 @@ export async function getAbilityComment(studentId?: string, days = 30): Promise<
     days,
   })
   return data
+}
+
+export interface QbAiTask {
+  id: string
+  kind: 'validate' | 'tag'
+  status: 'running' | 'done' | 'error'
+  progress: number
+  total: number
+  message: string
+  result: {
+    processed?: number
+    applied?: number
+    tagged?: number
+    failed?: number
+    errors?: string[]
+  } | null
+  error: string | null
+  meta: { set_id?: string; set_name?: string }
+  created_at: string
+  updated_at: string
+}
+
+export async function startSetValidateTask(
+  setId: string,
+  payload: { apply?: boolean; question_ids?: string[] } = {},
+): Promise<{ task_id: string; kind: string; total: number }> {
+  const { data } = await http.post(`/question-bank/sets/${setId}/ai-validate-task`, payload)
+  return data
+}
+
+export async function startSetTagTask(
+  setId: string,
+  payload: { question_ids?: string[] } = {},
+): Promise<{ task_id: string; kind: string; total: number }> {
+  const { data } = await http.post(`/question-bank/sets/${setId}/ai-tag-task`, payload)
+  return data
+}
+
+export async function getQbAiTask(taskId: string): Promise<QbAiTask> {
+  const { data } = await http.get(`/question-bank/ai-tasks/${taskId}`)
+  return data
+}
+
+export async function listActiveQbAiTasks(): Promise<QbAiTask[]> {
+  const { data } = await http.get('/question-bank/ai-tasks')
+  return data.tasks as QbAiTask[]
 }
 

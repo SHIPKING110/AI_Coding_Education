@@ -288,11 +288,17 @@ def test_practice_exam_and_learning_stats(client, admin_token, db_session, tmp_p
     exam = client.post(
         "/api/question-bank/attempts",
         headers=parent_token,
-        json={"student_id": str(student.id), "mode": "exam", "rules": {"single_choice": 2, "judgement": 0, "programming": 0}},
+        json={
+            "student_id": str(student.id),
+            "mode": "exam",
+            "rules": {"single_choice": 2, "judgement": 0, "programming": 0},
+            "exam_minutes": 90,
+        },
     )
     assert exam.status_code == 201, exam.text
     exam_data = exam.json()
     assert exam_data["mode"] == "exam"
+    assert exam_data["paper_meta"]["exam_minutes"] == 90
     assert exam_data["answers"] == {}
     assert "answer" not in exam_data["questions"][0]
     exam_submitted = client.post(f"/api/question-bank/attempts/{exam_data['id']}/submit", headers=parent_token)
@@ -421,5 +427,14 @@ def test_blueprints_and_to_assignment(client, admin_token, tmp_path):
     assert assignment.status_code == 201, assignment.text
     assert assignment.json()["question_count"] == 3
     assert assignment.json()["title"] == "题库生成作业"
+
+
+def test_question_bank_ai_task_lookup(client):
+    token = _register(client, "parent", "qb-ai-task-parent")
+    missing = client.get("/api/question-bank/ai-tasks/does-not-exist", headers=token)
+    assert missing.status_code == 404
+    active = client.get("/api/question-bank/ai-tasks", headers=token)
+    assert active.status_code == 200
+    assert active.json()["tasks"] == []
 
 

@@ -1,5 +1,15 @@
 # 当前任务
 
+## 题库模块（v3.1：做题 500 修复 + 考试计时/套卷筛选 + AI 任务异步化 + 选项增删，2026-11-26）
+
+- [x] **做题 500 根因修复**：生产库 `question_bank_attempts` 缺 004 新增列（user_id/kind/paper_title/paper_meta/question_results）导致所有复习/考试入口 500；新增幂等迁移 `c00000000005_repair_attempt_schema`（缺列补齐 + student_id 可空 + user_id 从 students 回填 + 索引），部署脚本改为仅校验、由容器 entrypoint 自动 `alembic upgrade head`（已在 8080 生产库应用至 c00000000005）
+- [x] **模拟考试计时**：`AttemptStartIn.exam_minutes`（5~300，考试默认 120）写入 `paper_meta`；前端考试页倒计时 pill（`startExamCountdown`，剩余 <5 分钟变红，到点 `autoSubmit` 自动交卷）；ExamStartDialog 新增「考试时长」输入并随开考下发
+- [x] **套卷测试筛选**：ExamStartDialog「套卷测试」页签新增机构/科目/等级/年份四联筛选（客户端过滤，选项从已发布套卷动态提取）
+- [x] **AI 校准/打标异步化**：新增进程内任务注册表 `app/services/qb_ai_tasks.py`（线程执行 + progress/total/message，6h TTL）+ 路由 `POST /sets/{id}/ai-validate-task`、`/ai-tag-task`、`GET /ai-tasks/{id}`、`GET /ai-tasks`；整卷校准/打标上限由 10/20 提到 200（一次打完整卷）；前端新增 Pinia `qbAiTasks` store（2s 轮询、完成 toast、`restore()` 恢复运行中任务）+ 全局右下角浮窗 `QbAiTasksDock`（挂在 AdminLayout，切页不丢）；QuestionBankView 三个 AI 按钮改为后台任务（进度 ×/× 实时可见）
+- [x] **题目选项增删**：题目编辑器选项行新增「× 删除」（最少保留 2 项）与「+ 添加选项」（最多 8 项），解决导入缺/多选项时无法人工修正的问题
+- [x] **验证**：后端 ruff 零错误；`test_qb_ai_tasks.py` 4 例 + 题库两文件 15 例全绿（新增 exam_minutes 落 paper_meta、ai-tasks 404/空列表断言）；前端 eslint / vue-tsc / vite build 通过；8080 已重建部署，openapi 200、容器健康、alembic=c00000000005
+- 遗留：AI 任务为单进程内存态（后端重启丢进度，与 assignments 现有 ai_tasks 行为一致）；AI 打标仍逐题 LLM（39 题约 5-10 分钟，浮窗可见进度）
+
 ## 题库模块（P4：练习会话 + AI 校准能力，2026-11-25）
 
 - [x] **数据模型（迁移 c00000000004 已应用 dev 库）**：`question_bank_attempts` 扩展（user_id 归属、kind 细分来源 quick/aggregate/marked/set_practice/exam_set/exam_random、paper_title/paper_meta、question_results 逐题判定固化）+ 新表 `question_bank_ai_reviews`（AI 校准/打标审计，前后快照支持回退）、`question_bank_kp_taxonomy`（知识点受控词表）、`practice_ability_reports`（能力评语缓存）

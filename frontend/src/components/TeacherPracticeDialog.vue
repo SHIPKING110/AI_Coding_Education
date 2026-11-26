@@ -36,6 +36,7 @@ const props = defineProps<{
     exam_year?: number
     mark_kind?: 'favorite' | 'wrong'
     student_id?: string
+    exam_minutes?: number
   } | null
 }>()
 const emit = defineEmits<{
@@ -62,6 +63,15 @@ const feedbackMap = ref<Record<string, Feedback>>({})
 const selfEvalMap = ref<Record<string, boolean>>({})
 const wrongSet = ref<Set<string>>(new Set())
 const favoriteSet = ref<Set<string>>(new Set())
+const remainingSeconds = ref<number | null>(null)
+let examTimer: ReturnType<typeof setInterval> | undefined
+const examExpired = ref(false)
+const examClock = computed(() => {
+  if (remainingSeconds.value == null) return ''
+  const mm = Math.floor(remainingSeconds.value / 60).toString().padStart(2, '0')
+  const ss = (remainingSeconds.value % 60).toString().padStart(2, '0')
+  return `${mm}:${ss}`
+})
 
 const questionList = computed<PracticeQuestion[]>(() => {
   if (sessionAttempt.value) return sessionAttempt.value.questions.map((q) => ({ ...q }))
@@ -315,14 +325,16 @@ async function clearFeedback() {
   wrongSet.value.delete(q.id)
 }
 
-async function submitExam() {
+async function submitExam(auto = false) {
   const attempt = sessionAttempt.value
   if (!attempt || submitting.value) return
-  if (unansweredCount.value > 0) {
+  if (!auto && unansweredCount.value > 0) {
     const ok = window.confirm(`还有 ${unansweredCount.value} 题未作答，确定交卷吗？`)
     if (!ok) return
   }
   submitting.value = true
+  stopExamCountdown()
+  if (auto) window.alert('考试时间已到，系统已自动交卷。')
   try {
     sessionAttempt.value = await submitPracticeAttempt(attempt.id)
     hydrateFromAttempt()
@@ -336,6 +348,37 @@ async function submitExam() {
 
 function go(step: number) {
   index.value = clampIndex(index.value + step)
+}
+
+function stopExamCountdown() {
+  if (examTimer) {
+    clearInterval(examTimer)
+    examTimer = undefined
+  }
+}
+
+function startExamCountdown() {
+  const attempt = sessionAttempt.value
+  if (!attempt || attempt.mode !== 'exam' || attempt.status !== 'in_progress') return
+  const meta = (attempt.paper_meta ?? {}) as { exam_minutes?: number }
+  const minutes = Math.min(300, Math.max(5, Number(meta.exam_minutes ?? 120)))
+  const deadline = new Date(attempt.started_at).getTime() + minutes * 60_000
+  const tick = () => {
+    const left = Math.round((deadline - Date.now()) / 1000)
+    remainingSeconds.value = Math.max(0, left)
+    if (left <= 0) {
+      stopExamCountdown()
+      if (!examExpired.value) {
+        examExpired.value = true
+        void submitExam(true)
+      }
+    }
+  }
+  stopExamCountdown()
+  tick()
+  if (remainingSeconds.value && remainingSeconds.value > 0) {
+    examTimer = setInterval(tick, 1000)
+  }
 }
 
 function selectQuestion(target: number) {
@@ -371,8 +414,12 @@ watch(questionList, () => {
 onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   await ensureSession()
+  startExamCountdown()
 })
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  stopExamCountdown()
+})
 
 function mediaFor(q: PracticeQuestion, scope: string) {
   return (q.media ?? []).filter((item) => item.scope === scope).map((item) => item.url)
@@ -408,8 +455,9 @@ function referenceAnswer(q: PracticeQuestion): string {
             <p v-if="metaLine" class="meta">{{ metaLine }}</p>
           </div>
           <div class="head-side">
+            <span v-if="isExam && !isEvaluated && remainingSeconds !== null" class="exam-clock" :class="{ urgent: remainingSeconds <= 300 }">剩余 {{ examClock }}</span>
             <span v-if="isExam && !isEvaluated" class="exam-hint">交卷后统一公布分数与解析</span>
-            <button v-if="isExam && !isEvaluated" type="button" class="btn primary" :disabled="submitting" @click="submitExam">
+            <button v-if="isExam && !isEvaluated" type="button" class="btn primary" :disabled="submitting" @click="submitExam()">
               {{ submitting ? '交卷中…' : '交卷' }}
             </button>
             <button type="button" class="close-btn" aria-label="关闭" @click="requestClose">×</button>
@@ -553,7 +601,7 @@ function referenceAnswer(q: PracticeQuestion): string {
                   type="button"
                   class="btn primary"
                   :disabled="submitting"
-                  @click="submitExam"
+                  @click="submitExam()"
                 >
                   {{ submitting ? '交卷中…' : '交卷' }}
                 </button>
@@ -630,6 +678,21 @@ h2 {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.exam-clock {
+  padding: 7px 10px;
+  border: 1px solid #99f6e4;
+  border-radius: 999px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.exam-clock.urgent {
+  border-color: #fca5a5;
+  background: #fff1f2;
+  color: #be123c;
 }
 .exam-hint {
   color: #92400e;

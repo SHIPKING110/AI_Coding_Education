@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -32,6 +32,15 @@ const questions = computed(() => attempt.value?.questions ?? [])
 const question = computed<AttemptQuestion | null>(() => questions.value[current.value] ?? null)
 const isDone = computed(() => attempt.value?.status === 'evaluated')
 const isExam = computed(() => attempt.value?.mode === 'exam')
+const remainingSeconds = ref<number | null>(null)
+let examTimer: ReturnType<typeof setInterval> | undefined
+const examClock = computed(() => {
+  if (remainingSeconds.value == null) return ''
+  const mm = Math.floor(remainingSeconds.value / 60).toString().padStart(2, '0')
+  const ss = (remainingSeconds.value % 60).toString().padStart(2, '0')
+  return `${mm}:${ss}`
+})
+const examExpired = ref(false)
 const result = computed(() => attempt.value?.result)
 const normalizedScore = computed(() => result.value?.normalized_score ?? (result.value?.total_score ? Math.round(((result.value.score ?? 0) / result.value.total_score) * 100) : 0))
 const paperKindLabel = computed(() => {
@@ -177,6 +186,49 @@ function leave() {
   router.push({ name: 'client-question-bank' })
 }
 
+function stopExamCountdown() {
+  if (examTimer) {
+    clearInterval(examTimer)
+    examTimer = undefined
+  }
+}
+
+async function autoSubmit() {
+  if (submitting.value || isDone.value) return
+  toast.error('考试时间已到，系统已自动交卷')
+  try {
+    await save()
+  } catch {
+    /* 忽略单题保存失败，交卷仍会带上已保存的答案 */
+  }
+  await submit()
+}
+
+function startExamCountdown() {
+  const a = attempt.value
+  if (!a || !isExam.value || a.status !== 'in_progress') return
+  const meta = (a.paper_meta ?? {}) as { exam_minutes?: number }
+  const minutes = Math.min(300, Math.max(5, Number(meta.exam_minutes ?? 120)))
+  const started = new Date(a.started_at).getTime()
+  const deadline = started + minutes * 60_000
+  const tick = () => {
+    const left = Math.round((deadline - Date.now()) / 1000)
+    remainingSeconds.value = Math.max(0, left)
+    if (left <= 0) {
+      stopExamCountdown()
+      if (!examExpired.value) {
+        examExpired.value = true
+        void autoSubmit()
+      }
+    }
+  }
+  stopExamCountdown()
+  tick()
+  if (remainingSeconds.value && remainingSeconds.value > 0) {
+    examTimer = setInterval(tick, 1000)
+  }
+}
+
 function choiceSelected(index: number): boolean {
   if (question.value?.type === 'multiple_choice') return Array.isArray(answer.value) && answer.value.includes(index)
   return answer.value === index
@@ -194,7 +246,11 @@ function toggleChoice(index: number) {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  startExamCountdown()
+})
+onBeforeUnmount(stopExamCountdown)
 </script>
 
 <template>
@@ -206,6 +262,9 @@ onMounted(load)
         <div class="head-main">
           <h1>{{ attempt.paper_title || paperKindLabel }}</h1>
           <span class="progress">{{ current + 1 }} / {{ questions.length }}</span>
+        </div>
+        <div v-if="isExam && !isDone && remainingSeconds !== null" class="exam-clock" :class="{ urgent: remainingSeconds <= 300 }">
+          剩余 {{ examClock }}
         </div>
         <div v-if="isDone && result" class="score-pill">
           {{ isExam ? `${normalizedScore} 分 · ${result.rating ?? ''}` : `${result.score} / ${result.total_score} 分` }}
@@ -380,14 +439,20 @@ onMounted(load)
   color: var(--ink-3);
   font-family: ui-monospace, Consolas, monospace;
 }
-.score-pill {
-  padding: 6px 14px;
+.exam-clock {
+  margin-left: auto;
+  padding: 7px 12px;
+  border: 1px solid #99f6e4;
   border-radius: 999px;
-  background: #ecfdf5;
-  border: 1px solid #86efac;
-  color: #166534;
-  font-weight: 800;
-  font-size: 13px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+.exam-clock.urgent {
+  border-color: #fca5a5;
+  background: #fff1f2;
+  color: #be123c;
 }
 .result-summary {
   display: flex;

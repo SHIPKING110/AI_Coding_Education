@@ -233,6 +233,7 @@ async function startExam(payload: {
   rules?: Record<string, number>
   subject?: string
   level?: string
+  exam_minutes?: number
 }) {
   examOpen.value = false
   await beginAttempt({
@@ -242,6 +243,7 @@ async function startExam(payload: {
     rules: payload.rules,
     subject: payload.subject,
     level: payload.level,
+    exam_minutes: payload.exam_minutes,
   })
 }
 

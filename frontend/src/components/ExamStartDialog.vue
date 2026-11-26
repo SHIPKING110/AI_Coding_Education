@@ -19,11 +19,14 @@ const emit = defineEmits<{
     rules?: Record<string, number>
     subject?: string
     level?: string
+    exam_minutes?: number
   }): void
 }>()
 
 const tab = ref<'set' | 'random'>('set')
 const selectedSetId = ref('')
+const setFilter = reactive({ institution: '', subject: '', level: '', year: '' })
+const examMinutes = ref(120)
 const form = reactive({
   subject: props.defaultSubject ?? '',
   level: props.defaultLevel ?? '',
@@ -75,7 +78,27 @@ const shortages = computed(() => {
   })).filter((row) => row.need > row.stock)
 })
 
-const publishedSets = computed(() => props.sets.filter((s) => s.status === 'published'))
+const setFilterOptions = computed(() => {
+  const sets = props.sets.filter((s) => s.status === 'published')
+  const institutions = [...new Set(sets.map((s) => s.institution).filter((v): v is string => !!v))].sort()
+  const subjects = [...new Set(sets.map((s) => s.subject).filter((v): v is string => !!v))].sort()
+  const levels = [...new Set(sets.map((s) => s.level).filter((v): v is string => !!v))].sort()
+  const years = [...new Set(sets.map((s) => s.exam_year).filter((v): v is number => v != null))].sort(
+    (a, b) => b - a,
+  )
+  return { institutions, subjects, levels, years }
+})
+
+const publishedSets = computed(() =>
+  props.sets.filter((s) => {
+    if (s.status !== 'published') return false
+    if (setFilter.institution && s.institution !== setFilter.institution) return false
+    if (setFilter.subject && s.subject !== setFilter.subject) return false
+    if (setFilter.level && s.level !== setFilter.level) return false
+    if (setFilter.year && String(s.exam_year ?? '') !== setFilter.year) return false
+    return true
+  }),
+)
 const selectedSet = computed(() => publishedSets.value.find((s) => s.id === selectedSetId.value) ?? null)
 const totalCount = computed(
   () =>
@@ -88,7 +111,7 @@ const totalCount = computed(
 function start() {
   if (tab.value === 'set') {
     if (!selectedSetId.value) return
-    emit('start', { kind: 'exam_set', set_id: selectedSetId.value })
+    emit('start', { kind: 'exam_set', set_id: selectedSetId.value, exam_minutes: examMinutes.value })
     return
   }
   const rules: Record<string, number> = {
@@ -104,6 +127,7 @@ function start() {
     rules,
     subject: form.subject || undefined,
     level: form.level || undefined,
+    exam_minutes: examMinutes.value,
   })
 }
 </script>
@@ -126,6 +150,24 @@ function start() {
       </div>
 
       <div v-if="tab === 'set'" class="tab-body">
+        <div class="set-filter-row">
+          <select v-model="setFilter.institution" aria-label="按机构筛选">
+            <option value="">全部机构</option>
+            <option v-for="v in setFilterOptions.institutions" :key="v" :value="v">{{ v }}</option>
+          </select>
+          <select v-model="setFilter.subject" aria-label="按科目筛选">
+            <option value="">全部科目</option>
+            <option v-for="v in setFilterOptions.subjects" :key="v" :value="v">{{ v }}</option>
+          </select>
+          <select v-model="setFilter.level" aria-label="按等级筛选">
+            <option value="">全部等级</option>
+            <option v-for="v in setFilterOptions.levels" :key="v" :value="v">{{ v }}</option>
+          </select>
+          <select v-model="setFilter.year" aria-label="按年份筛选">
+            <option value="">全部年份</option>
+            <option v-for="v in setFilterOptions.years" :key="v" :value="String(v)">{{ v }} 年</option>
+          </select>
+        </div>
         <label class="field">
           <span>选择已发布套卷</span>
           <select v-model="selectedSetId">
@@ -185,6 +227,10 @@ function start() {
       </div>
 
       <footer class="exam-actions">
+        <label class="field duration-field">
+          <span>考试时长（分钟，到点自动交卷）</span>
+          <input v-model.number="examMinutes" type="number" min="5" max="300" step="5" />
+        </label>
         <button class="btn" @click="emit('close')">取消</button>
         <button
           class="btn primary"
@@ -287,6 +333,37 @@ function start() {
   gap: 5px;
   font-size: 12px;
   color: var(--ink-3);
+}
+.set-filter-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.set-filter-row select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  font-size: 12.5px;
+  color: #334155;
+}
+.duration-field {
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #475569;
+}
+.duration-field input {
+  width: 76px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  font-size: 13px;
 }
 .field select,
 .field input {

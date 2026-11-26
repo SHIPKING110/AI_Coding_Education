@@ -21,7 +21,7 @@ from app.models.question_bank import (
     QuestionBankSet,
 )
 from app.models.user import User
-from app.services import question_bank_ai
+from app.services import qb_ai_tasks, question_bank_ai
 from app.services.llm import LLMConfigError, friendly_llm_error
 from app.services.llm_context import require_llm
 from app.services.question_bank_validation import validate_questions
@@ -301,3 +301,169 @@ def ability_comment(
     _, student_id = _resolve_owner(db, current_user, payload.student_id)
     content, model, cached = question_bank_ai.ability_comment(db, current_user, student_id, stats)
     return {"content": content, "model": model, "cached": cached, "stats": stats}
+
+
+class AiTaskStartOut(BaseModel):
+    task_id: str
+    kind: str
+    total: int
+
+
+def _ai_question_query(
+    db: Session,
+    set_id: uuid.UUID,
+    question_ids: list[uuid.UUID] | None,
+    *,
+    draft_only: bool,
+):
+    query = select(QuestionBankQuestion).where(QuestionBankQuestion.bank_set_id == set_id)
+    if question_ids:
+        query = query.where(QuestionBankQuestion.id.in_(question_ids))
+    elif draft_only:
+        query = query.where(QuestionBankQuestion.status == BankQuestionStatus.DRAFT.value)
+    return query.order_by(QuestionBankQuestion.order_no).limit(200)
+
+
+@router.post("/sets/{set_id}/ai-validate-task", response_model=AiTaskStartOut)
+def ai_validate_set_task(
+    set_id: uuid.UUID,
+    payload: AiValidateSetIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """异步校准：立即返回 task_id，逐题调用 LLM 并汇报进度。"""
+    _require_qb_permission(db, current_user, "question_bank_review")
+    bank_set = db.get(QuestionBankSet, set_id)
+    if bank_set is None:
+        raise HTTPException(status_code=404, detail="套卷不存在")
+    require_llm(db, current_user.id, "assignment")
+    questions = list(db.scalars(_ai_question_query(db, set_id, payload.question_ids, draft_only=True)).all())
+    if not questions:
+        raise HTTPException(status_code=400, detail="没有需要校准的题目")
+    question_ids = [q.id for q in questions]
+    apply_flag = payload.apply
+    user_id = current_user.id
+    task = qb_ai_tasks.create_task(
+        user_id,
+        "validate",
+        len(question_ids),
+        meta={"set_id": str(set_id), "set_name": bank_set.name},
+    )
+
+    def _worker() -> dict[str, Any]:
+        from app.core.database import SessionLocal
+
+        session = SessionLocal()
+        applied = failed = 0
+        errors: list[str] = []
+        try:
+            worker_user = session.get(User, user_id)
+            assert worker_user is not None
+            for index, qid in enumerate(question_ids, start=1):
+                question = session.get(QuestionBankQuestion, qid)
+                if question is None:
+                    continue
+                qb_ai_tasks.update_task(task["id"], message=f"校准第 {question.order_no} 题…")
+                try:
+                    _review, did_apply = question_bank_ai.validate_question(
+                        session, worker_user, question, apply=apply_flag
+                    )
+                    applied += 1 if did_apply else 0
+                    session.commit()
+                except LLMConfigError:
+                    session.rollback()
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    session.rollback()
+                    failed += 1
+                    errors.append(f"第 {question.order_no} 题：{friendly_llm_error(exc)}")
+                qb_ai_tasks.update_task(task["id"], progress=index)
+        finally:
+            session.close()
+        return {
+            "processed": len(question_ids),
+            "applied": applied,
+            "failed": failed,
+            "errors": errors[:10],
+        }
+
+    qb_ai_tasks.spawn(task["id"], _worker)
+    return AiTaskStartOut(task_id=task["id"], kind="validate", total=len(question_ids))
+
+
+@router.post("/sets/{set_id}/ai-tag-task", response_model=AiTaskStartOut)
+def ai_tag_set_task(
+    set_id: uuid.UUID,
+    payload: AiTagIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """异步知识点打标：立即返回 task_id，逐题打标并汇报进度。"""
+    _require_qb_permission(db, current_user, "question_bank_review")
+    bank_set = db.get(QuestionBankSet, set_id)
+    if bank_set is None:
+        raise HTTPException(status_code=404, detail="套卷不存在")
+    require_llm(db, current_user.id, "assignment")
+    rows = list(db.scalars(_ai_question_query(db, set_id, payload.question_ids, draft_only=False)).all())
+    questions = [q for q in rows if payload.question_ids or not q.knowledge_points]
+    if not questions:
+        raise HTTPException(status_code=400, detail="没有需要打标的题目")
+    question_ids = [q.id for q in questions]
+    user_id = current_user.id
+    task = qb_ai_tasks.create_task(
+        user_id,
+        "tag",
+        len(question_ids),
+        meta={"set_id": str(set_id), "set_name": bank_set.name},
+    )
+
+    def _worker() -> dict[str, Any]:
+        from app.core.database import SessionLocal
+
+        session = SessionLocal()
+        tagged = failed = 0
+        errors: list[str] = []
+        try:
+            worker_user = session.get(User, user_id)
+            assert worker_user is not None
+            worker_set = session.get(QuestionBankSet, set_id)
+            assert worker_set is not None
+            candidates = question_bank_ai._kp_candidates(session, worker_set)
+            for index, qid in enumerate(question_ids, start=1):
+                question = session.get(QuestionBankQuestion, qid)
+                if question is None:
+                    continue
+                qb_ai_tasks.update_task(task["id"], message=f"打标第 {question.order_no} 题…")
+                try:
+                    tags, _model = question_bank_ai.tag_question(
+                        session, worker_user, worker_set, question, candidates
+                    )
+                    tagged += 1 if tags else 0
+                    session.commit()
+                except LLMConfigError:
+                    session.rollback()
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    session.rollback()
+                    failed += 1
+                    errors.append(f"第 {question.order_no} 题：{friendly_llm_error(exc)}")
+                qb_ai_tasks.update_task(task["id"], progress=index)
+        finally:
+            session.close()
+        return {"processed": len(question_ids), "tagged": tagged, "failed": failed, "errors": errors[:10]}
+
+    qb_ai_tasks.spawn(task["id"], _worker)
+    return AiTaskStartOut(task_id=task["id"], kind="tag", total=len(question_ids))
+
+
+@router.get("/ai-tasks/{task_id}")
+def get_ai_task(task_id: str, current_user: User = Depends(get_current_user)):
+    task = qb_ai_tasks.get_task(task_id)
+    if task is None or task["user_id"] != str(current_user.id):
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    return task
+
+
+@router.get("/ai-tasks")
+def list_active_ai_tasks(current_user: User = Depends(get_current_user)):
+    return {"tasks": qb_ai_tasks.active_tasks(current_user.id)}

@@ -8,6 +8,7 @@ import { useAiTasksStore } from '@/stores/aiTasks'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
 import BrandLogo from '@/components/BrandLogo.vue'
+import QbAiTasksDock from '@/components/QbAiTasksDock.vue'
 import { fmtDateTimeFromIso } from '@/utils/date'
 
 const auth = useAuthStore()
@@ -439,6 +440,7 @@ onMounted(() => {
         </div>
       </div>
     </Transition>
+    <QbAiTasksDock />
   </div>
 </template>
 

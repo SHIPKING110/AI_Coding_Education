@@ -199,8 +199,8 @@
                   <button class="btn ghost" :disabled="aiCleaning" @click="onAiClean">
                     {{ aiCleaning ? '清洗中…' : 'AI 清洗' }}
                   </button>
-                  <button class="btn ghost" :disabled="aiValidating" @click="onValidateQuestion">
-                    {{ aiValidating ? '校准中…' : 'AI 校准' }}
+                  <button class="btn ghost" :disabled="aiSingleBusy" @click="onValidateQuestion">
+                    {{ aiSingleBusy ? '校准中…' : 'AI 校准' }}
                   </button>
                   <button v-if="activeQuestion.review_note?.startsWith('AI 校准')" class="btn ghost" @click="onRevertAi">
                     撤销校准
@@ -233,7 +233,17 @@
                     }"
                   />
                   <img v-for="url in mediaFor(`option:${optionLabel(i)}`)" :key="url" :src="url" class="opt-img" alt="" />
+                  <button
+                    v-if="canManage && edit.optionsText.split('\n').length > 2"
+                    type="button"
+                    class="opt-del"
+                    aria-label="删除该选项"
+                    @click="removeOption(i)"
+                  >
+                    ×
+                  </button>
                 </div>
+                <button v-if="canManage" type="button" class="opt-add" @click="addOption">+ 添加选项</button>
               </div>
 
               <div class="answer-grid">
@@ -475,7 +485,6 @@ import TeacherPracticeDialog from '@/components/TeacherPracticeDialog.vue'
 import { QUESTION_TYPE_LABELS } from '@/api/assignment'
 import {
   aiCleanQuestion,
-  aiTagBankSet,
   aiValidateQuestion,
   archiveBankSet,
   bankSetToAssignment,
@@ -506,6 +515,7 @@ import {
 } from '@/api/questionBank'
 import { answerFromText, answerToText } from '@/utils/questionBank'
 import { useAuthStore } from '@/stores/auth'
+import { useQbAiTasksStore } from '@/stores/qbAiTasks'
 import { useToastStore } from '@/stores/toast'
 
 const auth = useAuthStore()
@@ -601,9 +611,17 @@ const flaggedOrderNos = computed(
 const flaggedQuestionIds = computed(() =>
   (selected.value?.questions ?? []).filter((q) => flaggedOrderNos.value.has(q.order_no)).map((q) => q.id),
 )
-const aiValidating = ref(false)
-const aiTagging = ref(false)
-const aiProgress = reactive({ done: 0, total: 0 })
+const qbTasks = useQbAiTasksStore()
+const aiSingleBusy = ref(false)
+const setAiTasks = computed(() => qbTasks.tasksForSet(selected.value?.id ?? ''))
+const aiValidating = computed(() =>
+  setAiTasks.value.some((t) => t.kind === 'validate' && t.status === 'running'),
+)
+const aiTagging = computed(() => setAiTasks.value.some((t) => t.kind === 'tag' && t.status === 'running'))
+const aiProgress = computed(() => {
+  const runningTask = setAiTasks.value.find((t) => t.status === 'running')
+  return runningTask ? { done: runningTask.progress, total: runningTask.total } : { done: 0, total: 0 }
+})
 const aiTaggableCount = computed(() => (selected.value?.questions ?? []).filter((q) => !(q.knowledge_points?.length)).length)
 
 async function openSession(
@@ -614,6 +632,7 @@ async function openSession(
     subject?: string
     level?: string
     mark_kind?: 'favorite' | 'wrong'
+    exam_minutes?: number
   },
   mode: 'practice' | 'exam',
 ) {
@@ -672,6 +691,7 @@ async function startExam(payload: {
   rules?: Record<string, number>
   subject?: string
   level?: string
+  exam_minutes?: number
 }) {
   await openSession(payload, 'exam')
 }
@@ -781,7 +801,7 @@ async function loadAiStatus() {
 async function onValidateQuestion() {
   const q = activeQuestion.value
   if (!q) return
-  aiValidating.value = true
+  aiSingleBusy.value = true
   try {
     const res = await aiValidateQuestion(q.id, true)
     Object.assign(q, res.question)
@@ -790,7 +810,7 @@ async function onValidateQuestion() {
   } catch (e: unknown) {
     toast.error(actionErrorText(e, 'AI 校准失败'))
   } finally {
-    aiValidating.value = false
+    aiSingleBusy.value = false
   }
 }
 
@@ -811,31 +831,15 @@ async function onValidateFlagged() {
 }
 
 async function runValidate(targets: BankQuestion[]) {
-  if (!targets.length) return
-  aiValidating.value = true
-  aiProgress.done = 0
-  aiProgress.total = targets.length
-  let applied = 0
+  if (!targets.length || !selected.value) return
   try {
-    for (const q of targets) {
-      try {
-        const res = await aiValidateQuestion(q.id, true)
-        Object.assign(q, res.question)
-        if (res.applied) applied += 1
-      } catch (e: unknown) {
-        const msg = actionErrorText(e, '')
-        if (msg.includes('未配置') || msg.includes('未选择模型') || msg.includes('还没有可用模型')) throw e
-      } finally {
-        aiProgress.done += 1
-      }
-    }
-    toast.success(`AI 校准完成：${applied} 题已自动修复，其余请人工复核`)
-    await refreshSetQuietly()
+    await qbTasks.startValidate(
+      selected.value.id,
+      targets.map((q) => q.id),
+    )
+    toast.info(`AI 校准已在后台开始（${targets.length} 题），进度见右下角浮窗，可自由切换页面`)
   } catch (e: unknown) {
-    toast.error(actionErrorText(e, 'AI 校准失败，请检查模型配置'))
-  } finally {
-    aiValidating.value = false
-    if (selected.value) void loadValidation(selected.value.id)
+    toast.error(actionErrorText(e, 'AI 校准启动失败，请检查模型配置'))
   }
 }
 
@@ -861,25 +865,24 @@ async function onTagSet() {
     toast.success('所有题目都已有知识点标签')
     return
   }
-  aiTagging.value = true
-  aiProgress.done = 0
-  aiProgress.total = ids.length
   try {
-    const res = await aiTagBankSet(selected.value.id, ids)
-    const byId = new Map(res.items.map((item) => [item.question_id, item.knowledge_points]))
-    for (const q of selected.value.questions ?? []) {
-      const tags = byId.get(q.id)
-      if (tags) q.knowledge_points = tags
-    }
-    aiProgress.done = res.tagged + res.skipped + res.failed
-    toast.success(`AI 打标完成：成功 ${res.tagged} 题，跳过 ${res.skipped} 题，失败 ${res.failed} 题`)
-    loadEdit(activeQuestion.value)
+    await qbTasks.startTag(selected.value.id, ids)
+    toast.info(`AI 知识点打标已在后台开始（${ids.length} 题），进度见右下角浮窗，可自由切换页面`)
   } catch (e: unknown) {
-    toast.error(actionErrorText(e, 'AI 打标失败，请检查模型配置'))
-  } finally {
-    aiTagging.value = false
+    toast.error(actionErrorText(e, 'AI 打标启动失败，请检查模型配置'))
   }
 }
+
+watch(
+  () => setAiTasks.value.map((t) => `${t.id}:${t.status}:${t.progress}`).join('|'),
+  () => {
+    if (!setAiTasks.value.some((t) => t.status === 'done')) return
+    if (selected.value) {
+      void refreshSetQuietly()
+      void loadValidation(selected.value.id)
+    }
+  },
+)
 
 const edit = reactive({
   type: '',
@@ -921,6 +924,23 @@ watch(activeQuestion, (q) => loadEdit(q))
 
 function optionLabel(i: number): string {
   return String.fromCharCode(65 + i)
+}
+
+function addOption() {
+  const parts = edit.optionsText.split('\n')
+  if (parts.length >= 8) {
+    toast.info('最多支持 8 个选项')
+    return
+  }
+  parts.push('')
+  edit.optionsText = parts.join('\n')
+}
+
+function removeOption(index: number) {
+  const parts = edit.optionsText.split('\n')
+  if (parts.length <= 2) return
+  parts.splice(index, 1)
+  edit.optionsText = parts.join('\n')
 }
 
 function typeLabel(t: string): string {
@@ -1286,6 +1306,7 @@ async function submitUpload() {
 onMounted(async () => {
   if (!auth.user) await auth.fetchMe().catch(() => null)
   await auth.fetchPerms()
+  void qbTasks.restore()
   await Promise.all([loadStats(), loadSets(), loadAiStatus()])
 })
 </script>
@@ -1906,7 +1927,34 @@ onMounted(async () => {
   object-fit: contain;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #fff;
+}
+.opt-del {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fef2f2;
+  color: #dc2626;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.opt-del:hover {
+  background: #fee2e2;
+}
+.opt-add {
+  margin-top: 2px;
+  padding: 5px 10px;
+  border: 1px dashed #d6c8a8;
+  border-radius: 7px;
+  background: #fffdf7;
+  color: #7c5a1e;
+  font-size: 12px;
+  cursor: pointer;
+}
+.opt-add:hover {
+  background: #fdf6e3;
 }
 .answer-grid {
   display: grid;

@@ -27,8 +27,7 @@ docker exec child_code-db-1 psql -U app -d child_code -tAc "select version_num f
 docker exec child_code-db-1 psql -U app -d child_code -tAc "select column_name from information_schema.columns where table_name='question_bank_attempts' and column_name in ('user_id','kind','paper_title','paper_meta','question_results') order by 1"
 docker exec child_code-db-1 psql -U app -d child_code -tAc "select table_name from information_schema.tables where table_name in ('question_bank_user_marks','question_bank_ai_reviews','question_bank_knowledge_points') order by 1"
 
-Write-Host '=== 4. 校正 alembic_version 至 c00000000004（schema 已齐） ==='
-docker exec child_code-db-1 psql -U app -d child_code -c "update alembic_version set version_num='c00000000004';"
+Write-Host '=== 4. 迁移：新容器 entrypoint 会自动 alembic upgrade head（含 c00000000005 attempts 缺列修复），下面仅校验 ==='
 docker exec child_code-db-1 psql -U app -d child_code -tAc "select version_num from alembic_version"
 
 Write-Host '=== 5. 重建镜像并重启 ==='

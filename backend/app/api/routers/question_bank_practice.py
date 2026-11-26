@@ -76,6 +76,7 @@ class AttemptStartIn(BaseModel):
     institution: str | None = None
     exam_year: int | None = None
     mark_kind: str | None = None
+    exam_minutes: int | None = Field(default=None, ge=5, le=300)
 
 
 class AnswerIn(BaseModel):
@@ -595,6 +596,8 @@ def start_attempt(
     snapshot = [_snapshot(q) for q in questions]
     meta["question_count"] = len(snapshot)
     meta["total_score"] = sum(int(i.get("score") or 0) for i in snapshot)
+    if mode == PracticeMode.EXAM.value:
+        meta["exam_minutes"] = payload.exam_minutes or 120
     attempt = PracticeAttempt(
         user_id=user_id,
         student_id=student_id,
