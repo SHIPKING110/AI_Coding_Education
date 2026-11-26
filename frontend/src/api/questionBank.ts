@@ -246,6 +246,22 @@ export async function listPracticeAttempts(
   return data
 }
 
+export interface AttemptTrendWeek {
+  week_start: string
+  avg_score: number
+  attempts: number
+}
+
+export async function getAttemptTrend(
+  studentId?: string,
+  days = 56,
+): Promise<{ weeks: AttemptTrendWeek[] }> {
+  const { data } = await http.get('/question-bank/attempts/trend', {
+    params: { ...(studentId ? { student_id: studentId } : {}), days },
+  })
+  return data
+}
+
 export async function closePracticeAttempt(id: string): Promise<PracticeAttemptOut> {
   const { data } = await http.post(`/question-bank/attempts/${id}/close`)
   return data

@@ -354,6 +354,10 @@ def test_clear_answer_and_attempt_access(client, admin_token, db_session, tmp_pa
     )
     assert wrong_book.status_code == 409
 
+    trend = client.get("/api/question-bank/attempts/trend", headers=parent_token)
+    assert trend.status_code == 200
+    assert isinstance(trend.json()["weeks"], list)
+
 def test_teacher_can_read_own_attempt(client, admin_token, tmp_path):
     set_id = _publish_sample(client, admin_token, tmp_path)
     teacher_token = _register(client, "teacher", "qb-own-attempt")

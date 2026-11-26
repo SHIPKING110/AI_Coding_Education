@@ -8,11 +8,13 @@ import SearchableSelect from '@/components/SearchableSelect.vue'
 import {
   aggregateSubjects,
   getAbilityComment,
+  getAttemptTrend,
   getLearningStats,
   listBankSets,
   listPracticeAttempts,
   startPracticeAttempt,
   type AttemptSummary,
+  type AttemptTrendWeek,
   type BankSet,
   type LearningStatsOut,
 } from '@/api/questionBank'
@@ -27,6 +29,9 @@ const student = computed(() => store.activeStudent)
 const sets = ref<BankSet[]>([])
 const stats = ref<LearningStatsOut | null>(null)
 const attempts = ref<AttemptSummary[]>([])
+const recordKind = ref('')
+const recordStatus = ref('')
+const trendWeeks = ref<AttemptTrendWeek[]>([])
 const loading = ref(false)
 const starting = ref(false)
 const filterSubject = ref('')
@@ -82,19 +87,61 @@ function fmtDate(iso: string | null): string {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+function attemptQuery() {
+  return {
+    limit: 20,
+    ...(recordKind.value ? { kind: recordKind.value } : {}),
+    ...(recordStatus.value ? { status: recordStatus.value } : {}),
+  }
+}
+
+const trendChart = computed(() => {
+  const weeks = trendWeeks.value
+  if (weeks.length < 2) return null
+  const w = 560
+  const h = 130
+  const pad = 18
+  const xs = weeks.map((_, i) => pad + (i * (w - pad * 2)) / (weeks.length - 1))
+  const ys = weeks.map(
+    (wk) => h - pad - (Math.min(100, Math.max(0, wk.avg_score)) / 100) * (h - pad * 2),
+  )
+  return {
+    w,
+    h,
+    pad,
+    points: xs.map((x, i) => `${x.toFixed(1)},${ys[i].toFixed(1)}`).join(' '),
+    dots: weeks.map((wk, i) => ({
+      x: xs[i],
+      y: ys[i],
+      label: `${wk.week_start.slice(5).replace('-', '/')} 周 · ${wk.avg_score} 分（${wk.attempts} 次）`,
+    })),
+  }
+})
+
+watch([recordKind, recordStatus], async () => {
+  if (!student.value) return
+  const data = await listPracticeAttempts(student.value.id, attemptQuery()).catch(() => ({
+    items: [] as AttemptSummary[],
+    total: 0,
+  }))
+  attempts.value = data.items
+})
+
 async function load() {
   if (!store.me) await store.loadMe(true)
   if (!student.value) return
   loading.value = true
   try {
-    const [setData, statData, attemptData] = await Promise.all([
+    const [setData, statData, attemptData, trendData] = await Promise.all([
       listBankSets(),
       getLearningStats(student.value.id).catch(() => null),
-      listPracticeAttempts(student.value.id, { limit: 20 }).catch(() => ({ items: [], total: 0 })),
+      listPracticeAttempts(student.value.id, attemptQuery()).catch(() => ({ items: [], total: 0 })),
+      getAttemptTrend(student.value.id).catch(() => ({ weeks: [] as AttemptTrendWeek[] })),
     ])
     sets.value = setData.items
     stats.value = statData
     attempts.value = attemptData.items
+    trendWeeks.value = trendData.weeks
   } catch {
     toast.error('题库加载失败')
   } finally {
@@ -370,10 +417,59 @@ watch(() => store.activeStudentId, load)
       </div>
     </section>
 
+    <section v-if="trendChart" class="trend-section">
+      <div class="history-head">
+        <h2>近 8 周正确率趋势</h2>
+        <span class="history-total">{{ trendWeeks.length }} 个有效周</span>
+      </div>
+      <svg
+        class="trend-svg"
+        :viewBox="`0 0 ${trendChart.w} ${trendChart.h}`"
+        role="img"
+        aria-label="近 8 周平均正确率趋势"
+      >
+        <line
+          v-for="line in [50, 100]"
+          :key="line"
+          :x1="trendChart.pad"
+          :x2="trendChart.w - trendChart.pad"
+          :y1="trendChart.h - trendChart.pad - (line / 100) * (trendChart.h - trendChart.pad * 2)"
+          :y2="trendChart.h - trendChart.pad - (line / 100) * (trendChart.h - trendChart.pad * 2)"
+          class="trend-grid"
+        />
+        <polyline :points="trendChart.points" class="trend-line" />
+        <circle
+          v-for="d in trendChart.dots"
+          :key="d.label"
+          :cx="d.x"
+          :cy="d.y"
+          r="3.5"
+          class="trend-dot"
+        >
+          <title>{{ d.label }}</title>
+        </circle>
+      </svg>
+    </section>
     <section v-if="attempts.length" class="history-section">
       <div class="section-head">
         <h2>做题记录</h2>
-        <span class="history-total">最近 {{ attempts.length }} 条</span>
+        <div class="history-filters">
+          <span class="history-total">最近 {{ attempts.length }} 条</span>
+          <select v-model="recordKind" class="history-select">
+            <option value="">全部模式</option>
+            <option value="quick">刷题练习</option>
+            <option value="aggregate">综合练习</option>
+            <option value="marked">错题/收藏</option>
+            <option value="set_practice">套卷练习</option>
+            <option value="exam_set">套卷考试</option>
+            <option value="exam_random">随机考试</option>
+          </select>
+          <select v-model="recordStatus" class="history-select">
+            <option value="">全部状态</option>
+            <option value="in_progress">进行中</option>
+            <option value="evaluated">已完成</option>
+          </select>
+        </div>
       </div>
       <div class="history-list">
         <button v-for="a in attempts" :key="a.id" class="history-row" @click="openAttempt(a)">
@@ -601,6 +697,49 @@ watch(() => store.activeStudentId, load)
   font-size: 11.5px;
 }
 .sets-section,
+.trend-section {
+  margin-top: 26px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+}
+.trend-svg {
+  width: 100%;
+  height: auto;
+  margin-top: 6px;
+}
+.trend-grid {
+  stroke: #e2e8f0;
+  stroke-dasharray: 4 4;
+  stroke-width: 1;
+}
+.trend-line {
+  fill: none;
+  stroke: #0d9488;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.trend-dot {
+  fill: #0d9488;
+  stroke: #ffffff;
+  stroke-width: 1.5;
+}
+.history-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.history-select {
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  font-size: 12px;
+  color: #334155;
+}
 .history-section {
   margin-top: 20px;
 }

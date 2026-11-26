@@ -671,6 +671,49 @@ def list_attempts(
     return {"items": items, "total": total}
 
 
+@router.get("/attempts/trend")
+def attempt_trend(
+    days: int = Query(default=56, ge=7, le=365),
+    student_id: uuid.UUID | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """按周聚合已完成作答的平均得分率，用于能力趋势图。"""
+    since = datetime.now(UTC) - timedelta(days=days)
+    query = select(PracticeAttempt).where(
+        PracticeAttempt.status == AttemptStatus.EVALUATED.value,
+        PracticeAttempt.started_at >= since,
+    )
+    if student_id is not None:
+        _visible_student(db, student_id, user)
+        query = query.where(PracticeAttempt.student_id == student_id)
+    else:
+        query = query.where(PracticeAttempt.user_id == user.id)
+    rows = list(db.scalars(query).all())
+    buckets: dict[str, list[float]] = {}
+    for row in rows:
+        if row.started_at is None:
+            continue
+        week_start = (row.started_at - timedelta(days=row.started_at.weekday())).date().isoformat()
+        score: float | None = None
+        if isinstance(row.result, dict):
+            value = row.result.get("normalized_score")
+            if value is not None:
+                score = float(value)
+        if score is None and row.mode != PracticeMode.EXAM.value:
+            total = int(row.total_score or 0)
+            if total > 0:
+                score = float(row.score or 0) / total * 100
+        if score is None:
+            continue
+        buckets.setdefault(week_start, []).append(score)
+    weeks = [
+        {"week_start": key, "avg_score": round(sum(values) / len(values)), "attempts": len(values)}
+        for key, values in sorted(buckets.items())
+    ]
+    return {"weeks": weeks}
+
+
 @router.get("/attempts/{attempt_id}")
 def get_attempt(
     attempt_id: uuid.UUID,
