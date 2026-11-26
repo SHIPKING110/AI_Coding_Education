@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.api.deps import get_current_user, require_roles
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.models.llm_config import TeacherModuleModel
 from app.models.permission import check as permission_check
 from app.models.question_bank import (
     BankQuestionStatus,
@@ -28,7 +29,6 @@ from app.models.question_bank import (
     QuestionBankSet,
     QuestionBankSource,
 )
-from app.models.llm_config import TeacherModuleModel
 from app.models.user import Role, User
 from app.services.llm import LLMConfigError, friendly_llm_error
 from app.services.llm_context import use_teacher_llm
