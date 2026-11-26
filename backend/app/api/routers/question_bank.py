@@ -1,4 +1,5 @@
 """题库导入、审核、发布与基础组卷 API。"""
+
 from __future__ import annotations
 
 import json
@@ -27,7 +28,10 @@ from app.models.question_bank import (
     QuestionBankSet,
     QuestionBankSource,
 )
+from app.models.llm_config import TeacherModuleModel
 from app.models.user import Role, User
+from app.services.llm import LLMConfigError, friendly_llm_error
+from app.services.llm_context import use_teacher_llm
 from app.services.question_bank_parser import file_hash, parse_docx
 
 router = APIRouter(prefix="/question-bank", tags=["question-bank"])
@@ -87,6 +91,7 @@ class BankImportOut(BaseModel):
     set_id: uuid.UUID
     question_count: int
     warnings: list[str]
+    issues: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _serialize_question(q: QuestionBankQuestion, *, include_answer: bool = True) -> dict[str, Any]:
@@ -191,7 +196,9 @@ def import_docx(
     db.add(source)
     db.flush()
     try:
-        paper = parse_docx(source_path, media_dir=root / "media", media_url_prefix=f"/uploads/question_bank/{root.name}/media")
+        paper = parse_docx(
+            source_path, media_dir=root / "media", media_url_prefix=f"/uploads/question_bank/{root.name}/media"
+        )
         bank_set = QuestionBankSet(
             source_id=source.id,
             name=name or paper.name,
@@ -202,7 +209,12 @@ def import_docx(
             level=level or paper.level,
             total_score=paper.total_score,
             status=BankSetStatus.DRAFT,
-            import_meta={"sections": paper.sections, "warnings": paper.warnings, "parser": "rules-v1"},
+            import_meta={
+                "sections": paper.sections,
+                "warnings": paper.warnings,
+                "issues": paper.issues,
+                "parser": "rules-v1",
+            },
         )
         db.add(bank_set)
         db.flush()
@@ -228,7 +240,13 @@ def import_docx(
             )
         source.status = BankSourceStatus.REVIEW_REQUIRED
         db.commit()
-        return BankImportOut(source_id=source.id, set_id=bank_set.id, question_count=len(paper.questions), warnings=paper.warnings)
+        return BankImportOut(
+            source_id=source.id,
+            set_id=bank_set.id,
+            question_count=len(paper.questions),
+            warnings=paper.warnings,
+            issues=paper.issues,
+        )
     except Exception as exc:
         db.rollback()
         source.status = BankSourceStatus.FAILED
@@ -249,7 +267,11 @@ def list_sets(
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
-    query = select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).order_by(QuestionBankSet.created_at.desc())
+    query = (
+        select(QuestionBankSet)
+        .options(selectinload(QuestionBankSet.questions))
+        .order_by(QuestionBankSet.created_at.desc())
+    )
     if institution:
         query = query.where(QuestionBankSet.institution == institution)
     if subject:
@@ -272,15 +294,14 @@ def list_sets(
 
 @router.get("/sets/{set_id}")
 def get_set(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    bank_set = db.scalar(select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id))
+    bank_set = db.scalar(
+        select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id)
+    )
     if not bank_set:
         raise HTTPException(status_code=404, detail="套卷不存在")
     if bank_set.status != BankSetStatus.PUBLISHED.value and (
         current_user.role in {Role.PARENT.value, Role.STUDENT.value}
-        or (
-            current_user.role == Role.TEACHER.value
-            and not _can_manage_question_bank(db, current_user)
-        )
+        or (current_user.role == Role.TEACHER.value and not _can_manage_question_bank(db, current_user))
     ):
         raise HTTPException(status_code=404, detail="套卷不存在")
     include_answer = current_user.role not in {Role.PARENT.value, Role.STUDENT.value}
@@ -290,7 +311,12 @@ def get_set(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User
 
 
 @router.patch("/sets/{set_id}")
-def update_set(set_id: uuid.UUID, payload: BankSetMetaUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def update_set(
+    set_id: uuid.UUID,
+    payload: BankSetMetaUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     _require_qb_permission(db, current_user, "question_bank_import")
     bank_set = db.get(QuestionBankSet, set_id)
     if not bank_set:
@@ -302,9 +328,19 @@ def update_set(set_id: uuid.UUID, payload: BankSetMetaUpdate, db: Session = Depe
 
 
 @router.patch("/sets/{set_id}/questions/{question_id}")
-def update_question(set_id: uuid.UUID, question_id: uuid.UUID, payload: BankQuestionUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def update_question(
+    set_id: uuid.UUID,
+    question_id: uuid.UUID,
+    payload: BankQuestionUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     _require_qb_permission(db, current_user, "question_bank_review")
-    q = db.scalar(select(QuestionBankQuestion).where(QuestionBankQuestion.id == question_id, QuestionBankQuestion.bank_set_id == set_id))
+    q = db.scalar(
+        select(QuestionBankQuestion).where(
+            QuestionBankQuestion.id == question_id, QuestionBankQuestion.bank_set_id == set_id
+        )
+    )
     if not q:
         raise HTTPException(status_code=404, detail="题目不存在")
     changes = payload.model_dump(exclude_unset=True)
@@ -322,7 +358,9 @@ def update_question(set_id: uuid.UUID, question_id: uuid.UUID, payload: BankQues
 @router.post("/sets/{set_id}/review-all")
 def review_all(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     _require_qb_permission(db, current_user, "question_bank_review")
-    bank_set = db.scalar(select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id))
+    bank_set = db.scalar(
+        select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id)
+    )
     if not bank_set:
         raise HTTPException(status_code=404, detail="套卷不存在")
     now = datetime.now(UTC)
@@ -335,6 +373,40 @@ def review_all(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: U
             count += 1
     db.commit()
     return {"reviewed": count}
+
+
+@router.get("/ai-status")
+def ai_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """检查「AI 习题」模块解析到的模型，便于前端直接验证模块选模型是否接通。"""
+    if not _can_manage_question_bank(db, current_user):
+        raise HTTPException(status_code=403, detail="无题库管理权限")
+    from app.crud import llm_config as llm_config_crud
+
+    resolved = llm_config_crud.resolve(db, current_user.id, "assignment")
+    mapping_row = db.get(TeacherModuleModel, {"owner_id": current_user.id, "module": "assignment"})
+    if resolved is None:
+        source = None
+    elif resolved.is_platform:
+        source = "env"
+    elif (
+        mapping_row is not None
+        and mapping_row.config_id is not None
+        and resolved.config_id == mapping_row.config_id
+    ):
+        source = "module"
+    else:
+        source = "default"
+    return {
+        "module": "assignment",
+        "configured": resolved is not None,
+        "model": resolved.model if resolved else None,
+        "config_name": resolved.config_name if resolved else None,
+        "is_platform": resolved.is_platform if resolved else False,
+        "source": source,  # module=模块映射；default=个人默认配置；env=系统环境变量
+    }
 
 
 @router.post("/questions/{question_id}/ai-clean")
@@ -350,8 +422,6 @@ def ai_clean_question(
     q = db.get(QuestionBankQuestion, question_id)
     if not q:
         raise HTTPException(status_code=404, detail="题目不存在")
-    if not llm.is_llm_configured():
-        raise HTTPException(status_code=503, detail="未配置大模型，无法使用 AI 清洗")
     prompt = (
         "你是少儿编程考级题库编辑。请根据下面的原始试卷片段，抽取成严格 JSON："
         '{"type":"single_choice|multiple_choice|judgement|code_fill|programming",'
@@ -362,9 +432,12 @@ def ai_clean_question(
         "只输出 JSON，不要解释。原始片段：\n" + (q.source_excerpt or q.stem)
     )
     try:
-        raw = llm.invoke_text("你是严谨的题库结构化助手，只输出 JSON。", prompt, temperature=0.0, timeout=90)
+        with use_teacher_llm(db, current_user.id, "assignment"):
+            raw = llm.invoke_text("你是严谨的题库结构化助手，只输出 JSON。", prompt, temperature=0.0, timeout=90)
+    except LLMConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=llm.friendly_llm_error(exc)) from exc
+        raise HTTPException(status_code=502, detail=friendly_llm_error(exc)) from exc
     match = re.search(r"\{.*\}", raw, re.S)
     if not match:
         raise HTTPException(status_code=502, detail="AI 未返回可解析的 JSON")
@@ -400,10 +473,16 @@ def ai_clean_question(
 @router.post("/sets/{set_id}/publish")
 def publish_set(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     _require_qb_permission(db, current_user, "question_bank_publish")
-    bank_set = db.scalar(select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id))
+    bank_set = db.scalar(
+        select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id)
+    )
     if not bank_set:
         raise HTTPException(status_code=404, detail="套卷不存在")
-    incomplete = [q.order_no for q in bank_set.questions if q.status not in {BankQuestionStatus.REVIEWED.value, BankQuestionStatus.PUBLISHED.value}]
+    incomplete = [
+        q.order_no
+        for q in bank_set.questions
+        if q.status not in {BankQuestionStatus.REVIEWED.value, BankQuestionStatus.PUBLISHED.value}
+    ]
     if incomplete:
         raise HTTPException(status_code=409, detail={"message": "仍有题目未审核", "question_numbers": incomplete})
     for q in bank_set.questions:
@@ -430,7 +509,14 @@ def archive_set(set_id: uuid.UUID, db: Session = Depends(get_db), current_user: 
 def stats(db: Session = Depends(get_db), _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF, Role.TEACHER))):
     sets = db.scalar(select(func.count()).select_from(QuestionBankSet)) or 0
     questions = db.scalar(select(func.count()).select_from(QuestionBankQuestion)) or 0
-    pending = db.scalar(select(func.count()).select_from(QuestionBankQuestion).where(QuestionBankQuestion.status == BankQuestionStatus.DRAFT)) or 0
+    pending = (
+        db.scalar(
+            select(func.count())
+            .select_from(QuestionBankQuestion)
+            .where(QuestionBankQuestion.status == BankQuestionStatus.DRAFT)
+        )
+        or 0
+    )
     return {"sets": sets, "questions": questions, "pending_review": pending}
 
 
@@ -442,7 +528,9 @@ def random_questions(
     db: Session = Depends(get_db),
     _user: User = Depends(require_roles(Role.ADMIN, Role.STAFF, Role.TEACHER)),
 ):
-    query = select(QuestionBankQuestion).where(QuestionBankQuestion.bank_set_id == set_id, QuestionBankQuestion.status == BankQuestionStatus.PUBLISHED)
+    query = select(QuestionBankQuestion).where(
+        QuestionBankQuestion.bank_set_id == set_id, QuestionBankQuestion.status == BankQuestionStatus.PUBLISHED
+    )
     if question_type:
         query = query.where(QuestionBankQuestion.type == question_type)
     questions = list(db.scalars(query).all())

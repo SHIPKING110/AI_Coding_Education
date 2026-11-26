@@ -1,4 +1,5 @@
 """可审核、可复用的题库领域模型。"""
+
 import enum
 import uuid
 from datetime import datetime
@@ -52,19 +53,27 @@ class QuestionBankSource(Base):
     filename: Mapped[str] = mapped_column(String(255))
     storage_path: Mapped[str] = mapped_column(String(500))
     file_hash: Mapped[str] = mapped_column(String(64), index=True)
-    status: Mapped[str] = mapped_column(Enum(BankSourceStatus, native_enum=False, values_callable=enum_values, length=24), default=BankSourceStatus.UPLOADED, index=True)
+    status: Mapped[str] = mapped_column(
+        Enum(BankSourceStatus, native_enum=False, values_callable=enum_values, length=24),
+        default=BankSourceStatus.UPLOADED,
+        index=True,
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     uploaded_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     uploader: Mapped["User"] = relationship()
-    bank_set: Mapped["QuestionBankSet | None"] = relationship(back_populates="source", uselist=False, cascade="all, delete-orphan")
+    bank_set: Mapped["QuestionBankSet | None"] = relationship(
+        back_populates="source", uselist=False, cascade="all, delete-orphan"
+    )
 
 
 class QuestionBankSet(Base):
     __tablename__ = "question_bank_sets"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("question_bank_sources.id", ondelete="CASCADE"), unique=True, index=True)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("question_bank_sources.id", ondelete="CASCADE"), unique=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(200))
     institution: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     exam_year: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -72,12 +81,20 @@ class QuestionBankSet(Base):
     subject: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     level: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     total_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    status: Mapped[str] = mapped_column(Enum(BankSetStatus, native_enum=False, values_callable=enum_values, length=16), default=BankSetStatus.DRAFT, index=True)
+    status: Mapped[str] = mapped_column(
+        Enum(BankSetStatus, native_enum=False, values_callable=enum_values, length=16),
+        default=BankSetStatus.DRAFT,
+        index=True,
+    )
     import_meta: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
     source: Mapped["QuestionBankSource"] = relationship(back_populates="bank_set")
-    questions: Mapped[list["QuestionBankQuestion"]] = relationship(back_populates="bank_set", cascade="all, delete-orphan", order_by="QuestionBankQuestion.order_no")
+    questions: Mapped[list["QuestionBankQuestion"]] = relationship(
+        back_populates="bank_set", cascade="all, delete-orphan", order_by="QuestionBankQuestion.order_no"
+    )
 
 
 class QuestionBankQuestion(Base):
@@ -100,12 +117,18 @@ class QuestionBankQuestion(Base):
     media: Mapped[list | None] = mapped_column(JSON, nullable=True)
     knowledge_points: Mapped[list | None] = mapped_column(JSON, nullable=True)
     source_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(Enum(BankQuestionStatus, native_enum=False, values_callable=enum_values, length=16), default=BankQuestionStatus.DRAFT, index=True)
+    status: Mapped[str] = mapped_column(
+        Enum(BankQuestionStatus, native_enum=False, values_callable=enum_values, length=16),
+        default=BankQuestionStatus.DRAFT,
+        index=True,
+    )
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
     bank_set: Mapped["QuestionBankSet"] = relationship(back_populates="questions")
 
 
@@ -126,8 +149,12 @@ class QuestionBankUserMark(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    student_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("students.id", ondelete="CASCADE"), nullable=True, index=True)
-    question_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("question_bank_questions.id", ondelete="CASCADE"), index=True)
+    student_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("students.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("question_bank_questions.id", ondelete="CASCADE"), index=True
+    )
     kind: Mapped[str] = mapped_column(String(16), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -135,14 +162,83 @@ class QuestionBankUserMark(Base):
 class PracticeAttempt(Base):
     __tablename__ = "question_bank_attempts"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    student_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("students.id"), index=True)
-    bank_set_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("question_bank_sets.id"), nullable=True, index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    student_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("students.id"), nullable=True, index=True)
+    bank_set_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("question_bank_sets.id"), nullable=True, index=True
+    )
+    # practice=即时反馈；exam=交卷后统一评分。kind 细分来源：quick/aggregate/marked/exam_set/exam_random/set_practice
     mode: Mapped[str] = mapped_column(Enum(PracticeMode, native_enum=False, values_callable=enum_values, length=12))
-    status: Mapped[str] = mapped_column(Enum(AttemptStatus, native_enum=False, values_callable=enum_values, length=16), default=AttemptStatus.IN_PROGRESS, index=True)
+    kind: Mapped[str] = mapped_column(String(24), default="set_practice", index=True)
+    status: Mapped[str] = mapped_column(
+        Enum(AttemptStatus, native_enum=False, values_callable=enum_values, length=16),
+        default=AttemptStatus.IN_PROGRESS,
+        index=True,
+    )
+    paper_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    paper_meta: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     question_snapshot: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     answers: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    question_results: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class QuestionBankAiReview(Base):
+    """AI 校准/打标审计记录：保留修改前后快照，支持回滚并避免重复计费。"""
+
+    __tablename__ = "question_bank_ai_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("question_bank_questions.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # validate / tag / clean
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="suggested", index=True)  # suggested/applied/reverted/error
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(nullable=True)
+    issues: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    reasons: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class QuestionBankKpTaxonomy(Base):
+    """知识点受控词表：AI 打标优先从候选词中选，未知项落为候选待审。"""
+
+    __tablename__ = "question_bank_kp_taxonomy"
+    __table_args__ = (UniqueConstraint("subject", "level", "code"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    subject: Mapped[str] = mapped_column(String(80), index=True)
+    level: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    code: Mapped[str] = mapped_column(String(80))
+    name: Mapped[str] = mapped_column(String(120))
+    parent: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)  # active/candidate
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PracticeAbilityReport(Base):
+    """能力评语缓存：同一用户/学员+统计指纹只生成一次，避免重复消耗 Token。"""
+
+    __tablename__ = "practice_ability_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    student_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("students.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    stats_hash: Mapped[str] = mapped_column(String(64), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

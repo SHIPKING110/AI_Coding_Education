@@ -1,5 +1,16 @@
 # 当前任务
 
+## 题库模块（P4：练习会话 + AI 校准能力，2026-11-25）
+
+- [x] **数据模型（迁移 c00000000004 已应用 dev 库）**：`question_bank_attempts` 扩展（user_id 归属、kind 细分来源 quick/aggregate/marked/set_practice/exam_set/exam_random、paper_title/paper_meta、question_results 逐题判定固化）+ 新表 `question_bank_ai_reviews`（AI 校准/打标审计，前后快照支持回退）、`question_bank_kp_taxonomy`（知识点受控词表）、`practice_ability_reports`（能力评语缓存）
+- [x] **AI 校准/打标 API**（`question_bank_ai` 路由）：单题 `POST /questions/{id}/ai-validate`（草稿题高置信度自动应用，含内容哈希去重）、`/ai-validate/revert` 撤销；整卷 `POST /sets/{id}/ai-validate`（批量 suggested/apply）、`GET /sets/{id}/validation` 结构化零成本校验（题号连续/答案越界/缺解析/缺参考代码）；`POST /sets/{id}/ai-tag` 知识点打标（优先受控词表候选，未知项落 candidate 待审）
+- [x] **知识点词表**：`GET/POST /kp-taxonomy`（subject/level/code 唯一，重复 409）
+- [x] **能力评语**：`POST /ability-comment`（学习统计指纹缓存，无数据走模板兜底，未配 LLM 不阻塞）
+- [x] **练习/考试会话扩展**：教师/管理员本人可练习（user_id 归属，跨角色 get_current_user）、错题本/收藏组卷（自动维护 wrong marks）、`POST /attempts/{id}/close` 提前结束会话、交卷固化 question_results、考试卷面 `normalized_score` + 达标评级、learning-stats 新增 knowledge_stats/radar
+- [x] **前端**：ExamStartDialog（选卷/抽题/错题本开考）、ExamResultPanel（交卷结果+逐题回看）、AbilityRadar（纯 SVG 能力雷达）、TeacherPracticeDialog 重构、QuestionBankView/ClientQuestionBankView/ClientPracticeView 接入会话与结果面板
+- [x] **验证**：dev 库 alembic 恢复至 c00000000004（stamp 基线 a00000000000 → upgrade head）；新增 `tests/test_question_bank_ai.py` 7 例 + 修复 `to-assignment` 细粒度权限用例（未授权 403 → 授权 201）→ 题库两文件 12 例全绿；ruff app+tests 零错误；前端 eslint 零错误、vitest 25 例、vue-tsc + vite build 通过
+- 遗留：AI 校准整卷接口单次上限 20 题（批量分批由前端控制节奏）；能力评语 LLM 路径以模板兜底优先保证可用
+
 ## 题库模块（v2.1，2026-11-23）
 
 - [x] FR-QB-01~09：题库导入、审核、练习/模考、教师组卷、学习数据

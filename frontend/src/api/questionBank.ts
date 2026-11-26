@@ -32,6 +32,21 @@ export interface BankQuestion {
   review_note: string | null
 }
 
+export interface BankImportOut {
+  source_id: string
+  set_id: string
+  question_count: number
+  warnings: string[]
+  issues: BankIssue[]
+}
+
+export interface BankIssue {
+  code: string
+  level: string
+  message: string
+  question_no?: number | null
+}
+
 export interface BankSet {
   id: string
   source_id: string
@@ -47,6 +62,7 @@ export interface BankSet {
   import_meta: {
     sections?: { name: string; count: number; score: number; type: string | null }[]
     warnings?: string[]
+    issues?: BankIssue[]
     parser?: string
   } | null
   created_at: string
@@ -56,7 +72,7 @@ export interface BankSet {
 export async function importBankDocx(
   file: File,
   meta: { name?: string; institution?: string; exam_year?: number | string; subject?: string; level?: string } = {},
-): Promise<{ source_id: string; set_id: string; question_count: number; warnings: string[] }> {
+): Promise<BankImportOut> {
   const form = new FormData()
   form.append('file', file)
   Object.entries(meta).forEach(([k, v]) => {
@@ -118,6 +134,11 @@ export async function archiveBankSet(setId: string): Promise<BankSet> {
   return data
 }
 
+export async function getBankSetValidation(setId: string): Promise<{ issues: BankIssue[]; total: number }> {
+  const { data } = await http.get(`/question-bank/sets/${setId}/validation`)
+  return data
+}
+
 export async function aiCleanQuestion(questionId: string): Promise<BankQuestion> {
   const { data } = await http.post(`/question-bank/questions/${questionId}/ai-clean`, null, { timeout: 120000 })
   return data
@@ -158,6 +179,13 @@ export async function composeBankQuestions(payload: {
   return data
 }
 
+export async function getComposeAvailability(
+  params: { subject?: string; level?: string; institution?: string; exam_year?: number } = {},
+): Promise<Record<string, number>> {
+  const { data } = await http.get('/question-bank/compose/availability', { params })
+  return data
+}
+
 export async function aggregateSubjects(): Promise<{ subjects: string[]; levels: string[] }> {
   const { data } = await http.get('/question-bank/aggregates/subjects')
   return data
@@ -190,9 +218,12 @@ export async function checkAggregateAnswer(
   return data
 }
 
+export type AttemptKind = 'quick' | 'aggregate' | 'marked' | 'set_practice' | 'exam_set' | 'exam_random'
+
 export async function startPracticeAttempt(payload: {
-  student_id: string
-  mode: 'practice' | 'exam'
+  student_id?: string
+  mode?: 'practice' | 'exam'
+  kind?: AttemptKind
   set_id?: string
   blueprint_id?: string
   rules?: Record<string, number>
@@ -200,16 +231,23 @@ export async function startPracticeAttempt(payload: {
   level?: string
   institution?: string
   exam_year?: number
+  mark_kind?: 'favorite' | 'wrong'
 }): Promise<PracticeAttemptOut> {
   const { data } = await http.post('/question-bank/attempts', payload)
   return data
 }
 
 export async function listPracticeAttempts(
-  studentId: string,
-  params: { limit?: number; offset?: number } = {},
+  studentId?: string,
+  params: { limit?: number; offset?: number; kind?: string; status?: string } = {},
 ): Promise<{ items: AttemptSummary[]; total: number }> {
-  const { data } = await http.get('/question-bank/attempts', { params: { student_id: studentId, ...params } })
+  const query = { ...params, ...(studentId ? { student_id: studentId } : {}) }
+  const { data } = await http.get('/question-bank/attempts', { params: query })
+  return data
+}
+
+export async function closePracticeAttempt(id: string): Promise<PracticeAttemptOut> {
+  const { data } = await http.post(`/question-bank/attempts/${id}/close`)
   return data
 }
 
@@ -229,6 +267,7 @@ export async function saveAttemptAnswer(
   analysis?: string | null
   reference_code?: string | null
   score?: number
+  max_score?: number
 }> {
   const { data } = await http.post(`/question-bank/attempts/${attemptId}/answers`, {
     question_id: questionId,
@@ -294,6 +333,9 @@ export interface AttemptQuestion {
   answer?: unknown
   analysis?: string | null
   reference_code?: string | null
+  favorite?: boolean
+  wrong?: boolean
+  marked?: boolean
 }
 
 export interface AttemptItemResult {
@@ -310,11 +352,23 @@ export interface AttemptItemResult {
   knowledge_points: string[]
 }
 
+export interface AttemptTypeStat {
+  total: number
+  correct: number
+  correct_rate?: number
+  score?: number
+  max_score?: number
+}
+
 export interface PracticeAttemptOut {
   id: string
-  student_id: string
+  user_id?: string | null
+  student_id: string | null
   bank_set_id: string | null
   mode: 'practice' | 'exam'
+  kind?: AttemptKind
+  paper_title?: string | null
+  paper_meta?: Record<string, unknown> | null
   status: 'in_progress' | 'submitted' | 'evaluated'
   score: number | null
   total_score: number | null
@@ -324,11 +378,14 @@ export interface PracticeAttemptOut {
     items: AttemptItemResult[]
     score: number
     total_score: number
+    normalized_score?: number
+    rating?: string | null
     correct_count: number
     question_count: number
-    type_stats: Record<string, { total: number; correct: number }>
+    type_stats: Record<string, AttemptTypeStat>
   } | null
   answers: Record<string, unknown>
+  question_results: Record<string, { is_correct?: boolean | null; score?: number; max_score?: number }>
   questions: AttemptQuestion[]
 }
 
@@ -398,11 +455,16 @@ export interface AggregateCheckOut {
 export interface AttemptSummary {
   id: string
   mode: string
+  kind?: AttemptKind
+  paper_title?: string | null
   status: string
   score: number | null
   total_score: number | null
+  normalized_score?: number | null
+  rating?: string | null
   correct_count: number | null
   question_count: number | null
+  correct_rate?: number | null
   started_at: string
   submitted_at: string | null
 }
@@ -415,8 +477,86 @@ export interface LearningStatsOut {
   avg_score_rate: number
   best_score_rate: number
   type_stats: Record<string, { total: number; correct: number; correct_rate: number }>
+  knowledge_stats?: { name: string; total: number; correct: number; correct_rate: number }[]
+  radar?: { name: string; total: number; correct: number; correct_rate: number }[]
   weak_points: { name: string; wrong: number }[]
   streak_days: number
-  recent: { id: string; mode: string; score: number | null; total_score: number | null; submitted_at: string | null }[]
+  recent: {
+    id: string
+    mode: string
+    kind?: AttemptKind
+    paper_title?: string | null
+    score: number | null
+    total_score: number | null
+    normalized_score?: number | null
+    rating?: string | null
+    submitted_at: string | null
+  }[]
+}
+
+export interface AiStatusOut {
+  module: string
+  configured: boolean
+  model: string | null
+  config_name: string | null
+  is_platform: boolean
+  source?: 'module' | 'default' | 'env' | null
+}
+
+export interface AiReviewOut {
+  id: string
+  question_id: string
+  kind: string
+  status: string
+  model: string | null
+  confidence: number | null
+  issues: BankIssue[] | null
+  before: Record<string, unknown> | null
+  after: Record<string, unknown> | null
+  reasons: string[] | null
+  cached?: boolean
+  applied?: boolean
+}
+
+export async function getQuestionBankAiStatus(): Promise<AiStatusOut> {
+  const { data } = await http.get('/question-bank/ai-status')
+  return data
+}
+
+export async function aiValidateQuestion(
+  questionId: string,
+  apply = true,
+): Promise<{ review: AiReviewOut; question: BankQuestion; applied: boolean; cached?: boolean }> {
+  const { data } = await http.post(
+    `/question-bank/questions/${questionId}/ai-validate`,
+    { apply },
+    { timeout: 120000 },
+  )
+  return data
+}
+
+export async function revertAiReview(questionId: string): Promise<BankQuestion> {
+  const { data } = await http.post(`/question-bank/questions/${questionId}/ai-validate/revert`)
+  return data
+}
+
+export async function aiTagBankSet(
+  setId: string,
+  questionIds?: string[],
+): Promise<{ tagged: number; skipped: number; failed: number; items: { question_id: string; knowledge_points: string[] }[] }> {
+  const { data } = await http.post(
+    `/question-bank/sets/${setId}/ai-tag`,
+    { question_ids: questionIds ?? null },
+    { timeout: 180000 },
+  )
+  return data
+}
+
+export async function getAbilityComment(studentId?: string, days = 30): Promise<{ content: string; model: string | null; cached: boolean }> {
+  const { data } = await http.post('/question-bank/ability-comment', {
+    student_id: studentId ?? null,
+    days,
+  })
+  return data
 }
 

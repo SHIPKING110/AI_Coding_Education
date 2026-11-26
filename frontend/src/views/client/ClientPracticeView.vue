@@ -33,6 +33,26 @@ const question = computed<AttemptQuestion | null>(() => questions.value[current.
 const isDone = computed(() => attempt.value?.status === 'evaluated')
 const isExam = computed(() => attempt.value?.mode === 'exam')
 const result = computed(() => attempt.value?.result)
+const normalizedScore = computed(() => result.value?.normalized_score ?? (result.value?.total_score ? Math.round(((result.value.score ?? 0) / result.value.total_score) * 100) : 0))
+const paperKindLabel = computed(() => {
+  const kind = attempt.value?.kind ?? ''
+  const map: Record<string, string> = {
+    quick: '刷题练习',
+    aggregate: '综合练习',
+    marked: '错题/收藏',
+    exam_set: '套卷考试',
+    exam_random: '随机考试',
+    set_practice: '套卷练习',
+  }
+  return map[kind] ?? (isExam.value ? '模拟考试' : '套卷练习')
+})
+const typeLabels: Record<string, string> = {
+  single_choice: '单选题',
+  multiple_choice: '多选题',
+  judgement: '判断题',
+  programming: '编程题',
+  code_fill: '代码填空',
+}
 
 function answerText(value: unknown): string {
   if (Array.isArray(value)) return value.join(',')
@@ -49,10 +69,29 @@ function syncAnswer() {
   if (!q) return
   answer.value = attempt.value?.answers?.[q.id] ?? (q.type === 'multiple_choice' ? [] : null)
   const item = result.value?.items.find((i) => i.id === q.id)
-  selfCorrect.value = item?.is_correct ?? null
-  practiceFeedback.value = isDone.value && item
-    ? { is_correct: item.is_correct, correct_answer: item.correct_answer, analysis: item.analysis, reference_code: item.reference_code }
-    : null
+  selfCorrect.value = attempt.value?.answers?.[`__self__:${q.id}`] === undefined
+    ? item?.is_correct ?? null
+    : Boolean(attempt.value.answers[`__self__:${q.id}`])
+  if (item) {
+    practiceFeedback.value = {
+      is_correct: item.is_correct,
+      correct_answer: item.correct_answer,
+      analysis: item.analysis,
+      reference_code: item.reference_code,
+    }
+    return
+  }
+  const persisted = attempt.value?.question_results?.[q.id]
+  if (!isExam.value && persisted) {
+    practiceFeedback.value = {
+      is_correct: persisted.is_correct ?? null,
+      correct_answer: q.answer,
+      analysis: q.analysis,
+      reference_code: q.reference_code,
+    }
+    return
+  }
+  practiceFeedback.value = null
 }
 
 async function load() {
@@ -73,8 +112,16 @@ async function save() {
   const q = question.value
   if (!a || !q || a.status !== 'in_progress') return
   try {
-    practiceFeedback.value = await saveAttemptAnswer(a.id, q.id, answer.value)
+    const res = await saveAttemptAnswer(a.id, q.id, answer.value)
+    practiceFeedback.value = {
+      is_correct: res.is_correct ?? null,
+      correct_answer: res.correct_answer,
+      analysis: res.analysis,
+      reference_code: res.reference_code,
+    }
     a.answers[q.id] = answer.value
+    if (!a.question_results) a.question_results = {}
+    a.question_results[q.id] = { is_correct: res.is_correct ?? null, score: res.score, max_score: res.max_score }
   } catch {
     toast.error('保存答案失败')
   }
@@ -89,6 +136,8 @@ async function selfEval(value: boolean) {
     selfCorrect.value = value
     if (!a.answers) a.answers = {}
     a.answers[`__self__:${q.id}`] = value
+    if (!a.question_results) a.question_results = {}
+    a.question_results[q.id] = { is_correct: value, score: value ? q.score : 0, max_score: q.score }
   } catch {
     toast.error('保存自评失败')
   }
@@ -155,26 +204,30 @@ onMounted(load)
       <header class="practice-head">
         <button class="back-btn" @click="leave">← 题库</button>
         <div class="head-main">
-          <h1>{{ isExam ? '模拟考试' : '套卷练习' }}</h1>
+          <h1>{{ attempt.paper_title || paperKindLabel }}</h1>
           <span class="progress">{{ current + 1 }} / {{ questions.length }}</span>
         </div>
         <div v-if="isDone && result" class="score-pill">
-          {{ result.score }} / {{ result.total_score }} 分
+          {{ isExam ? `${normalizedScore} 分 · ${result.rating ?? ''}` : `${result.score} / ${result.total_score} 分` }}
         </div>
       </header>
 
       <div v-if="isDone && result" class="result-summary">
         <div class="score-card big">
-          <strong>{{ Math.round((result.score / Math.max(1, result.total_score)) * 100) }}%</strong>
-          <span>得分率</span>
+          <strong>{{ normalizedScore }}</strong>
+          <span>{{ isExam ? '满分 100' : '得分率' }}</span>
         </div>
         <div class="score-card">
           <strong>{{ result.correct_count }}/{{ result.question_count }}</strong>
           <span>答对题数</span>
         </div>
+        <div v-if="isExam && result.rating" class="score-card">
+          <strong :class="result.rating === '达标' ? 'pass-text' : 'fail-text'">{{ result.rating }}</strong>
+          <span>评级</span>
+        </div>
         <div v-for="(st, type) in result.type_stats" :key="type" class="score-card">
-          <strong>{{ st.correct }}/{{ st.total }}</strong>
-          <span>{{ type }}</span>
+          <strong>{{ Math.round((st.correct_rate ?? (st.total ? st.correct / st.total : 0)) * 100) }}%</strong>
+          <span>{{ typeLabels[type] ?? type }}</span>
         </div>
         <button class="btn primary" @click="leave">返回题库</button>
       </div>
@@ -369,6 +422,12 @@ onMounted(load)
 .score-card span {
   font-size: 11px;
   opacity: 0.75;
+}
+.score-card .pass-text {
+  color: #15803d;
+}
+.score-card .fail-text {
+  color: #b91c1c;
 }
 .practice-layout {
   display: grid;

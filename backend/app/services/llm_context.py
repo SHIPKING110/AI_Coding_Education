@@ -37,6 +37,16 @@ def run_with(resolved: "ResolvedLLM | None", fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
+_MODULE_LABELS = {
+    "agent": "Agent 工作台",
+    "report": "报告总结",
+    "evaluation": "学员评估",
+    "assignment": "AI 习题",
+    "feedback": "客户反馈",
+    "parent_service": "家长客服",
+}
+
+
 def require_llm(db=None, user_id=None, module: str = "agent") -> "ResolvedLLM":
     """解析并压入上下文；无可用模型时抛中文 LLMConfigError（前端弹 toast）。"""
     from app.crud import llm_config as crud
@@ -46,9 +56,11 @@ def require_llm(db=None, user_id=None, module: str = "agent") -> "ResolvedLLM":
         raise LLMConfigError("未登录，无法使用 AI")
     resolved = crud.resolve(db, user_id, module)
     if resolved is None:
+        label = _MODULE_LABELS.get(module, module)
         raise LLMConfigError(
-            "你还没有可用的 AI 模型：请到 设置 → 模型配置 添加（接口地址/API Key/模型名），"
-            "可用“检查”按钮验证连通性后再试"
+            f"「{label}」模块还没有可用模型：请到 设置 → 模型配置 添加模型配置（接口地址/API Key/模型名），"
+            f"并在「各模块选用模型」为「{label}」选择模型（不选则用默认配置）；"
+            "可先用「检查」按钮验证连通性"
         )
     return resolved
 

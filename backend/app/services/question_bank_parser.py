@@ -1,4 +1,5 @@
 """DOCX 题库解析：规则优先，保留原文与图片，异常题目进入待审核。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -14,7 +15,9 @@ from docx.oxml.ns import qn
 from app.core.config import get_settings
 
 QUESTION_START_RE = re.compile(r"^\s*(\d{1,3})\s*[.、．]\s+")
-SECTION_RE = re.compile(r"^\s*[一二三四五六七八九十]+\s*[、.．]\s*(.+?)\s*[(（]\s*共\s*(\d+)\s*题[，,]\s*共\s*(\d+)\s*分\s*[)）]")
+SECTION_RE = re.compile(
+    r"^\s*[一二三四五六七八九十]+\s*[、.．]\s*(.+?)\s*[(（]\s*共\s*(\d+)\s*题[，,]\s*共\s*(\d+)\s*分\s*[)）]"
+)
 SECTION_RE_NO_SCORE = re.compile(r"^\s*[一二三四五六七八九十]+\s*[、.．]\s*(.+?)\s*[(（]\s*共\s*(\d+)\s*题")
 OPTION_RE = re.compile(r"^\s*([A-H])\s*[.、．]\s*(.*)$")
 META_RE = re.compile(
@@ -64,6 +67,7 @@ class ParsedPaper:
     questions: list[ParsedQuestion]
     warnings: list[str]
     sections: list[dict[str, Any]]
+    issues: list[dict[str, Any]] = field(default_factory=list)
 
 
 def file_hash(path: Path) -> str:
@@ -222,13 +226,20 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
     prefix = media_url_prefix or f"/uploads/question_bank/{media_dir.name}"
 
     comments: list[str] = []
+    issues: list[dict[str, Any]] = []
+
+    def note(message: str, code: str, question_no: int | None = None) -> None:
+        comments.append(message)
+        issues.append({"code": code, "level": "warning", "message": message, "question_no": question_no})
+
     sections: list[dict[str, Any]] = []
     questions: list[ParsedQuestion] = []
     current_section: str | None = None
     current_type: str | None = None
     current_section_total = 0
     current_section_count = 0
-    expected_no = 1
+    expected_no: int | None = None
+    actual_by_section: dict[str, int] = {}
     image_seq = 0
 
     def save_images(images: list[tuple[str, bytes, str]]) -> list[str]:
@@ -261,7 +272,7 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         first_text = block[0].text
         m = QUESTION_START_RE.match(first_text)
         if m:
-            first_text = first_text[m.end():].strip()
+            first_text = first_text[m.end() :].strip()
         if first_text:
             stem_parts.append(first_text)
         for img in block[0].images:
@@ -384,11 +395,13 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         excerpt = "\n".join(line.text for line in block if line.text).strip()
 
         if qtype in ("single_choice", "multiple_choice") and answer is None:
-            comments.append(f"第 {order_no} 题缺少可识别答案")
+            note(f"第 {order_no} 题缺少可识别答案", "missing_answer", order_no)
         if qtype in ("programming", "code_fill") and not reference_code:
-            comments.append(f"第 {order_no} 题缺少参考代码")
+            note(f"第 {order_no} 题缺少参考代码", "missing_reference_code", order_no)
         if qtype in ("single_choice", "multiple_choice") and not options:
-            comments.append(f"第 {order_no} 题缺少选项")
+            note(f"第 {order_no} 题缺少选项", "missing_options", order_no)
+        if qtype in ("single_choice", "multiple_choice", "judgement", "code_fill") and not analysis:
+            note(f"第 {order_no} 题缺少解析", "missing_analysis", order_no)
 
         questions.append(
             ParsedQuestion(
@@ -406,6 +419,8 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
                 source_excerpt=excerpt[:4000],
             )
         )
+        if current_section:
+            actual_by_section[current_section] = actual_by_section.get(current_section, 0) + 1
 
     block: list[ParsedLine] = []
     current_no = 0
@@ -417,10 +432,18 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
             block = []
             current_section = section_match.group(1).strip()
             current_section_count = int(section_match.group(2))
-            current_section_total = int(section_match.group(3)) if len(section_match.groups()) >= 3 and section_match.group(3) else 0
+            current_section_total = (
+                int(section_match.group(3)) if len(section_match.groups()) >= 3 and section_match.group(3) else 0
+            )
             current_type = _infer_type(current_section)
+            expected_no = None
             sections.append(
-                {"name": current_section, "count": current_section_count, "score": current_section_total, "type": current_type}
+                {
+                    "name": current_section,
+                    "count": current_section_count,
+                    "score": current_section_total,
+                    "type": current_type,
+                }
             )
             continue
         if current_section is None:
@@ -429,13 +452,9 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         if q_match:
             number = int(q_match.group(1))
             if block:
-                if number != expected_no:
-                    comments.append(f"题号从 {expected_no} 跳到 {number}，请核对是否漏题")
+                if expected_no is not None and number != expected_no:
+                    note(f"题号从 {expected_no} 跳到 {number}，请核对是否漏题", "number_gap", number)
                 flush_block(block, current_no)
-                block = [line]
-                current_no = number
-                expected_no = number + 1
-                continue
             block = [line]
             current_no = number
             expected_no = number + 1
@@ -445,10 +464,17 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
     flush_block(block, current_no)
 
     if not questions:
-        comments.append("未识别到题目，请检查文档结构或使用 AI 清洗")
-    declared = sum(s["count"] for s in sections)
-    if declared and len(questions) != declared:
-        comments.append(f"章节声明 {declared} 题，实际解析 {len(questions)} 题")
+        note("未识别到题目，请检查文档结构或使用 AI 清洗", "no_questions")
+    declared_by_section: dict[str, int] = {}
+    for section in sections:
+        declared_by_section[section["name"]] = declared_by_section.get(section["name"], 0) + section["count"]
+    for name, declared_count in declared_by_section.items():
+        parsed_count = actual_by_section.get(name, 0)
+        if parsed_count != declared_count:
+            note(
+                f"章节「{name}」声明 {declared_count} 题，实际解析 {parsed_count} 题",
+                "section_count_mismatch",
+            )
 
     return ParsedPaper(
         name=title,
@@ -460,4 +486,5 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         questions=questions,
         warnings=comments,
         sections=sections,
+        issues=issues,
     )

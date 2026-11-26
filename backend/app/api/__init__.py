@@ -26,6 +26,7 @@ from app.api.routers import (
     prompts,
     question_bank,
     question_bank_aggregate,
+    question_bank_ai,
     question_bank_practice,
     rag_admin,
     reports,
@@ -59,6 +60,7 @@ api_router.include_router(prompts.router)
 api_router.include_router(question_bank.router)
 api_router.include_router(question_bank_practice.router)
 api_router.include_router(question_bank_aggregate.router)
+api_router.include_router(question_bank_ai.router)
 api_router.include_router(reports.router)
 api_router.include_router(assignments.router)
 api_router.include_router(orders.router)

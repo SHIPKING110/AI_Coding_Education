@@ -2,20 +2,19 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import TeacherPracticeDialog from '@/components/TeacherPracticeDialog.vue'
+import AbilityRadar from '@/components/AbilityRadar.vue'
+import ExamStartDialog from '@/components/ExamStartDialog.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import {
-  aggregatePractice,
   aggregateSubjects,
+  getAbilityComment,
   getLearningStats,
   listBankSets,
   listPracticeAttempts,
   startPracticeAttempt,
   type AttemptSummary,
-  type AggregatePracticeIn,
   type BankSet,
   type LearningStatsOut,
-  type PracticeQuestion,
 } from '@/api/questionBank'
 import { useClientStore } from '@/stores/client'
 import { useToastStore } from '@/stores/toast'
@@ -34,8 +33,6 @@ const filterSubject = ref('')
 const filterLevel = ref('')
 const filterMonth = ref('')
 
-const aggregateOpen = ref(false)
-const aggregateQuestions = ref<PracticeQuestion[]>([])
 const aggregateLoading = ref(false)
 const aggregateForm = reactive({ subject: '', level: '', single_choice: 5, multiple_choice: 3, judgement: 5, programming: 1 })
 const aggregateSubjectsList = ref<string[]>([])
@@ -46,6 +43,8 @@ const aggregateSubjectOptions = computed(() =>
 const aggregateLevelOptions = computed(() =>
   aggregateLevels.value.map((value) => ({ id: value, label: value })),
 )
+const abilityComment = ref('')
+const commentLoading = ref(false)
 
 const subjects = computed(() => [...new Set(sets.value.map((s) => s.subject).filter(Boolean))] as string[])
 const levels = computed(() => [...new Set(sets.value.map((s) => s.level).filter(Boolean))] as string[])
@@ -59,15 +58,19 @@ const filteredSets = computed(() =>
   ),
 )
 const inProgress = computed(() => attempts.value.find((a) => a.status === 'in_progress'))
-
 const examOpen = ref(false)
-const examForm = reactive({
-  subject: '',
-  level: '',
-  single_choice: 10,
-  judgement: 5,
-  programming: 1,
-})
+
+function kindLabel(kind?: string): string {
+  const map: Record<string, string> = {
+    quick: '刷题练习',
+    aggregate: '综合练习',
+    marked: '错题/收藏',
+    exam_set: '套卷考试',
+    exam_random: '随机考试',
+    set_practice: '套卷练习',
+  }
+  return kind ? map[kind] ?? kind : ''
+}
 
 function pct(v: number): string {
   return `${Math.round(v * 100)}%`
@@ -87,7 +90,7 @@ async function load() {
     const [setData, statData, attemptData] = await Promise.all([
       listBankSets(),
       getLearningStats(student.value.id).catch(() => null),
-      listPracticeAttempts(student.value.id, { limit: 10 }).catch(() => ({ items: [], total: 0 })),
+      listPracticeAttempts(student.value.id, { limit: 20 }).catch(() => ({ items: [], total: 0 })),
     ])
     sets.value = setData.items
     stats.value = statData
@@ -117,22 +120,29 @@ async function startPractice(s: BankSet) {
   }
 }
 
-async function startMarkedPractice(kind: 'favorite' | 'wrong') {
-  if (aggregateLoading.value) return
-  aggregateLoading.value = true
+async function beginAttempt(payload: Parameters<typeof startPracticeAttempt>[0]) {
+  if (!student.value || starting.value) return
+  starting.value = true
   try {
-    const qs = await aggregatePractice({ mark_kind: kind })
-    if (!qs.length) {
-      toast.error(kind === 'wrong' ? '错题本还是空的' : '还没有收藏题目')
-      return
-    }
-    aggregateQuestions.value = qs
-    aggregateOpen.value = true
+    const attempt = await startPracticeAttempt({ student_id: student.value.id, ...payload })
+    router.push({ name: 'client-practice', params: { id: attempt.id } })
   } catch (e: unknown) {
-    toast.error((e as Error).message || '读取标记题目失败')
+    const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+    if (detail && typeof detail === 'object' && 'gaps' in detail) {
+      const gaps = (detail as { gaps: Record<string, string> }).gaps
+      toast.error(Object.values(gaps).join('；') || '题库库存不足')
+    } else if (typeof detail === 'string') {
+      toast.error(detail)
+    } else {
+      toast.error((e as Error).message || '开始练习失败')
+    }
   } finally {
-    aggregateLoading.value = false
+    starting.value = false
   }
+}
+
+async function startMarkedPractice(kind: 'favorite' | 'wrong') {
+  await beginAttempt({ mode: 'practice', kind: 'marked', mark_kind: kind })
 }
 
 async function loadAggregateFilters() {
@@ -149,7 +159,9 @@ async function startAggregatePractice() {
   if (aggregateLoading.value) return
   aggregateLoading.value = true
   try {
-    const payload: AggregatePracticeIn = {
+    await beginAttempt({
+      mode: 'practice',
+      kind: 'aggregate',
       subject: aggregateForm.subject || undefined,
       level: aggregateForm.level || undefined,
       rules: {
@@ -158,58 +170,45 @@ async function startAggregatePractice() {
         judgement: aggregateForm.judgement,
         programming: aggregateForm.programming,
       },
-      exclude_ids: [],
-    }
-    const qs = await aggregatePractice(payload)
-    aggregateQuestions.value = qs
-    aggregateOpen.value = true
-  } catch (e: unknown) {
-    const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
-    if (detail && typeof detail === 'object' && 'gaps' in detail) {
-      const gaps = (detail as { gaps: Record<string, string> }).gaps
-      toast.error(Object.values(gaps).join('；') || '题库库存不足')
-    } else {
-      toast.error((e as Error).message || '开始综合练习失败')
-    }
+    })
   } finally {
     aggregateLoading.value = false
   }
 }
 
 function openExam() {
-  examForm.subject = filterSubject.value || subjects.value[0] || ''
-  examForm.level = filterLevel.value || levels.value[0] || ''
   examOpen.value = true
 }
 
-async function startExam() {
-  if (!student.value || starting.value) return
-  starting.value = true
+async function startExam(payload: {
+  kind: 'exam_set' | 'exam_random'
+  set_id?: string
+  rules?: Record<string, number>
+  subject?: string
+  level?: string
+}) {
+  examOpen.value = false
+  await beginAttempt({
+    mode: 'exam',
+    kind: payload.kind,
+    set_id: payload.set_id,
+    rules: payload.rules,
+    subject: payload.subject,
+    level: payload.level,
+  })
+}
+
+async function loadAbilityComment() {
+  if (!student.value || commentLoading.value) return
+  commentLoading.value = true
   try {
-    const rules: Record<string, number> = {
-      single_choice: Number(examForm.single_choice) || 0,
-      judgement: Number(examForm.judgement) || 0,
-      programming: Number(examForm.programming) || 0,
-    }
-    const attempt = await startPracticeAttempt({
-      student_id: student.value.id,
-      mode: 'exam',
-      rules,
-      subject: examForm.subject || undefined,
-      level: examForm.level || undefined,
-    })
-    examOpen.value = false
-    router.push({ name: 'client-practice', params: { id: attempt.id } })
+    const res = await getAbilityComment(student.value.id)
+    abilityComment.value = res.content
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
-    if (detail && typeof detail === 'object' && 'gaps' in detail) {
-      const gaps = (detail as { gaps: Record<string, string> }).gaps
-      toast.error(Object.values(gaps).join('；') || '题库库存不足')
-    } else {
-      toast.error((e as Error).message || '开始模考失败')
-    }
+    toast.error(typeof detail === 'string' ? detail : '生成学习建议失败，请稍后再试')
   } finally {
-    starting.value = false
+    commentLoading.value = false
   }
 }
 
@@ -267,6 +266,35 @@ watch(() => store.activeStudentId, load)
       <h3>最需要复习</h3>
       <div class="weak-list">
         <span v-for="w in stats.weak_points" :key="w.name">{{ w.name }} · 错 {{ w.wrong }} 次</span>
+      </div>
+    </section>
+
+    <section v-if="stats" class="ability-card">
+      <div class="ability-head">
+        <div>
+          <h3>知识点能力雷达</h3>
+          <p>按练习/考试中答对率统计，越靠外掌握越好。</p>
+        </div>
+        <button class="btn" :disabled="commentLoading" @click="loadAbilityComment">
+          {{ commentLoading ? '生成中…' : 'AI 学习建议' }}
+        </button>
+      </div>
+      <AbilityRadar :items="stats.radar ?? []" />
+      <div v-if="stats.knowledge_stats?.length" class="kp-strip">
+        <span
+          v-for="kp in stats.knowledge_stats.slice(0, 12)"
+          :key="kp.name"
+          class="kp-chip"
+          :class="{ low: kp.total >= 3 && kp.correct_rate < 0.6, thin: kp.total < 3 }"
+        >
+          {{ kp.name }} {{ pct(kp.correct_rate) }}
+          <em>答对 {{ kp.correct }}/{{ kp.total }}{{ kp.total < 3 ? ' · 样本少' : '' }}</em>
+        </span>
+      </div>
+      <p class="kp-note">样本少于 3 题的知识点仅作参考，多练几题后掌握度更准确。</p>
+      <div v-if="abilityComment" class="ai-comment">
+        <strong>AI 学习建议</strong>
+        <p>{{ abilityComment }}</p>
       </div>
     </section>
 
@@ -343,42 +371,36 @@ watch(() => store.activeStudentId, load)
     </section>
 
     <section v-if="attempts.length" class="history-section">
-      <div class="section-head"><h2>最近练习</h2></div>
+      <div class="section-head">
+        <h2>做题记录</h2>
+        <span class="history-total">最近 {{ attempts.length }} 条</span>
+      </div>
       <div class="history-list">
         <button v-for="a in attempts" :key="a.id" class="history-row" @click="openAttempt(a)">
-          <span class="h-mode">{{ a.mode === 'exam' ? '模拟考试' : '套卷练习' }}</span>
+          <span class="h-mode">{{ kindLabel(a.kind) || (a.mode === 'exam' ? '模拟考试' : '套卷练习') }}</span>
           <span class="h-date">{{ fmtDate(a.started_at) }}</span>
           <span class="h-score" :class="{ done: a.status === 'evaluated' }">
-            {{ a.status === 'evaluated' ? `${a.score ?? 0}/${a.total_score ?? 0}` : '进行中' }}
+            <template v-if="a.status === 'evaluated' && a.mode === 'exam'">
+              {{ a.normalized_score ?? 0 }} 分 · {{ a.rating }}
+            </template>
+            <template v-else-if="a.status === 'evaluated'">
+              正确率 {{ pct(a.correct_rate ?? 0) }}
+            </template>
+            <template v-else>进行中 · 继续</template>
           </span>
         </button>
       </div>
     </section>
 
-    <div v-if="examOpen" class="modal-mask" @click.self="examOpen = false">
-      <div class="exam-modal">
-        <h3>开始模拟考试</h3>
-        <p class="modal-sub">按题型数量从已发布题库随机抽题。交卷后统一公布分数、答案与解析。</p>
-        <div class="exam-grid">
-          <label>科目<input v-model="examForm.subject" placeholder="留空不限" /></label>
-          <label>等级<input v-model="examForm.level" placeholder="留空不限" /></label>
-          <label>单选题<input v-model.number="examForm.single_choice" type="number" min="0" /></label>
-          <label>判断题<input v-model.number="examForm.judgement" type="number" min="0" /></label>
-          <label>编程题<input v-model.number="examForm.programming" type="number" min="0" /></label>
-        </div>
-        <div class="modal-actions">
-          <button class="btn" @click="examOpen = false">取消</button>
-          <button class="btn primary" :disabled="starting" @click="startExam">开始考试</button>
-        </div>
-      </div>
-    </div>
-    <TeacherPracticeDialog
-      v-if="aggregateOpen"
-      :questions="aggregateQuestions"
-      title="综合练习"
-      eyebrow="客户端综合练习"
-      :meta="`${aggregateForm.subject || '不限科目'} · ${aggregateForm.level || '不限等级'}`"
-      @close="aggregateOpen = false"
+    <ExamStartDialog
+      v-if="examOpen"
+      :sets="sets"
+      :subjects="subjects"
+      :levels="levels"
+      :default-subject="filterSubject || ''"
+      :default-level="filterLevel || ''"
+      @close="examOpen = false"
+      @start="startExam"
     />
   </div>
 </template>
@@ -496,6 +518,86 @@ watch(() => store.activeStudentId, load)
   border-radius: 999px;
   background: #f1e7d2;
   color: #7c5a1e;
+  font-size: 11.5px;
+}
+.ability-card {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-xs);
+}
+.ability-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ability-head h3 {
+  font-size: 14px;
+  color: var(--ink);
+}
+.ability-head p {
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+.ai-comment {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+}
+.ai-comment strong {
+  color: #0f766e;
+  font-size: 12.5px;
+}
+.ai-comment p {
+  margin-top: 5px;
+  color: #115e59;
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.kp-strip {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.kp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11.5px;
+}
+.kp-chip.low {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+.kp-chip.thin {
+  color: #64748b;
+}
+.kp-chip em {
+  margin-left: 4px;
+  font-style: normal;
+  font-size: 10.5px;
+  color: #94a3b8;
+}
+.kp-note {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.history-total {
+  color: var(--ink-3);
   font-size: 11.5px;
 }
 .sets-section,

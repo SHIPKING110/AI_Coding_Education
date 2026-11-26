@@ -23,6 +23,8 @@ def _build_docx(path: Path, *, with_image: bool = False) -> Path:
     import docx
 
     document = docx.Document()
+    # 核心属性写入文件名，保证每次生成的内容哈希不同，避免测试间命中上传去重
+    document.core_properties.title = path.stem
     document.add_paragraph("青少年软件编程（Python）等级考试试卷（二级）")
     document.add_paragraph("分数：100  题数：3")
     document.add_paragraph("一、单选题(共2题，共4分)")
@@ -306,6 +308,68 @@ def test_practice_exam_and_learning_stats(client, admin_token, db_session, tmp_p
     assert "single_choice" in gaps.json()["detail"]["gaps"]
 
 
+def test_clear_answer_and_attempt_access(client, admin_token, db_session, tmp_path):
+    from app.models.enrollment import Student
+
+    set_id = _publish_sample(client, admin_token, tmp_path)
+    parent_token = _register(client, "parent", "qb-clear-parent")
+    parent_id = client.get("/api/auth/me", headers=parent_token).json()["id"]
+    student = Student(name="清答学员", parent_user_id=uuid.UUID(parent_id), lesson_balance=0)
+    db_session.add(student)
+    db_session.commit()
+
+    started = client.post(
+        "/api/question-bank/attempts",
+        headers=parent_token,
+        json={"student_id": str(student.id), "mode": "practice", "set_id": set_id},
+    )
+    assert started.status_code == 201, started.text
+    attempt = started.json()
+    qid = attempt["questions"][0]["id"]
+
+    wrong = client.post(
+        f"/api/question-bank/attempts/{attempt['id']}/answers",
+        headers=parent_token,
+        json={"question_id": qid, "answer": 999},
+    )
+    assert wrong.status_code == 200, wrong.text
+    assert wrong.json()["is_correct"] is False
+
+    cleared = client.post(
+        f"/api/question-bank/attempts/{attempt['id']}/answers",
+        headers=parent_token,
+        json={"question_id": qid, "answer": None},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["cleared"] is True
+
+    refetched = client.get(f"/api/question-bank/attempts/{attempt['id']}", headers=parent_token).json()
+    assert qid not in refetched["answers"]
+    assert qid not in refetched["question_results"]
+
+    wrong_book = client.post(
+        "/api/question-bank/attempts",
+        headers=parent_token,
+        json={"student_id": str(student.id), "mode": "practice", "kind": "marked", "mark_kind": "wrong"},
+    )
+    assert wrong_book.status_code == 409
+
+def test_teacher_can_read_own_attempt(client, admin_token, tmp_path):
+    set_id = _publish_sample(client, admin_token, tmp_path)
+    teacher_token = _register(client, "teacher", "qb-own-attempt")
+
+    started = client.post(
+        "/api/question-bank/attempts",
+        headers=teacher_token,
+        json={"mode": "practice", "set_id": set_id},
+    )
+    assert started.status_code == 201, started.text
+    attempt_id = started.json()["id"]
+
+    refetch = client.get(f"/api/question-bank/attempts/{attempt_id}", headers=teacher_token)
+    assert refetch.status_code == 200, refetch.text
+    assert refetch.json()["id"] == attempt_id
+
 def test_blueprints_and_to_assignment(client, admin_token, tmp_path):
     set_id = _publish_sample(client, admin_token, tmp_path)
     teacher_token = _register(client, "teacher", "qb-bp-teacher")
@@ -329,6 +393,21 @@ def test_blueprints_and_to_assignment(client, admin_token, tmp_path):
     assert composed.status_code == 200, composed.text
     assert len(composed.json()["questions"]) == 2
     assert "answer" in composed.json()["questions"][0]
+
+    # 题库组作业需 question_bank_assignment 权限：未授权先 403，管理员授权后 201
+    denied = client.post(
+        f"/api/question-bank/sets/{set_id}/to-assignment",
+        headers=teacher_token,
+        json={"title": "题库生成作业"},
+    )
+    assert denied.status_code == 403, denied.text
+    teacher_id = client.get("/api/auth/me", headers=teacher_token).json()["id"]
+    granted = client.put(
+        f"/api/permissions/teachers/{teacher_id}",
+        headers=admin_token,
+        json={"question_bank_assignment": True},
+    )
+    assert granted.status_code == 200, granted.text
 
     assignment = client.post(
         f"/api/question-bank/sets/{set_id}/to-assignment",

@@ -104,19 +104,61 @@
               <label>等级<input v-model="selected.level" :disabled="!canUpload" @blur="saveMeta" /></label>
               <label>年月<input v-model="selected.exam_month" type="month" :disabled="!canUpload" @blur="saveMeta" /></label>
             </div>
-            <div v-if="selected.import_meta?.warnings?.length" class="warn-box">
-              <strong>解析提示</strong>
-              <ul>
+            <div v-if="selected.import_meta?.warnings?.length || validationIssues.length || aiStatus" class="warn-box">
+              <div class="warn-head">
+                <strong>解析与质检提示</strong>
+                <span v-if="validationIssues.length" class="qc-count">
+                  {{ validationErrorCount }} 处错误 · {{ validationWarnCount }} 处提示
+                </span>
+                <span v-if="aiStatus" class="ai-status" :class="{ ok: aiStatus.configured }">
+                  {{ aiStatus.configured
+                    ? `AI 习题模型：${aiStatus.model}（${aiSourceLabel}）`
+                    : 'AI 习题模型未配置：请到 设置 → 模型配置 为「AI 习题」选模型' }}
+                </span>
+              </div>
+              <ul v-if="validationIssues.length" class="qc-list">
+                <li
+                  v-for="(issue, i) in validationIssues"
+                  :key="`${issue.code}-${issue.question_no}-${i}`"
+                  class="qc-item"
+                  :class="issue.level"
+                  @click="jumpToQuestionNo(issue.question_no)"
+                >
+                  <span class="qc-badge" :class="issue.level">{{ issue.level === 'error' ? '错误' : '提示' }}</span>
+                  {{ issue.message }}
+                </li>
+              </ul>
+              <ul v-else-if="selected.import_meta?.warnings?.length">
                 <li v-for="w in selected.import_meta.warnings" :key="w">{{ w }}</li>
               </ul>
+              <div v-if="canReview" class="warn-actions">
+                <button
+                  v-if="flaggedQuestionIds.length"
+                  class="btn ghost"
+                  :disabled="aiValidating"
+                  @click="onValidateFlagged"
+                >
+                  {{ aiValidating ? `校准中 ${aiProgress.done}/${aiProgress.total}` : `AI 校准疑点题（${flaggedQuestionIds.length}）` }}
+                </button>
+                <button class="btn ghost" :disabled="aiValidating" @click="onValidateSet">
+                  {{ aiValidating ? `校准中 ${aiProgress.done}/${aiProgress.total}` : 'AI 校准本卷' }}
+                </button>
+                <button class="btn ghost" :disabled="aiTagging || !aiTaggableCount" @click="onTagSet">
+                  {{ aiTagging ? `打标中 ${aiProgress.done}/${aiProgress.total}` : `AI 知识点打标（${aiTaggableCount}）` }}
+                </button>
+              </div>
             </div>
             <div class="paper-actions">
               <button class="btn practice-entry" :disabled="!selected.questions?.length" @click="openPractice">
                 刷题练习
               </button>
-              <button class="btn practice-entry" @click="aggregateOpen = true">
+              <button class="btn practice-entry" :disabled="!selected.questions?.length" @click="aggregateOpen = true">
                 综合练习
               </button>
+              <button class="btn practice-entry" :disabled="!selected.questions?.length" @click="openExam">
+                考试模拟
+              </button>
+              <button class="btn practice-entry" @click="openRecords">做题记录</button>
               <button class="btn practice-entry" @click="startMarkedPractice('wrong')">错题本</button>
               <button class="btn practice-entry" @click="startMarkedPractice('favorite')">我的收藏</button>
               <button v-if="canReview" class="btn" :disabled="selected.status === 'archived'" @click="onReviewAll">全部通过审核</button>
@@ -135,7 +177,7 @@
                   v-for="(q, idx) in selected.questions"
                   :key="q.id"
                   class="q-no"
-                  :class="[q.status, { active: q.id === activeQuestionId }]"
+                  :class="[q.status, { active: q.id === activeQuestionId, flagged: flaggedOrderNos.has(q.order_no) }]"
                   :title="`${QUESTION_TYPE_LABELS[q.type]} · ${statusLabel[q.status]}`"
                   :aria-current="q.id === activeQuestionId ? 'true' : undefined"
                   @click="activeQuestionId = q.id"
@@ -156,6 +198,12 @@
                 <div v-if="canReview" class="q-actions">
                   <button class="btn ghost" :disabled="aiCleaning" @click="onAiClean">
                     {{ aiCleaning ? '清洗中…' : 'AI 清洗' }}
+                  </button>
+                  <button class="btn ghost" :disabled="aiValidating" @click="onValidateQuestion">
+                    {{ aiValidating ? '校准中…' : 'AI 校准' }}
+                  </button>
+                  <button v-if="activeQuestion.review_note?.startsWith('AI 校准')" class="btn ghost" @click="onRevertAi">
+                    撤销校准
                   </button>
                   <button class="btn" :disabled="saving" @click="saveQuestion(false)">保存</button>
                   <button class="btn primary" :disabled="saving" @click="saveQuestion(true)">保存并通过</button>
@@ -344,19 +392,74 @@
     </div>
 
     <TeacherPracticeDialog
-      v-if="practiceOpen && selected"
-      :bank-set="selected"
+      v-if="practiceOpen && practiceAttempt"
+      :attempt="practiceAttempt"
+      :mode="practiceMode"
       :start-index="practiceStartIndex"
-      @close="practiceOpen = false"
+      @close="onPracticeClose"
+      @retry="onPracticeRetry"
     />
-    <TeacherPracticeDialog
-      v-if="aggregateQuestions.length"
-      :questions="aggregateQuestions"
-      title="综合练习"
-      eyebrow="教师综合练习"
-      :meta="`${aggregateForm.subject || '不限科目'} · ${aggregateForm.level || '不限等级'}`"
-      @close="aggregateQuestions = []"
+
+    <ExamStartDialog
+      v-if="examStartOpen"
+      :sets="sets"
+      :subjects="subjects"
+      :levels="levels"
+      :default-subject="filter.subject || selected?.subject || ''"
+      :default-level="filter.level || selected?.level || ''"
+      @close="examStartOpen = false"
+      @start="startExam"
     />
+
+    <div v-if="recordsOpen" class="modal-mask" @click.self="recordsOpen = false">
+      <div class="upload-modal records-modal">
+        <div class="records-head">
+          <div>
+            <h3>做题记录</h3>
+            <p class="modal-sub">刷题、综合练习、错题本、套卷/随机考试都会自动记录，可继续未完成的练习或回看解析。</p>
+          </div>
+          <div class="records-filters">
+            <select v-model="recordsKind" class="fld" @change="loadRecords">
+              <option value="">全部模式</option>
+              <option value="quick">刷题练习</option>
+              <option value="aggregate">综合练习</option>
+              <option value="marked">错题/收藏</option>
+              <option value="exam_set">套卷考试</option>
+              <option value="exam_random">随机考试</option>
+            </select>
+            <select v-model="recordsStatus" class="fld" @change="loadRecords">
+              <option value="">全部状态</option>
+              <option value="in_progress">进行中</option>
+              <option value="evaluated">已完成</option>
+            </select>
+          </div>
+        </div>
+        <div v-if="recordsLoading" class="pane-empty">加载中…</div>
+        <div v-else-if="records.length === 0" class="pane-empty">还没有做题记录，先开始一次练习吧。</div>
+        <div v-else class="records-list">
+          <button v-for="item in records" :key="item.id" class="record-row" @click="openRecord(item)">
+            <div class="record-main">
+              <strong>{{ item.paper_title || kindLabel(item.kind) || '练习' }}</strong>
+              <span>{{ kindLabel(item.kind) }} · {{ formatRecordTime(item.started_at) }}</span>
+            </div>
+            <div class="record-meta">
+              <span v-if="item.mode === 'exam' && item.status === 'evaluated'">
+                {{ item.normalized_score ?? 0 }} 分
+                <em :class="item.rating === '达标' ? 'pass' : 'fail'">{{ item.rating }}</em>
+              </span>
+              <span v-else-if="item.status === 'evaluated'">
+                正确率 {{ Math.round((item.correct_rate ?? 0) * 100) }}%
+              </span>
+              <span v-else class="pending">进行中 · 继续</span>
+            </div>
+          </button>
+        </div>
+        <p v-if="recordsTotal > records.length" class="records-foot">仅展示最近 {{ records.length }} 条，共 {{ recordsTotal }} 条</p>
+        <div class="modal-actions">
+          <button class="btn" @click="recordsOpen = false">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -365,30 +468,41 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AssignmentsTabs from '@/components/AssignmentsTabs.vue'
+import ExamStartDialog from '@/components/ExamStartDialog.vue'
 import PageHead from '@/components/PageHead.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import TeacherPracticeDialog from '@/components/TeacherPracticeDialog.vue'
 import { QUESTION_TYPE_LABELS } from '@/api/assignment'
 import {
   aiCleanQuestion,
-  aggregatePractice,
+  aiTagBankSet,
+  aiValidateQuestion,
   archiveBankSet,
   bankSetToAssignment,
   createBankBlueprint,
   deleteBankBlueprint,
   getBankSet,
+  getBankSetValidation,
   getBankStats,
+  getPracticeAttempt,
+  getQuestionBankAiStatus,
   importBankDocx,
   listBankBlueprints,
   listBankSets,
+  listPracticeAttempts,
   publishBankSet,
   reviewAllQuestions,
+  revertAiReview,
+  startPracticeAttempt,
   updateBankQuestion,
   updateBankSet,
+  type AiStatusOut,
+  type AttemptSummary,
   type BankBlueprint,
+  type BankIssue,
   type BankQuestion,
   type BankSet,
-  type PracticeQuestion,
+  type PracticeAttemptOut,
 } from '@/api/questionBank'
 import { answerFromText, answerToText } from '@/utils/questionBank'
 import { useAuthStore } from '@/stores/auth'
@@ -447,16 +561,185 @@ const activeQuestionIndex = computed(() => selected.value?.questions?.findIndex(
 const activeQuestion = computed(() => selected.value?.questions?.find((q) => q.id === activeQuestionId.value) ?? null)
 const practiceOpen = ref(false)
 const practiceStartIndex = ref(0)
+const practiceAttempt = ref<PracticeAttemptOut | null>(null)
+const practiceMode = ref<'practice' | 'exam'>('practice')
+const practiceLoading = ref(false)
+const lastSession = ref<{
+  kind: 'quick' | 'aggregate' | 'marked' | 'exam_set' | 'exam_random'
+  set_id?: string
+  rules?: Record<string, number>
+  subject?: string
+  level?: string
+  mark_kind?: 'favorite' | 'wrong'
+} | null>(null)
 const aggregateOpen = ref(false)
 const aggregateLoading = ref(false)
-const aggregateQuestions = ref<PracticeQuestion[]>([])
 const aggregateForm = reactive({ subject: '', level: '', single_choice: 5, multiple_choice: 3, judgement: 5, programming: 1 })
+const examStartOpen = ref(false)
 const subjectOptions = computed(() => subjects.value.map((value) => ({ id: value, label: value })))
 const levelOptions = computed(() => levels.value.map((value) => ({ id: value, label: value })))
 
+const recordsOpen = ref(false)
+const recordsLoading = ref(false)
+const records = ref<AttemptSummary[]>([])
+const recordsTotal = ref(0)
+const recordsKind = ref('')
+const recordsStatus = ref('')
+
+const aiStatus = ref<AiStatusOut | null>(null)
+const aiSourceLabel = computed(() => {
+  const map: Record<string, string> = { module: '模块映射', default: '默认配置', env: '系统环境变量' }
+  const source = aiStatus.value?.source ?? ''
+  return map[source] ?? '已接通'
+})
+const validationIssues = ref<BankIssue[]>([])
+const validationErrorCount = computed(() => validationIssues.value.filter((i) => i.level === 'error').length)
+const validationWarnCount = computed(() => validationIssues.value.filter((i) => i.level !== 'error').length)
+const flaggedOrderNos = computed(
+  () => new Set(validationIssues.value.map((i) => i.question_no).filter((n): n is number => typeof n === 'number')),
+)
+const flaggedQuestionIds = computed(() =>
+  (selected.value?.questions ?? []).filter((q) => flaggedOrderNos.value.has(q.order_no)).map((q) => q.id),
+)
+const aiValidating = ref(false)
+const aiTagging = ref(false)
+const aiProgress = reactive({ done: 0, total: 0 })
+const aiTaggableCount = computed(() => (selected.value?.questions ?? []).filter((q) => !(q.knowledge_points?.length)).length)
+
+async function openSession(
+  payload: {
+    kind: 'quick' | 'aggregate' | 'marked' | 'exam_set' | 'exam_random'
+    set_id?: string
+    rules?: Record<string, number>
+    subject?: string
+    level?: string
+    mark_kind?: 'favorite' | 'wrong'
+  },
+  mode: 'practice' | 'exam',
+) {
+  if (practiceLoading.value) return
+  practiceLoading.value = true
+  try {
+    const attempt = await startPracticeAttempt({ ...payload, mode })
+    practiceAttempt.value = attempt
+    practiceMode.value = mode
+    practiceStartIndex.value = 0
+    lastSession.value = payload
+    practiceOpen.value = true
+    aggregateOpen.value = false
+    examStartOpen.value = false
+  } catch (e: unknown) {
+    toast.error(actionErrorText(e, mode === 'exam' ? '开始考试失败' : '开始练习失败'))
+  } finally {
+    practiceLoading.value = false
+  }
+}
+
 function openPractice() {
+  if (!selected.value) return
   practiceStartIndex.value = Math.max(0, activeQuestionIndex.value)
-  practiceOpen.value = true
+  void openSession({ kind: 'quick', set_id: selected.value.id }, 'practice')
+}
+
+async function startMarkedPractice(kind: 'favorite' | 'wrong') {
+  await openSession({ kind: 'marked', mark_kind: kind }, 'practice')
+}
+
+async function startAggregatePractice() {
+  await openSession(
+    {
+      kind: 'aggregate',
+      subject: aggregateForm.subject || undefined,
+      level: aggregateForm.level || undefined,
+      rules: {
+        single_choice: aggregateForm.single_choice,
+        multiple_choice: aggregateForm.multiple_choice,
+        judgement: aggregateForm.judgement,
+        programming: aggregateForm.programming,
+      },
+    },
+    'practice',
+  )
+}
+
+function openExam() {
+  examStartOpen.value = true
+}
+
+async function startExam(payload: {
+  kind: 'exam_set' | 'exam_random'
+  set_id?: string
+  rules?: Record<string, number>
+  subject?: string
+  level?: string
+}) {
+  await openSession(payload, 'exam')
+}
+
+async function onPracticeClose() {
+  practiceOpen.value = false
+  practiceAttempt.value = null
+  if (recordsOpen.value) await loadRecords()
+}
+
+async function onPracticeRetry() {
+  const config = lastSession.value
+  practiceOpen.value = false
+  practiceAttempt.value = null
+  if (!config) return
+  await openSession(config, config.kind.startsWith('exam') ? 'exam' : 'practice')
+}
+
+async function loadRecords() {
+  recordsLoading.value = true
+  try {
+    const data = await listPracticeAttempts(undefined, {
+      limit: 40,
+      ...(recordsKind.value ? { kind: recordsKind.value } : {}),
+      ...(recordsStatus.value ? { status: recordsStatus.value } : {}),
+    })
+    records.value = data.items
+    recordsTotal.value = data.total
+  } catch {
+    records.value = []
+    recordsTotal.value = 0
+  } finally {
+    recordsLoading.value = false
+  }
+}
+
+function openRecords() {
+  recordsOpen.value = true
+  void loadRecords()
+}
+
+async function openRecord(item: AttemptSummary) {
+  try {
+    const attempt = await getPracticeAttempt(item.id)
+    practiceAttempt.value = attempt
+    practiceMode.value = attempt.mode
+    practiceStartIndex.value = 0
+    const rawKind = attempt.kind ?? (attempt.mode === 'exam' ? 'exam_random' : 'quick')
+    const kind = rawKind === 'set_practice' ? 'quick' : rawKind
+    const meta = (attempt.paper_meta ?? {}) as {
+      rules?: Record<string, number>
+      subject?: string
+      level?: string
+      mark_kind?: 'favorite' | 'wrong'
+    }
+    lastSession.value = {
+      kind,
+      set_id: attempt.bank_set_id ?? undefined,
+      rules: meta.rules,
+      subject: meta.subject,
+      level: meta.level,
+      mark_kind: meta.mark_kind,
+    }
+    practiceOpen.value = true
+    recordsOpen.value = false
+  } catch {
+    toast.error('读取做题记录失败')
+  }
 }
 
 function actionErrorText(e: unknown, fallback: string): string {
@@ -470,41 +753,131 @@ function actionErrorText(e: unknown, fallback: string): string {
   return (e as Error).message || fallback
 }
 
-async function startMarkedPractice(kind: 'favorite' | 'wrong') {
-  aggregateLoading.value = true
+function kindLabel(kind?: string): string {
+  const map: Record<string, string> = {
+    quick: '刷题练习',
+    aggregate: '综合练习',
+    marked: '错题/收藏',
+    exam_set: '套卷考试',
+    exam_random: '随机考试',
+    set_practice: '套卷练习',
+  }
+  return kind ? map[kind] ?? kind : ''
+}
+
+function formatRecordTime(iso: string): string {
+  const d = new Date(iso)
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+async function loadAiStatus() {
   try {
-    const qs = await aggregatePractice({ mark_kind: kind })
-    if (!qs.length) {
-      toast.error(kind === 'wrong' ? '错题本还是空的' : '还没有收藏题目')
-      return
-    }
-    aggregateQuestions.value = qs
-    aggregateOpen.value = false
-  } catch (e: unknown) {
-    toast.error(actionErrorText(e, '读取标记题目失败'))
-  } finally {
-    aggregateLoading.value = false
+    aiStatus.value = await getQuestionBankAiStatus()
+  } catch {
+    aiStatus.value = null
   }
 }
 
-async function startAggregatePractice() {
-  aggregateLoading.value = true
+async function onValidateQuestion() {
+  const q = activeQuestion.value
+  if (!q) return
+  aiValidating.value = true
   try {
-    aggregateQuestions.value = await aggregatePractice({
-      subject: aggregateForm.subject || undefined,
-      level: aggregateForm.level || undefined,
-      rules: {
-        single_choice: aggregateForm.single_choice,
-        multiple_choice: aggregateForm.multiple_choice,
-        judgement: aggregateForm.judgement,
-        programming: aggregateForm.programming,
-      },
-    })
-    aggregateOpen.value = false
+    const res = await aiValidateQuestion(q.id, true)
+    Object.assign(q, res.question)
+    loadEdit(q)
+    toast.success(res.applied ? 'AI 已校准并应用修复，请复核' : 'AI 已生成校准建议，请复核')
   } catch (e: unknown) {
-    toast.error(actionErrorText(e, '综合练习抽题失败，请检查已发布题目库存'))
+    toast.error(actionErrorText(e, 'AI 校准失败'))
   } finally {
-    aggregateLoading.value = false
+    aiValidating.value = false
+  }
+}
+
+async function onValidateSet() {
+  if (!selected.value) return
+  await runValidate(selected.value.questions ?? [])
+}
+
+async function onValidateFlagged() {
+  if (!selected.value) return
+  const flagged = new Set(flaggedQuestionIds.value)
+  const targets = (selected.value.questions ?? []).filter((q) => flagged.has(q.id))
+  if (!targets.length) {
+    toast.success('没有需要校准的疑点题')
+    return
+  }
+  await runValidate(targets)
+}
+
+async function runValidate(targets: BankQuestion[]) {
+  if (!targets.length) return
+  aiValidating.value = true
+  aiProgress.done = 0
+  aiProgress.total = targets.length
+  let applied = 0
+  try {
+    for (const q of targets) {
+      try {
+        const res = await aiValidateQuestion(q.id, true)
+        Object.assign(q, res.question)
+        if (res.applied) applied += 1
+      } catch (e: unknown) {
+        const msg = actionErrorText(e, '')
+        if (msg.includes('未配置') || msg.includes('未选择模型') || msg.includes('还没有可用模型')) throw e
+      } finally {
+        aiProgress.done += 1
+      }
+    }
+    toast.success(`AI 校准完成：${applied} 题已自动修复，其余请人工复核`)
+    await refreshSetQuietly()
+  } catch (e: unknown) {
+    toast.error(actionErrorText(e, 'AI 校准失败，请检查模型配置'))
+  } finally {
+    aiValidating.value = false
+    if (selected.value) void loadValidation(selected.value.id)
+  }
+}
+
+async function onRevertAi() {
+  const q = activeQuestion.value
+  if (!q) return
+  try {
+    const updated = await revertAiReview(q.id)
+    Object.assign(q, updated)
+    loadEdit(q)
+    toast.success('已撤销 AI 校准')
+  } catch (e: unknown) {
+    toast.error(actionErrorText(e, '撤销失败'))
+  } finally {
+    if (selected.value) void loadValidation(selected.value.id)
+  }
+}
+
+async function onTagSet() {
+  if (!selected.value) return
+  const ids = (selected.value.questions ?? []).filter((q) => !(q.knowledge_points?.length)).map((q) => q.id)
+  if (!ids.length) {
+    toast.success('所有题目都已有知识点标签')
+    return
+  }
+  aiTagging.value = true
+  aiProgress.done = 0
+  aiProgress.total = ids.length
+  try {
+    const res = await aiTagBankSet(selected.value.id, ids)
+    const byId = new Map(res.items.map((item) => [item.question_id, item.knowledge_points]))
+    for (const q of selected.value.questions ?? []) {
+      const tags = byId.get(q.id)
+      if (tags) q.knowledge_points = tags
+    }
+    aiProgress.done = res.tagged + res.skipped + res.failed
+    toast.success(`AI 打标完成：成功 ${res.tagged} 题，跳过 ${res.skipped} 题，失败 ${res.failed} 题`)
+    loadEdit(activeQuestion.value)
+  } catch (e: unknown) {
+    toast.error(actionErrorText(e, 'AI 打标失败，请检查模型配置'))
+  } finally {
+    aiTagging.value = false
   }
 }
 
@@ -594,11 +967,32 @@ async function selectSet(id: string) {
   try {
     selected.value = await getBankSet(id)
     activeQuestionId.value = selected.value.questions?.[0]?.id ?? ''
+    void loadValidation(id)
   } catch {
     toast.error('加载套卷详情失败')
   } finally {
     detailLoading.value = false
   }
+}
+
+async function loadValidation(setId?: string) {
+  const target = setId ?? selected.value?.id
+  if (!target) {
+    validationIssues.value = []
+    return
+  }
+  try {
+    const res = await getBankSetValidation(target)
+    if (selected.value?.id === target) validationIssues.value = res.issues ?? []
+  } catch {
+    if (selected.value?.id === target) validationIssues.value = []
+  }
+}
+
+function jumpToQuestionNo(no?: number | null) {
+  if (typeof no !== 'number') return
+  const q = (selected.value?.questions ?? []).find((item) => item.order_no === no)
+  if (q) activeQuestionId.value = q.id
 }
 
 async function saveMeta() {
@@ -661,6 +1055,7 @@ async function saveQuestion(markReviewed = false) {
     q.status = updated.status
     toast.success(markReviewed ? '已保存并通过审核' : '题目已保存')
     if (markReviewed) await refreshSetQuietly()
+    else void loadValidation(selected.value.id)
   } catch {
     toast.error('保存题目失败')
   } finally {
@@ -673,6 +1068,7 @@ async function refreshSetQuietly() {
   try {
     const data = await getBankSet(selected.value.id)
     selected.value = data
+    void loadValidation(selected.value.id)
     await loadStats()
   } catch {
     /* ignore */
@@ -890,7 +1286,7 @@ async function submitUpload() {
 onMounted(async () => {
   if (!auth.user) await auth.fetchMe().catch(() => null)
   await auth.fetchPerms()
-  await Promise.all([loadStats(), loadSets()])
+  await Promise.all([loadStats(), loadSets(), loadAiStatus()])
 })
 </script>
 
@@ -1152,6 +1548,148 @@ onMounted(async () => {
   margin: 4px 0 0;
   padding-left: 18px;
 }
+.warn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ai-status {
+  font-size: 11px;
+  color: #b45309;
+}
+.ai-status.ok {
+  color: #0f766e;
+}
+.warn-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.qc-count {
+  font-size: 11px;
+  color: #92400e;
+  background: #fef3c7;
+  border-radius: 999px;
+  padding: 1px 9px;
+}
+.qc-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.qc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 3px 4px;
+  margin-bottom: 1px;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+.qc-item:hover {
+  background: #fef3c7;
+}
+.qc-badge {
+  flex-shrink: 0;
+  margin-top: 2px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  background: #fde68a;
+  color: #92400e;
+}
+.qc-badge.error {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+.records-modal {
+  width: min(720px, 100%);
+}
+.records-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.records-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 52vh;
+  overflow-y: auto;
+  margin-top: 10px;
+}
+.record-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+.record-row:hover {
+  border-color: #0f766e;
+}
+.record-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.record-main strong {
+  font-size: 13px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.record-main span {
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.record-meta {
+  flex-shrink: 0;
+  font-size: 12.5px;
+  color: #172554;
+  font-weight: 700;
+}
+.record-meta em {
+  margin-left: 5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.record-meta em.pass {
+  background: #dcfce7;
+  color: #166534;
+}
+.record-meta em.fail {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.record-meta .pending {
+  color: #b45309;
+  font-weight: 600;
+}
+.records-foot {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
 .paper-actions {
   display: flex;
   gap: 8px;
@@ -1228,6 +1766,14 @@ onMounted(async () => {
 .q-no.active {
   outline: 2px solid #b8860b;
   outline-offset: 1px;
+}
+.q-no.flagged:not(.active) {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #b45309;
+}
+.q-no.flagged {
+  box-shadow: inset 0 -2px 0 #f59e0b;
 }
 .q-paper {
   border: 1px solid #eadfc9;
