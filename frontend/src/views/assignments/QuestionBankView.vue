@@ -80,8 +80,8 @@
             <div class="set-foot">
               <span>{{ s.question_count ?? 0 }} 题</span>
               <span v-if="s.total_score">{{ s.total_score }} 分</span>
-              <span v-if="s.import_meta?.warnings?.length" class="warn-text">
-                {{ s.import_meta.warnings.length }} 条提示
+              <span v-if="s.issue_count" class="warn-text">
+                {{ s.issue_count }} 条提示
               </span>
             </div>
           </button>

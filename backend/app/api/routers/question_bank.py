@@ -136,6 +136,20 @@ def _serialize_set(bank_set: QuestionBankSet, include_questions: bool = False) -
         "import_meta": bank_set.import_meta,
         "created_at": bank_set.created_at,
     }
+    meta = bank_set.import_meta or {}
+    questions = bank_set.questions
+    if questions is not None:
+        # 总分跟随当前题目分值之和：人工加题/改分后即时反映，不再沿用导入时固定值
+        if questions:
+            data["total_score"] = sum(int(q.score or 0) for q in questions)
+        # 列表用动态质检计数，替代导入时的静态 warnings 快照，补题/修正后自动归零
+        data["issue_count"] = len(
+            validate_questions(
+                [_question_payload(q) for q in questions],
+                sections=meta.get("sections"),
+                declared_count=meta.get("declared_count"),
+            )
+        )
     if include_questions:
         data["questions"] = [_serialize_question(q) for q in bank_set.questions]
     return data

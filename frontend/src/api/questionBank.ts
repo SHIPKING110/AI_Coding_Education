@@ -59,6 +59,7 @@ export interface BankSet {
   total_score: number | null
   status: 'draft' | 'reviewed' | 'published' | 'archived'
   question_count: number | null
+  issue_count?: number
   import_meta: {
     sections?: { name: string; count: number; score: number; type: string | null }[]
     warnings?: string[]
