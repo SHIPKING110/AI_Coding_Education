@@ -73,8 +73,18 @@ def validate_question(item: dict[str, Any], *, order_no: int | None = None) -> l
     return issues
 
 
-def validate_questions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """整卷校验：题号连续性 + 每题字段完整性。"""
+def validate_questions(
+    items: list[dict[str, Any]],
+    *,
+    sections: list[dict[str, Any]] | None = None,
+    declared_count: int | None = None,
+) -> list[dict[str, Any]]:
+    """整卷校验：题号连续性 + 每题字段完整性 + 动态章节/总数核对。
+
+    sections / declared_count 来自导入时的 import_meta（文档声明），与当前
+    套卷实际题目动态比对，这样用户手动补题/调整题号后，结构性提示会
+    随之消失，而非沿用导入时的冻结快照。
+    """
     issues: list[dict[str, Any]] = []
     expected: int | None = None
     for idx, item in enumerate(items, start=1):
@@ -90,4 +100,37 @@ def validate_questions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
         expected = no + 1
         issues.extend(validate_question(item, order_no=no))
+
+    # 动态章节题数核对：按当前题型统计，与文档声明的各章节题数比对
+    if sections:
+        by_type: dict[str, int] = {}
+        for it in items:
+            t = it.get("type")
+            by_type[t] = by_type.get(t, 0) + 1
+        for sec in sections or []:
+            stype = sec.get("type")
+            declared = sec.get("count")
+            if declared is None or stype is None:
+                continue
+            actual = by_type.get(stype, 0)
+            if actual != declared:
+                issues.append(
+                    {
+                        "code": "section_count_mismatch",
+                        "level": "error",
+                        "message": f'章节「{sec.get("name") or stype}」声明 {declared} 题，实际 {actual} 题，与原文档不一致，请核对拆分',
+                        "question_no": None,
+                    }
+                )
+
+    # 动态总数核对：文档声明题数 vs 当前实际题目数
+    if declared_count is not None and len(items) != declared_count:
+        issues.append(
+            {
+                "code": "total_count_mismatch",
+                "level": "error",
+                "message": f"文档声明 {declared_count} 题，实际 {len(items)} 题，与原文档不一致，请核对拆分",
+                "question_no": None,
+            }
+        )
     return issues

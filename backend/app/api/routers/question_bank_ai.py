@@ -190,6 +190,9 @@ def validate_set(
     current_user: User = Depends(get_current_user),
 ):
     _require_qb_permission(db, current_user, "question_bank_review")
+    bank_set = db.get(QuestionBankSet, set_id)
+    if not bank_set:
+        raise HTTPException(status_code=404, detail="套卷不存在")
     questions = list(
         db.scalars(
             select(QuestionBankQuestion)
@@ -197,7 +200,12 @@ def validate_set(
             .order_by(QuestionBankQuestion.order_no)
         ).all()
     )
-    issues = validate_questions([_q_out(q) for q in questions])
+    meta = bank_set.import_meta or {}
+    issues = validate_questions(
+        [_q_out(q) for q in questions],
+        sections=meta.get("sections"),
+        declared_count=meta.get("declared_count"),
+    )
     return {"issues": issues, "total": len(questions)}
 
 

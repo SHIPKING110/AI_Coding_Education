@@ -104,15 +104,11 @@
               <label>等级<input v-model="selected.level" :disabled="!canUpload" @blur="saveMeta" /></label>
               <label>年月<input v-model="selected.exam_month" type="month" :disabled="!canUpload" @blur="saveMeta" /></label>
             </div>
-            <div v-if="parsePromptCount || validationIssues.length || selected.import_meta?.warnings?.length || aiStatus" class="warn-box">
+            <div v-if="validationIssues.length || aiStatus" class="warn-box">
               <div class="warn-head">
                 <strong>解析与质检提示</strong>
-                <span v-if="parsePromptCount" class="qc-count">{{ parsePromptCount }} 处导入提示</span>
                 <span v-if="validationIssues.length" class="qc-count">
                   {{ validationErrorCount }} 处错误 · {{ validationWarnCount }} 处提示
-                </span>
-                <span v-if="declaredCountMismatch" class="qc-count" style="background:#fee2e2;border-color:#fca5a5;color:#991b1b">
-                  文档声明题数与实际解析不符，请核对拆分
                 </span>
                 <span v-if="aiStatus" class="ai-status" :class="{ ok: aiStatus.configured }">
                   {{ aiStatus.configured
@@ -120,31 +116,18 @@
                     : 'AI 习题模型未配置：请到 设置 → 模型配置 为「AI 习题」选模型' }}
                 </span>
               </div>
-              <ul v-if="selected.import_meta?.issues?.length" class="qc-list">
-                <li
-                  v-for="(issue, i) in selected.import_meta.issues"
-                  :key="`import-${issue.code}-${i}`"
-                  class="qc-item"
-                  :class="issue.level"
-                >
-                  <span class="qc-badge" :class="issue.level">{{ issue.level === 'error' ? '导入错误' : '导入提示' }}</span>
-                  {{ issue.message }}
-                </li>
-              </ul>
               <ul v-if="validationIssues.length" class="qc-list">
                 <li
                   v-for="(issue, i) in validationIssues"
                   :key="`${issue.code}-${issue.question_no}-${i}`"
                   class="qc-item"
-                  :class="issue.level"
+                  :class="[issue.level, { structural: isStructuralIssue(issue.code) }]"
                   @click="jumpToQuestionNo(issue.question_no)"
                 >
                   <span class="qc-badge" :class="issue.level">{{ issue.level === 'error' ? '质检错误' : '质检提示' }}</span>
                   {{ issue.message }}
+                  <span v-if="isStructuralIssue(issue.code)" class="structural-hint">（需人工核对文档拆分/题号，AI 无法单题修复）</span>
                 </li>
-              </ul>
-              <ul v-if="!validationIssues.length && selected.import_meta?.warnings?.length">
-                <li v-for="w in selected.import_meta.warnings" :key="w">{{ w }}</li>
               </ul>
               <div v-if="canReview" class="warn-actions">
                 <button
@@ -702,17 +685,10 @@ const aiSourceLabel = computed(() => {
 const validationIssues = ref<BankIssue[]>([])
 const validationErrorCount = computed(() => validationIssues.value.filter((i) => i.level === 'error').length)
 const validationWarnCount = computed(() => validationIssues.value.filter((i) => i.level !== 'error').length)
-const parsePromptCount = computed(() => {
-  const meta = selected.value?.import_meta ?? {}
-  return (meta.issues?.length ?? 0) + (meta.warnings?.length ?? 0)
-})
-const declaredCountMismatch = computed(() => {
-  const meta = selected.value?.import_meta ?? {}
-  const declared = meta.declared_count
-  if (!declared) return false
-  return declared !== (selected.value?.questions?.length ?? 0)
-})
 const draftCount = computed(() => (selected.value?.questions ?? []).filter((q) => q.status === 'draft').length)
+// 集合级结构性问题：章节/总数不符、题号跳跃，AI 单题校准无法修复，需人工调整文档拆分或重新导入
+const structuralIssueCodes = new Set(['number_gap', 'section_count_mismatch', 'total_count_mismatch'])
+const isStructuralIssue = (code?: string | null) => code != null && structuralIssueCodes.has(code)
 const flaggedOrderNos = computed(
   () => new Set(validationIssues.value.map((i) => i.question_no).filter((n): n is number => typeof n === 'number')),
 )
@@ -1861,6 +1837,18 @@ onMounted(async () => {
 .qc-badge.error {
   background: #fecaca;
   color: #991b1b;
+}
+.qc-item.structural {
+  background: #fef2f2;
+  border: 1px dashed #fca5a5;
+}
+.structural-hint {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  color: #b91c1c;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .confirm-modal {
