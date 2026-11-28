@@ -34,6 +34,7 @@ from app.models.user import Role, User
 from app.services.llm import LLMConfigError, friendly_llm_error
 from app.services.llm_context import use_teacher_llm
 from app.services.question_bank_parser import file_hash, parse_docx
+from app.services.question_bank_validation import validate_questions
 
 router = APIRouter(prefix="/question-bank", tags=["question-bank"])
 
@@ -457,32 +458,70 @@ def delete_set(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """彻底删除整套题库（区别于「归档」）：删除套卷及其全部题目，历史作答保留（快照已固化）。"""
+    """彻底删除整套题库（区别于「归档」）：删除套卷及其全部题目，历史作答保留（快照已固化）。
+
+    同时删除导入来源（question_bank_sources）与上传的原始文档，释放文件哈希，
+    否则重新上传同一文档会被「该文档已经导入过」误拦截。
+    """
     _require_qb_permission(db, current_user, "question_bank_archive")
     bank_set = db.get(QuestionBankSet, set_id)
     if bank_set is None:
         raise HTTPException(status_code=404, detail="套卷不存在")
+    source = db.get(QuestionBankSource, bank_set.source_id)
     # 历史作答保留，但解除对套卷的引用，避免外键约束阻塞删除
     db.execute(update(PracticeAttempt).where(PracticeAttempt.bank_set_id == set_id).values(bank_set_id=None))
     # 题目级联删除（AI 复核、收藏标记随题目 ondelete CASCADE 一并清理）
     db.execute(delete(QuestionBankQuestion).where(QuestionBankQuestion.bank_set_id == set_id))
     db.delete(bank_set)
+    if source is not None:
+        db.delete(source)
     db.commit()
+    if source is not None:
+        # 清理磁盘上的原始文档与解析出的媒体目录（套卷目录以随机 hex 命名，互不影响）
+        try:
+            storage = Path(source.storage_path)
+            storage.unlink(missing_ok=True)
+            bank_dir = storage.parent
+            if bank_dir.name and bank_dir.exists():
+                shutil.rmtree(bank_dir, ignore_errors=True)
+        except OSError:
+            pass
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _question_needs_repair(q: QuestionBankQuestion) -> bool:
-    """规则层快速判定某题是否结构不完整（用于决定是否调用 AI 校准，省成本）。"""
-    qtype = (q.type or "").strip()
-    if qtype in ("single_choice", "multiple_choice"):
-        opts = [str(o).strip() for o in (q.options or []) if str(o).strip()]
-        if len(opts) < 2:
-            return True
-    if q.answer in (None, "", [], {}):
-        return True
-    if qtype not in ("programming", "code_fill") and not (q.analysis or "").strip():
-        return True
-    return False
+_FIXABLE_ISSUE_CODES = {
+    "missing_options",
+    "empty_option",
+    "missing_answer",
+    "answer_out_of_range",
+    "missing_analysis",
+    "missing_reference_code",
+    "type_error",
+}
+
+
+def _question_payload(q: QuestionBankQuestion) -> dict[str, Any]:
+    return {
+        "id": str(q.id),
+        "order_no": q.order_no,
+        "type": q.type,
+        "stem": q.stem,
+        "options": q.options,
+        "answer": q.answer,
+        "analysis": q.analysis,
+        "reference_code": q.reference_code,
+        "score": q.score,
+    }
+
+
+def _fixable_question_numbers(items: list[dict[str, Any]]) -> set[int]:
+    """返回还存在可由 AI 修复的规则问题的题号集合。"""
+    nos: set[int] = set()
+    for issue in validate_questions(items):
+        no = issue.get("question_no")
+        if isinstance(no, int) and issue.get("code") in _FIXABLE_ISSUE_CODES:
+            nos.add(no)
+    return nos
 
 
 @router.post("/sets/{set_id}/auto-repair")
@@ -493,8 +532,8 @@ def auto_repair_set(
     current_user: User = Depends(get_current_user),
 ):
     """一键自动修复整套题库：①题号重排为 1..N（消除跳跃/漏号/重复）；
-    ②对结构不完整的题（缺选项/缺答案/缺解析）逐题调用 AI 校准并高置信自动应用。
-    返回修复统计，尽量减少人工逐题审核。
+    ②对质检发现的可修复问题（缺选项/空选项/缺答案/答案越界/缺解析/缺参考代码/题型错误）
+    逐题调用 AI 校准并高置信自动应用。返回修复统计与仍需人工介入的题数。
     """
     _require_qb_permission(db, current_user, "question_bank_review")
     bank_set = db.scalar(
@@ -507,27 +546,25 @@ def auto_repair_set(
     db.commit()
     db.refresh(bank_set)
     total = len(bank_set.questions)
-    # ② 结构性问题逐题 AI 校准
+
+    before = _fixable_question_numbers([_question_payload(q) for q in bank_set.questions])
     fixed = 0
-    need_review = 0
-    if use_ai:
+    if use_ai and before:
         from app.services import question_bank_ai as qb_ai
 
-        for q in bank_set.questions:
-            if not _question_needs_repair(q):
-                continue
+        candidates = [q for q in bank_set.questions if q.order_no in before]
+        for q in candidates:
             try:
-                review, applied = qb_ai.validate_question(db, current_user, q, apply=True)
+                _, applied = qb_ai.validate_question(db, current_user, q, apply=True, force=True)
             except LLMConfigError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             except Exception:  # noqa: BLE001 —— 单题失败不阻断整卷
-                need_review += 1
                 continue
             if applied:
                 fixed += 1
-            elif review.status == "suggested":
-                need_review += 1
-    return {"total": total, "renumbered": total, "fixed": fixed, "needs_review": need_review}
+    db.commit()
+    after = _fixable_question_numbers([_question_payload(q) for q in bank_set.questions])
+    return {"total": total, "renumbered": total, "fixed": fixed, "needs_review": len(after)}
 
 
 @router.post("/sets/{set_id}/review-all")

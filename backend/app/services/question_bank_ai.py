@@ -128,19 +128,27 @@ def validate_question(
     question: QuestionBankQuestion,
     *,
     apply: bool,
+    force: bool = False,
 ) -> tuple[QuestionBankAiReview, bool]:
+    """AI 校验单题。apply=True 且置信度达阈值时直接落库修复。
+
+    force=True 会忽略已有「suggested」校验记录，重新调用模型，
+    用于「AI 一键修复」此类被用户主动触发的重跑；已「applied」且
+    内容哈希未变的记录始终命中缓存，避免重复计费。
+    """
     item = _item_dict(question)
     content_hash = question_content_hash(item)
-    cached = db.scalar(
-        select(QuestionBankAiReview).where(
-            QuestionBankAiReview.question_id == question.id,
-            QuestionBankAiReview.kind == "validate",
-            QuestionBankAiReview.content_hash == content_hash,
-            QuestionBankAiReview.status.in_(["applied", "suggested"]),
+    if not force:
+        cached = db.scalar(
+            select(QuestionBankAiReview).where(
+                QuestionBankAiReview.question_id == question.id,
+                QuestionBankAiReview.kind == "validate",
+                QuestionBankAiReview.content_hash == content_hash,
+                QuestionBankAiReview.status.in_(["applied", "suggested"]),
+            )
         )
-    )
-    if cached:
-        return cached, False
+        if cached:
+            return cached, False
 
     prompt = (
         "你是少儿编程考级题库审校专家。请检查题目是否与原始试卷一致、答案是否正确、解析是否充分。"

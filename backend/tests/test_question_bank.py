@@ -438,3 +438,105 @@ def test_question_bank_ai_task_lookup(client):
     assert active.json()["tasks"] == []
 
 
+def test_delete_set_frees_document_hash(client, admin_token, tmp_path):
+    """彻底删除套卷后，同一文档可重新上传（哈希去重不再误拦）。"""
+    path = _build_docx(tmp_path / "202512py二级.docx")
+    with path.open("rb") as fh:
+        first = client.post(
+            "/api/question-bank/imports",
+            headers=admin_token,
+            files={"file": (path.name, fh, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+            data={"institution": "中国电子学会", "subject": "Python", "level": "二级"},
+        )
+    assert first.status_code == 201, first.text
+    set_id = first.json()["set_id"]
+
+    deleted = client.delete(f"/api/question-bank/sets/{set_id}", headers=admin_token)
+    assert deleted.status_code == 204, deleted.text
+    assert client.get(f"/api/question-bank/sets/{set_id}", headers=admin_token).status_code == 404
+
+    with path.open("rb") as fh:
+        again = client.post(
+            "/api/question-bank/imports",
+            headers=admin_token,
+            files={"file": (path.name, fh, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+            data={"institution": "中国电子学会", "subject": "Python", "level": "二级"},
+        )
+    assert again.status_code == 201, again.text
+    assert again.json()["question_count"] == 3
+
+
+def test_close_untouched_attempt_is_removed(client, admin_token, db_session, tmp_path):
+    """未作答的记录点「取消」应从做题记录中移除，不留 0 分且不计入统计。"""
+    from app.models.enrollment import Student
+
+    set_id = _publish_sample(client, admin_token, tmp_path)
+    parent_token = _register(client, "parent", "qb-cancel-parent")
+    parent_id = client.get("/api/auth/me", headers=parent_token).json()["id"]
+    student = Student(name="未做学员", parent_user_id=uuid.UUID(parent_id), lesson_balance=0)
+    db_session.add(student)
+    db_session.commit()
+
+    started = client.post(
+        "/api/question-bank/attempts",
+        headers=parent_token,
+        json={"student_id": str(student.id), "mode": "practice", "set_id": set_id},
+    )
+    assert started.status_code == 201, started.text
+    attempt_id = started.json()["id"]
+
+    closed = client.post(f"/api/question-bank/attempts/{attempt_id}/close", headers=parent_token)
+    assert closed.status_code == 200, closed.text
+    assert closed.json().get("abandoned") is True
+
+    # 记录已移除：查询返回 404，列表不再计入
+    assert client.get(f"/api/question-bank/attempts/{attempt_id}", headers=parent_token).status_code == 404
+    listed = client.get("/api/question-bank/attempts", headers=parent_token)
+    assert listed.json()["total"] == 0
+
+    # 统计不受污染
+    stats = client.get(
+        "/api/question-bank/learning-stats",
+        headers=parent_token,
+        params={"student_id": str(student.id)},
+    )
+    assert stats.json()["attempts"] == 0
+    assert stats.json()["submitted"] == 0
+
+
+def test_close_answered_attempt_is_still_evaluated(client, admin_token, db_session, tmp_path):
+    """已作答的记录点「取消」仍正常评估并保留在做题记录中。"""
+    from app.models.enrollment import Student
+
+    set_id = _publish_sample(client, admin_token, tmp_path)
+    parent_token = _register(client, "parent", "qb-answered-parent")
+    parent_id = client.get("/api/auth/me", headers=parent_token).json()["id"]
+    student = Student(name="已作答学员", parent_user_id=uuid.UUID(parent_id), lesson_balance=0)
+    db_session.add(student)
+    db_session.commit()
+
+    started = client.post(
+        "/api/question-bank/attempts",
+        headers=parent_token,
+        json={"student_id": str(student.id), "mode": "practice", "set_id": set_id},
+    )
+    assert started.status_code == 201, started.text
+    attempt = started.json()
+    qid = attempt["questions"][0]["id"]
+
+    saved = client.post(
+        f"/api/question-bank/attempts/{attempt['id']}/answers",
+        headers=parent_token,
+        json={"question_id": qid, "answer": 0},
+    )
+    assert saved.status_code == 200, saved.text
+
+    closed = client.post(f"/api/question-bank/attempts/{attempt['id']}/close", headers=parent_token)
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["status"] == "evaluated"
+    assert "abandoned" not in closed.json()
+
+    kept = client.get(f"/api/question-bank/attempts/{attempt['id']}", headers=parent_token)
+    assert kept.status_code == 200
+
+

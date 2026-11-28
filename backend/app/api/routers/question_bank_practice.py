@@ -669,6 +669,10 @@ def _expire_stale_attempts(db: Session, *, user_id: uuid.UUID) -> int:
         ).all()
     )
     for attempt in rows:
+        if not attempt.answers:
+            # 从未作答的过期会话直接丢弃，不做 0 分评估
+            db.delete(attempt)
+            continue
         result = _evaluate(attempt)
         attempt.result = result
         attempt.score = result["score"]
@@ -1012,10 +1016,18 @@ def close_attempt(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """结束练习会话：保留已作答判定的同时生成总结，便于做题记录回看。"""
+    """结束练习会话。
+
+    尚未作答的记录直接删除，不留下「0 分正确率」的脏记录，也不计入
+    练习次数、题目正确率与模考平均得分率；已作答的记录照常评估并归档。
+    """
     attempt = _get_attempt(db, attempt_id, user)
     if attempt.status == AttemptStatus.EVALUATED.value:
         return _attempt_out(attempt, reveal=True)
+    if not attempt.answers:
+        db.delete(attempt)
+        db.commit()
+        return {"abandoned": True}
     _ai_grade_pending_programming(db, user, attempt)
     result = _evaluate(attempt)
     attempt.result = result
