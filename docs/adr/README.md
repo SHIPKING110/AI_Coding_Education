@@ -38,5 +38,6 @@
 | [ADR-0027](adr-0027-calibration-sla-and-retrieval-observability.md) | 人工校准四指标 SLA + 检索观测/低置信门控/关键词腿与入库策略 | 已采纳 |
 | [ADR-0028](adr-0028-agent-eval-rollback-gate.md) | Agent 行为评测闸门（工具编排回归） | 已采纳 |
 | [ADR-0029](adr-0029-alembic-rebaseline.md) | Alembic re-baseline —— 以 ORM 模型为唯一事实源重建迁移基线 | 已采纳 |
+| [ADR-0030](adr-0030-question-bank-domain.md) | 题库领域：导入去重、动态质检、AI 校准与快照作答 | 已采纳 |
 
 > 注：0005 / 0006 为早期合并前预留号，未单独成文（内容并入 0007/0008）。

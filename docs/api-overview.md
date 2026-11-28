@@ -3,7 +3,7 @@
 > 由 `scripts/gen_api_overview.py` 从 OpenAPI schema 生成，勿手改。
 > 重新生成：`cd backend && uv run python ../scripts/gen_api_overview.py`
 
-共 **403** 个端点，按 `/api/<前缀>` 分组；权限细节见各路由源码依赖声明。
+共 **458** 个端点，按 `/api/<前缀>` 分组；权限细节见各路由源码依赖声明。
 
 ## /api/admin
 
@@ -421,6 +421,66 @@
 | PATCH | `/api/prompt-templates/{template_id}` | Update Prompt Template |
 | POST | `/api/prompt-templates/{template_id}/publish` | Publish Prompt Template |
 | POST | `/api/prompt-templates/{template_id}/unpublish` | Unpublish Prompt Template |
+
+## /api/question-bank
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/question-bank/ability-comment` | Ability Comment |
+| POST | `/api/question-bank/aggregates/check` | Check Answer |
+| POST | `/api/question-bank/aggregates/favorite/{question_id}` | Add Favorite |
+| GET | `/api/question-bank/aggregates/favorites` | List Favorites |
+| GET | `/api/question-bank/aggregates/marks` | List Marks |
+| POST | `/api/question-bank/aggregates/practice` | Aggregate Practice |
+| GET | `/api/question-bank/aggregates/subjects` | Aggregate Subjects |
+| GET | `/api/question-bank/aggregates/wrong` | List Wrong |
+| POST | `/api/question-bank/aggregates/wrong/{question_id}` | Add Wrong |
+| POST | `/api/question-bank/aggregates/{question_id}/mark` | Toggle Mark |
+| GET | `/api/question-bank/ai-status` | Ai Status |
+| GET | `/api/question-bank/ai-tasks` | List Active Ai Tasks |
+| GET | `/api/question-bank/ai-tasks/{task_id}` | Get Ai Task |
+| GET | `/api/question-bank/attempts` | List Attempts |
+| POST | `/api/question-bank/attempts` | Start Attempt |
+| GET | `/api/question-bank/attempts/trend` | Attempt Trend |
+| GET | `/api/question-bank/attempts/{attempt_id}` | Get Attempt |
+| POST | `/api/question-bank/attempts/{attempt_id}/answers` | Save Answer |
+| POST | `/api/question-bank/attempts/{attempt_id}/close` | Close Attempt |
+| GET | `/api/question-bank/attempts/{attempt_id}/result` | Attempt Result |
+| POST | `/api/question-bank/attempts/{attempt_id}/self-evaluate` | Self Evaluate |
+| POST | `/api/question-bank/attempts/{attempt_id}/submit` | Submit Attempt |
+| GET | `/api/question-bank/blueprints` | List Blueprints |
+| POST | `/api/question-bank/blueprints` | Create Blueprint |
+| DELETE | `/api/question-bank/blueprints/{blueprint_id}` | Delete Blueprint |
+| PATCH | `/api/question-bank/blueprints/{blueprint_id}` | Update Blueprint |
+| POST | `/api/question-bank/compose` | Compose |
+| GET | `/api/question-bank/compose/availability` | Compose Availability |
+| POST | `/api/question-bank/imports` | Import Docx |
+| GET | `/api/question-bank/kp-taxonomy` | List Kp Taxonomy |
+| POST | `/api/question-bank/kp-taxonomy` | Create Kp Taxonomy |
+| GET | `/api/question-bank/learning-stats` | Learning Stats |
+| DELETE | `/api/question-bank/questions/{question_id}` | Delete Question |
+| POST | `/api/question-bank/questions/{question_id}/ai-clean` | Ai Clean Question |
+| POST | `/api/question-bank/questions/{question_id}/ai-tag/revert` | Ai Revert Tag |
+| POST | `/api/question-bank/questions/{question_id}/ai-validate` | Ai Validate Question |
+| POST | `/api/question-bank/questions/{question_id}/ai-validate/revert` | Ai Revert Question |
+| GET | `/api/question-bank/sets` | List Sets |
+| DELETE | `/api/question-bank/sets/{set_id}` | Delete Set |
+| GET | `/api/question-bank/sets/{set_id}` | Get Set |
+| PATCH | `/api/question-bank/sets/{set_id}` | Update Set |
+| POST | `/api/question-bank/sets/{set_id}/ai-tag` | Ai Tag Set |
+| POST | `/api/question-bank/sets/{set_id}/ai-tag-task` | Ai Tag Set Task |
+| POST | `/api/question-bank/sets/{set_id}/ai-validate` | Ai Validate Set |
+| POST | `/api/question-bank/sets/{set_id}/ai-validate-task` | Ai Validate Set Task |
+| POST | `/api/question-bank/sets/{set_id}/archive` | Archive Set |
+| POST | `/api/question-bank/sets/{set_id}/auto-repair` | Auto Repair Set |
+| POST | `/api/question-bank/sets/{set_id}/publish` | Publish Set |
+| POST | `/api/question-bank/sets/{set_id}/questions` | Create Question |
+| PATCH | `/api/question-bank/sets/{set_id}/questions/{question_id}` | Update Question |
+| POST | `/api/question-bank/sets/{set_id}/random` | Random Questions |
+| POST | `/api/question-bank/sets/{set_id}/review-all` | Review All |
+| POST | `/api/question-bank/sets/{set_id}/to-assignment` | Bank To Assignment |
+| GET | `/api/question-bank/sets/{set_id}/validation` | Validate Set |
+| GET | `/api/question-bank/stats` | Stats |
 
 ## /api/reports
 

@@ -38,7 +38,8 @@
 - [ ] `GET /api/health` 200；首页可登录
 - [ ] 冒烟清单 [smoke-checklist.md](smoke-checklist.md) A–F 全过（P0）
 - [ ] 审计日志：后台能查到本次测试操作记录（写入链路正常）
-- [ ] 关键页面抽查：排课列表、课后反馈、订单支付、RAG 后台（如变更涉及）
+- [ ] 关键页面抽查：排课列表、课后反馈、订单支付、RAG 后台（如变更涉及）、题库套卷列表/详情（`issue_count` 与 `total_score` 随题目刷新）、练习记录与历史快照
+- [ ] 题库回归：导入去重、动态质检、`issue_count`/总分动态重算、交卷幂等、库存预检、AI 缓存命中、降级评语（对照 smoke-checklist §G）
 - [ ] 观察 30 分钟：错误日志无新增高频异常、慢查询无明显堆积（`docker compose logs backend | grep ERROR`）
 
 ## 四、回滚预案（触发即执行，不等待排查完）
