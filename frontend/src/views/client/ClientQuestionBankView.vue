@@ -69,6 +69,16 @@ const filteredSets = computed(() =>
   ),
 )
 const inProgress = computed(() => attempts.value.find((a) => a.status === 'in_progress'))
+const SAMPLE_MIN = 3
+const solidWeakPoints = computed(() => {
+  const totals = new Map((stats.value?.knowledge_stats ?? []).map((kp) => [kp.name, kp.total]))
+  return (stats.value?.weak_points ?? []).filter((w) => (totals.get(w.name) ?? 0) >= SAMPLE_MIN)
+})
+const thinSample = computed(() => {
+  const stat = stats.value
+  if (!stat || stat.submitted === 0) return false
+  return stat.submitted < SAMPLE_MIN || stat.total_questions < 10
+})
 const examOpen = ref(false)
 const confirmState = ref<{
   visible: boolean
@@ -421,11 +431,12 @@ watch(() => store.activeStudentId, load)
       </div>
     </div>
 
-    <section v-if="stats && stats.weak_points.length" class="weak-card">
+    <section v-if="stats && solidWeakPoints.length" class="weak-card">
       <h3>最需要复习</h3>
       <div class="weak-list">
-        <span v-for="w in stats.weak_points" :key="w.name">{{ w.name }} · 错 {{ w.wrong }} 次</span>
+        <span v-for="w in solidWeakPoints" :key="w.name">{{ w.name }} · 错 {{ w.wrong }} 次</span>
       </div>
+      <p class="weak-note">仅展示样本 ≥ {{ SAMPLE_MIN }} 题的知识点；样本不足的薄弱点会在多练几题后出现。</p>
     </section>
 
     <section v-if="stats" class="ability-card">
@@ -451,9 +462,12 @@ watch(() => store.activeStudentId, load)
         </span>
       </div>
       <p class="kp-note">样本少于 3 题的知识点仅作参考，多练几题后掌握度更准确。</p>
-      <div v-if="abilityComment" class="ai-comment">
+      <div v-if="abilityComment" class="ai-comment" :class="{ thin: thinSample }">
         <strong>AI 学习建议</strong>
         <p>{{ abilityComment }}</p>
+        <p v-if="thinSample" class="sample-hint">
+          当前样本较少（{{ stats?.submitted }} 次练习 / {{ stats?.total_questions }} 题），结论仅作参考，多练几题后更准确。
+        </p>
       </div>
     </section>
 
@@ -766,6 +780,11 @@ watch(() => store.activeStudentId, load)
   color: #7c5a1e;
   font-size: 11.5px;
 }
+.weak-note {
+  margin-top: 6px;
+  color: #a08242;
+  font-size: 11px;
+}
 .ability-card {
   margin-top: 12px;
   padding: 14px 16px;
@@ -806,6 +825,21 @@ watch(() => store.activeStudentId, load)
   font-size: 12.5px;
   line-height: 1.7;
   white-space: pre-wrap;
+}
+.ai-comment.thin {
+  border-color: #eab308;
+  background: #fefce8;
+}
+.ai-comment.thin strong {
+  color: #a16207;
+}
+.ai-comment.thin p {
+  color: #854d0e;
+}
+.sample-hint {
+  margin-top: 5px !important;
+  color: #a16207 !important;
+  font-size: 11px !important;
 }
 .kp-strip {
   margin-top: 10px;
