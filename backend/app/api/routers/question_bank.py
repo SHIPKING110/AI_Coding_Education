@@ -185,8 +185,14 @@ def import_docx(
     digest = file_hash(source_path)
     duplicate = db.scalar(select(QuestionBankSource).where(QuestionBankSource.file_hash == digest))
     if duplicate:
-        source_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=409, detail="该文档已经导入过，请在已有套卷中审核")
+        # 若源记录已无对应套卷（孤儿：之前“彻底删除”未释放 file_hash），则释放该 hash 并允许重新导入
+        has_set = db.scalar(select(QuestionBankSet.id).where(QuestionBankSet.source_id == duplicate.id))
+        if not has_set:
+            db.delete(duplicate)
+            db.flush()
+        else:
+            source_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=409, detail="该文档已经导入过，请在已有套卷中审核")
 
     source = QuestionBankSource(
         filename=filename,
