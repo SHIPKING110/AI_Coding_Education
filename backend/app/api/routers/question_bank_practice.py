@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+import threading
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
@@ -291,6 +292,7 @@ def _evaluate(attempt: PracticeAttempt) -> dict[str, Any]:
     type_stats: dict[str, dict[str, int]] = {}
     score = 0
     correct_count = 0
+    partial_count = 0
     for item in attempt.question_snapshot or []:
         qid = str(item.get("id"))
         answer = answers.get(qid)
@@ -306,6 +308,9 @@ def _evaluate(attempt: PracticeAttempt) -> dict[str, Any]:
         score += got
         if is_correct:
             correct_count += 1
+        elif is_correct is False and max_score > 0 and 0 < got < max_score:
+            # 编程题部分分：判为不正确但拿了一部分分
+            partial_count += 1
         stat = type_stats.setdefault(
             item.get("type") or "unknown", {"total": 0, "correct": 0, "score": 0, "max_score": 0}
         )
@@ -339,9 +344,69 @@ def _evaluate(attempt: PracticeAttempt) -> dict[str, Any]:
         "normalized_score": normalized,
         "rating": ("达标" if normalized >= 60 else "未达标") if attempt.mode == PracticeMode.EXAM.value else None,
         "correct_count": correct_count,
+        "partial_count": partial_count,
         "question_count": len(items),
         "type_stats": type_stats,
     }
+
+
+def _freeze_question_results(attempt: PracticeAttempt, result: dict[str, Any]) -> dict[str, Any]:
+    """把逐题判分回写到 question_results，同时保留之前已落库的 AI 评分元数据。"""
+    existing = dict(attempt.question_results or {})
+    for item in result["items"]:
+        qid = str(item["id"])
+        entry = dict(existing.get(qid) or {})
+        entry["is_correct"] = item["is_correct"]
+        entry["score"] = item["score"]
+        entry["max_score"] = item["max_score"]
+        existing[qid] = entry
+    return existing
+
+
+def _pending_ai_grading(attempt: PracticeAttempt) -> bool:
+    """还有待 AI 批改的已作答编程题（不含已自评与已批改项）。"""
+    answers = attempt.answers or {}
+    results = attempt.question_results or {}
+    for item in attempt.question_snapshot or []:
+        if (item.get("type") or "") not in ("programming", "code_fill"):
+            continue
+        qid = str(item.get("id"))
+        answer = answers.get(qid)
+        if not isinstance(answer, str) or not answer.strip():
+            continue
+        if answers.get(f"__self__:{qid}") is not None:
+            continue
+        if (results.get(qid) or {}).get("ai_graded"):
+            continue
+        return True
+    return False
+
+
+def spawn_ai_grading(attempt_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    """交卷后异步 AI 批改编程题：批改完成后回写得分并更新 attempt.result，前端轮询 pending_ai 可见更新。"""
+
+    def _worker() -> dict[str, Any]:
+        from app.core.database import SessionLocal
+
+        session = SessionLocal()
+        try:
+            attempt = session.get(PracticeAttempt, attempt_id)
+            user = session.get(User, user_id)
+            if attempt is None or user is None:
+                return {"graded": False}
+            _ai_grade_pending_programming(session, user, attempt)
+            result = _evaluate(attempt)
+            result["pending_ai"] = _pending_ai_grading(attempt)
+            attempt.result = result
+            attempt.score = result["score"]
+            attempt.total_score = result["total_score"]
+            attempt.question_results = _freeze_question_results(attempt, result)
+            session.commit()
+            return {"graded": True, "pending_ai": result["pending_ai"]}
+        finally:
+            session.close()
+
+    threading.Thread(target=_worker, daemon=True, name=f"qb-grade-{attempt_id}").start()
 
 
 def _attempt_out(attempt: PracticeAttempt, *, reveal: bool) -> dict[str, Any]:
@@ -368,6 +433,7 @@ def _attempt_out(attempt: PracticeAttempt, *, reveal: bool) -> dict[str, Any]:
         "started_at": attempt.started_at,
         "submitted_at": attempt.submitted_at,
         "result": attempt.result if evaluated else None,
+        "pending_ai": bool(evaluated and isinstance(attempt.result, dict) and attempt.result.get("pending_ai")),
         "answers": attempt.answers or {},
         "question_results": attempt.question_results or {},
         "questions": questions,
@@ -679,14 +745,7 @@ def _expire_stale_attempts(db: Session, *, user_id: uuid.UUID) -> int:
         attempt.total_score = result["total_score"]
         attempt.status = AttemptStatus.EVALUATED
         attempt.submitted_at = datetime.now(UTC)
-        attempt.question_results = {
-            str(item["id"]): {
-                "is_correct": item["is_correct"],
-                "score": item["score"],
-                "max_score": item["max_score"],
-            }
-            for item in result["items"]
-        }
+        attempt.question_results = _freeze_question_results(attempt, result)
     if rows:
         db.commit()
     return len(rows)
@@ -990,23 +1049,19 @@ def submit_attempt(
     attempt = _get_attempt(db, attempt_id, user)
     if attempt.status == AttemptStatus.EVALUATED.value:
         return _attempt_out(attempt, reveal=True)
-    _ai_grade_pending_programming(db, user, attempt)
     result = _evaluate(attempt)
+    pending_ai = _pending_ai_grading(attempt)
+    result["pending_ai"] = pending_ai
     attempt.result = result
     attempt.score = result["score"]
     attempt.total_score = result["total_score"]
     attempt.status = AttemptStatus.EVALUATED
     attempt.submitted_at = datetime.now(UTC)
-    # 交卷后把逐题判定固化，记录详情/回看直接使用，无需再请求判题
-    attempt.question_results = {
-        str(item["id"]): {
-            "is_correct": item["is_correct"],
-            "score": item["score"],
-            "max_score": item["max_score"],
-        }
-        for item in result["items"]
-    }
+    # 交卷即固化逐题判定；编程题若尚未批改，交由后台线程异步 AI 批改，前端轮询 pending_ai
+    attempt.question_results = _freeze_question_results(attempt, result)
     db.commit()
+    if pending_ai:
+        spawn_ai_grading(attempt.id, user.id)
     return _attempt_out(attempt, reveal=True)
 
 
@@ -1028,22 +1083,18 @@ def close_attempt(
         db.delete(attempt)
         db.commit()
         return {"abandoned": True}
-    _ai_grade_pending_programming(db, user, attempt)
     result = _evaluate(attempt)
+    pending_ai = _pending_ai_grading(attempt)
+    result["pending_ai"] = pending_ai
     attempt.result = result
     attempt.score = result["score"]
     attempt.total_score = result["total_score"]
     attempt.status = AttemptStatus.EVALUATED
     attempt.submitted_at = datetime.now(UTC)
-    attempt.question_results = {
-        str(item["id"]): {
-            "is_correct": item["is_correct"],
-            "score": item["score"],
-            "max_score": item["max_score"],
-        }
-        for item in result["items"]
-    }
+    attempt.question_results = _freeze_question_results(attempt, result)
     db.commit()
+    if pending_ai:
+        spawn_ai_grading(attempt.id, user.id)
     return _attempt_out(attempt, reveal=True)
 
 

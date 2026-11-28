@@ -16,6 +16,13 @@ const emit = defineEmits<{
 
 const result = computed(() => props.attempt.result)
 const items = computed(() => result.value?.items ?? [])
+const partialCount = computed(
+  () =>
+    items.value.filter(
+      (i) => i.is_correct === false && (i.score ?? 0) > 0 && (i.score ?? 0) < (i.max_score ?? 0),
+    ).length,
+)
+const pendingAi = computed(() => result.value?.pending_ai ?? false)
 const activeIdx = ref(0)
 const activeItem = computed(() => items.value[activeIdx.value] ?? null)
 function selectItem(i: number) {
@@ -76,7 +83,9 @@ function itemClass(item: AttemptItemResult): string {
         <p>
           原始得分 {{ result?.score ?? 0 }} / {{ result?.total_score ?? 0 }} ·
           答对 {{ result?.correct_count ?? 0 }} / {{ result?.question_count ?? 0 }} 题
+          <span v-if="partialCount > 0">· 部分正确 {{ partialCount }} 题</span>
         </p>
+        <p v-if="pendingAi" class="pending-hint">AI 正在批改编程题，分数完成后自动更新…</p>
       </div>
       <div class="hero-actions">
         <button class="btn" @click="emit('retry')">再练一次</button>
@@ -194,6 +203,11 @@ function itemClass(item: AttemptItemResult): string {
   margin-top: 6px;
   font-size: 12.5px;
   color: #cbd5e1;
+}
+.pending-hint {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: #fde68a;
 }
 .hero-actions {
   display: flex;

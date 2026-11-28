@@ -6,6 +6,7 @@ import { QUESTION_TYPE_LABELS } from '@/api/assignment'
 import {
   checkAggregateAnswer,
   closePracticeAttempt,
+  getPracticeAttempt,
   saveAttemptAnswer,
   selfEvaluateQuestion,
   startPracticeAttempt,
@@ -66,6 +67,8 @@ const wrongSet = ref<Set<string>>(new Set())
 const favoriteSet = ref<Set<string>>(new Set())
 const remainingSeconds = ref<number | null>(null)
 let examTimer: ReturnType<typeof setInterval> | undefined
+let gradePoll: number | undefined
+const gradingPending = ref(false)
 const examExpired = ref(false)
 const examClock = computed(() => {
   if (remainingSeconds.value == null) return ''
@@ -378,11 +381,42 @@ async function submitExam(auto = false) {
     sessionAttempt.value = await submitPracticeAttempt(attempt.id)
     hydrateFromAttempt()
     showResult.value = true
+    if (sessionAttempt.value.result?.pending_ai) startGradePoll()
   } catch {
     /* 交卷失败允许重试 */
   } finally {
     submitting.value = false
   }
+}
+
+function startGradePoll() {
+  const attemptId = sessionAttempt.value?.id
+  if (!attemptId) return
+  gradingPending.value = true
+  if (gradePoll) window.clearInterval(gradePoll)
+  let tries = 0
+  gradePoll = window.setInterval(async () => {
+    tries += 1
+    try {
+      const latest = await getPracticeAttempt(attemptId)
+      if (!latest.result?.pending_ai) {
+        if (gradePoll) window.clearInterval(gradePoll)
+        gradePoll = undefined
+        gradingPending.value = false
+        sessionAttempt.value = latest
+        hydrateFromAttempt()
+        showResult.value = true
+        return
+      }
+    } catch {
+      /* 网络波动时继续轮询 */
+    }
+    if (tries >= 40) {
+      if (gradePoll) window.clearInterval(gradePoll)
+      gradePoll = undefined
+      gradingPending.value = false
+    }
+  }, 2000)
 }
 
 function go(step: number) {
@@ -458,6 +492,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   stopExamCountdown()
+  if (gradePoll !== undefined) window.clearInterval(gradePoll)
 })
 
 function mediaFor(q: PracticeQuestion, scope: string) {
@@ -496,6 +531,7 @@ function referenceAnswer(q: PracticeQuestion): string {
           <div class="head-side">
             <span v-if="isExam && !isEvaluated && remainingSeconds !== null" class="exam-clock" :class="{ urgent: remainingSeconds <= 300 }">剩余 {{ examClock }}</span>
             <span v-if="isExam && !isEvaluated" class="exam-hint">交卷后统一公布分数与解析</span>
+            <span v-if="gradingPending" class="exam-hint">编程题 AI 批改中，完成后自动更新</span>
             <button v-if="isExam && !isEvaluated" type="button" class="btn primary" :disabled="submitting" @click="submitExam()">
               {{ submitting ? '交卷中…' : '交卷' }}
             </button>

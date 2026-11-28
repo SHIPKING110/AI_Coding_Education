@@ -431,8 +431,10 @@ export interface PracticeAttemptOut {
     normalized_score?: number
     rating?: string | null
     correct_count: number
+    partial_count?: number
     question_count: number
     type_stats: Record<string, AttemptTypeStat>
+    pending_ai?: boolean
   } | null
   answers: Record<string, unknown>
   question_results: Record<
@@ -591,6 +593,11 @@ export async function aiValidateQuestion(
 
 export async function revertAiReview(questionId: string): Promise<BankQuestion> {
   const { data } = await http.post(`/question-bank/questions/${questionId}/ai-validate/revert`)
+  return data
+}
+
+export async function revertAiTag(questionId: string): Promise<BankQuestion> {
+  const { data } = await http.post(`/question-bank/questions/${questionId}/ai-tag/revert`)
   return data
 }
 

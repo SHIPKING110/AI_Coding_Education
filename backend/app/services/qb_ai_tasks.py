@@ -1,7 +1,8 @@
-"""题库 AI 批量任务：进程内任务注册表 + 后台线程执行，前端可轮询进度。
+"""题库 AI 批量任务：数据库持久化 + 后台线程执行，前端可轮询进度。
 
 用于「AI 校准疑点题 / AI 校准本卷 / AI 知识点打标」这类耗时较长（逐题调用 LLM）
-的操作：请求立即返回 task_id，执行进度与结果通过轮询获得，切换页面不丢失。
+的操作：请求立即返回 task_id，执行进度与结果通过轮询获得；任务状态落库，
+进程重启/滚动部署后进度不丢失（原实现为纯内存注册表）。
 """
 
 from __future__ import annotations
@@ -9,76 +10,102 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-_TASK_TTL_SECONDS = 6 * 3600
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 
-_LOCK = threading.Lock()
-_TASKS: dict[str, dict[str, Any]] = {}
+from app.models.question_bank import QuestionBankAiTask
 
-
-def _now() -> datetime:
-    return datetime.now(UTC)
+_TASK_TTL = timedelta(hours=6)
 
 
-def _prune_locked() -> None:
-    cutoff = _now().timestamp() - _TASK_TTL_SECONDS
-    stale = [
-        task_id
-        for task_id, task in _TASKS.items()
-        if datetime.fromisoformat(task["created_at"]).timestamp() < cutoff
-    ]
-    for task_id in stale:
-        _TASKS.pop(task_id, None)
+def _serialize(task: QuestionBankAiTask) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "kind": task.kind,
+        "status": task.status,
+        "progress": task.progress,
+        "total": task.total,
+        "message": task.message or "",
+        "result": task.result,
+        "error": task.error,
+        "user_id": str(task.user_id),
+        "created_at": (task.created_at or datetime.now(UTC)).isoformat(),
+        "updated_at": (task.updated_at or datetime.now(UTC)).isoformat(),
+        "meta": task.meta or {},
+    }
+
+
+def _prune(db: Session) -> None:
+    cutoff = datetime.now(UTC) - _TASK_TTL
+    db.execute(delete(QuestionBankAiTask).where(QuestionBankAiTask.created_at < cutoff))
+    db.commit()
 
 
 def create_task(
+    db: Session,
     user_id: uuid.UUID,
     kind: str,
     total: int,
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    task: dict[str, Any] = {
-        "id": uuid.uuid4().hex,
-        "kind": kind,
-        "status": "running",
-        "progress": 0,
-        "total": total,
-        "message": "",
-        "result": None,
-        "error": None,
-        "user_id": str(user_id),
-        "created_at": _now().isoformat(),
-        "updated_at": _now().isoformat(),
-        "meta": meta or {},
-    }
-    with _LOCK:
-        _prune_locked()
-        _TASKS[task["id"]] = task
-    return dict(task)
+    _prune(db)
+    task = QuestionBankAiTask(
+        id=uuid.uuid4().hex,
+        user_id=user_id,
+        kind=kind,
+        status="running",
+        progress=0,
+        total=total,
+        message="",
+        meta=meta or {},
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return _serialize(task)
 
 
-def update_task(task_id: str, **fields: Any) -> None:
-    with _LOCK:
-        task = _TASKS.get(task_id)
+def update_task(task_id: str, *, db: Session | None = None, **fields: Any) -> None:
+    """worker 线程内更新任务状态；若传入 db 则复用该会话（测试/同会话场景），
+    否则开独立短会话（生产后台线程场景），保证每步更新立即可见。"""
+
+    def _update(session: Session) -> None:
+        task = session.get(QuestionBankAiTask, task_id)
         if task is None:
             return
-        task.update(fields)
-        task["updated_at"] = _now().isoformat()
+        for key, value in fields.items():
+            setattr(task, key, value)
+        session.commit()
+
+    if db is not None:
+        _update(db)
+        return
+    from app.core.database import SessionLocal
+
+    session = SessionLocal()
+    try:
+        _update(session)
+    finally:
+        session.close()
 
 
-def get_task(task_id: str) -> dict[str, Any] | None:
-    with _LOCK:
-        task = _TASKS.get(task_id)
-        return dict(task) if task else None
+def get_task(db: Session, task_id: str) -> dict[str, Any] | None:
+    task = db.get(QuestionBankAiTask, task_id)
+    return _serialize(task) if task else None
 
 
-def active_tasks(user_id: uuid.UUID) -> list[dict[str, Any]]:
-    with _LOCK:
-        _prune_locked()
-        mine = [dict(t) for t in _TASKS.values() if t["user_id"] == str(user_id)]
-    return [t for t in mine if t["status"] == "running"]
+def active_tasks(db: Session, user_id: uuid.UUID) -> list[dict[str, Any]]:
+    _prune(db)
+    rows = db.scalars(
+        select(QuestionBankAiTask).where(
+            QuestionBankAiTask.user_id == user_id,
+            QuestionBankAiTask.status == "running",
+        )
+    ).all()
+    return [_serialize(row) for row in rows]
 
 
 def spawn(task_id: str, worker: Callable[[], dict[str, Any]]) -> None:

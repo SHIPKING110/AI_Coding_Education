@@ -30,6 +30,7 @@ const practiceFeedback = ref<{
 const selfCorrect = ref<boolean | null>(null)
 const saving = ref(false)
 let advanceTimer: number | undefined
+let gradePoll: number | undefined
 
 const questions = computed(() => attempt.value?.questions ?? [])
 const question = computed<AttemptQuestion | null>(() => questions.value[current.value] ?? null)
@@ -46,6 +47,12 @@ const examClock = computed(() => {
 const examExpired = ref(false)
 const result = computed(() => attempt.value?.result)
 const normalizedScore = computed(() => result.value?.normalized_score ?? (result.value?.total_score ? Math.round(((result.value.score ?? 0) / result.value.total_score) * 100) : 0))
+const partialCount = computed(
+  () =>
+    result.value?.items.filter(
+      (i) => i.is_correct === false && (i.score ?? 0) > 0 && (i.score ?? 0) < (i.max_score ?? 0),
+    ).length ?? 0,
+)
 const paperKindLabel = computed(() => {
   const kind = attempt.value?.kind ?? ''
   const map: Record<string, string> = {
@@ -254,11 +261,38 @@ async function submit() {
     attempt.value = await submitPracticeAttempt(a.id)
     current.value = 0
     syncAnswer()
+    if (attempt.value.result?.pending_ai) startGradePoll()
   } catch {
     toast.error('交卷失败')
   } finally {
     submitting.value = false
   }
+}
+
+function startGradePoll() {
+  const attemptId = attempt.value?.id
+  if (!attemptId) return
+  let tries = 0
+  if (gradePoll) window.clearInterval(gradePoll)
+  gradePoll = window.setInterval(async () => {
+    tries += 1
+    try {
+      const latest = await getPracticeAttempt(attemptId)
+      if (!latest.result?.pending_ai) {
+        if (gradePoll) window.clearInterval(gradePoll)
+        gradePoll = undefined
+        attempt.value = latest
+        syncAnswer()
+        return
+      }
+    } catch {
+      /* 网络波动时继续轮询 */
+    }
+    if (tries >= 40) {
+      if (gradePoll) window.clearInterval(gradePoll)
+      gradePoll = undefined
+    }
+  }, 2000)
 }
 
 function leave() {
@@ -331,7 +365,8 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   stopExamCountdown()
-  window.clearTimeout(advanceTimer)
+  if (advanceTimer !== undefined) window.clearTimeout(advanceTimer)
+  if (gradePoll !== undefined) window.clearInterval(gradePoll)
 })
 </script>
 
@@ -361,6 +396,10 @@ onBeforeUnmount(() => {
         <div class="score-card">
           <strong>{{ result.correct_count }}/{{ result.question_count }}</strong>
           <span>答对题数</span>
+        </div>
+        <div v-if="partialCount > 0" class="score-card">
+          <strong class="partial-text">{{ partialCount }}</strong>
+          <span>部分正确</span>
         </div>
         <div v-if="isExam && result.rating" class="score-card">
           <strong :class="result.rating === '达标' ? 'pass-text' : 'fail-text'">{{ result.rating }}</strong>
@@ -471,8 +510,30 @@ onBeforeUnmount(() => {
         <article v-for="item in result.items" :key="item.id" class="review-item">
           <div class="review-head">
             <span :class="{ 'bad-no': item.is_correct === false }">第 {{ item.order_no }} 题</span>
-            <span :class="item.is_correct === true ? 'ok' : item.is_correct === false ? 'bad' : 'neutral'">
-              {{ item.is_correct === true ? '正确' : item.is_correct === false ? '错误' : '自评/未判' }} · {{ item.score }}/{{ item.max_score }} 分
+            <span
+              :class="
+                item.is_correct === true
+                  ? 'ok'
+                  : item.is_correct === false &&
+                    (item.score ?? 0) > 0 &&
+                    (item.score ?? 0) < (item.max_score ?? 0)
+                  ? 'partial'
+                  : item.is_correct === false
+                  ? 'bad'
+                  : 'neutral'
+              "
+            >
+              {{
+                item.is_correct === true
+                  ? '正确'
+                  : item.is_correct === false &&
+                    (item.score ?? 0) > 0 &&
+                    (item.score ?? 0) < (item.max_score ?? 0)
+                  ? '部分正确'
+                  : item.is_correct === false
+                  ? '错误'
+                  : '自评/未判'
+              }} · {{ item.score }}/{{ item.max_score }} 分
             </span>
           </div>
           <p class="review-line">你的答案：{{ answerText(item.user_answer) || '未作答' }}</p>
@@ -580,6 +641,9 @@ onBeforeUnmount(() => {
 }
 .score-card .fail-text {
   color: #b91c1c;
+}
+.score-card .partial-text {
+  color: #b45309;
 }
 .practice-layout {
   display: grid;
@@ -830,6 +894,9 @@ onBeforeUnmount(() => {
 }
 .review-head .bad {
   color: #b91c1c;
+}
+.review-head .partial {
+  color: #b45309;
 }
 .review-head .neutral {
   color: var(--ink-3);

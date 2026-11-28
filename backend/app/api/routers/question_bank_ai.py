@@ -259,6 +259,24 @@ def ai_tag_set(
     }
 
 
+@router.post("/questions/{question_id}/ai-tag/revert")
+def ai_revert_tag(
+    question_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """撤销该题最近一次已应用的 AI 知识点打标。"""
+    _require_qb_permission(db, current_user, "question_bank_review")
+    question = db.get(QuestionBankQuestion, question_id)
+    if not question:
+        raise HTTPException(status_code=404, detail="题目不存在")
+    try:
+        question_bank_ai.revert_tag(db, question)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _q_out(question)
+
+
 @router.get("/kp-taxonomy")
 def list_kp_taxonomy(
     subject: str | None = None,
@@ -364,6 +382,7 @@ def ai_validate_set_task(
     apply_flag = payload.apply
     user_id = current_user.id
     task = qb_ai_tasks.create_task(
+        db,
         user_id,
         "validate",
         len(question_ids),
@@ -431,6 +450,7 @@ def ai_tag_set_task(
     question_ids = [q.id for q in questions]
     user_id = current_user.id
     task = qb_ai_tasks.create_task(
+        db,
         user_id,
         "tag",
         len(question_ids),
@@ -477,13 +497,20 @@ def ai_tag_set_task(
 
 
 @router.get("/ai-tasks/{task_id}")
-def get_ai_task(task_id: str, current_user: User = Depends(get_current_user)):
-    task = qb_ai_tasks.get_task(task_id)
+def get_ai_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    task = qb_ai_tasks.get_task(db, task_id)
     if task is None or task["user_id"] != str(current_user.id):
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
     return task
 
 
 @router.get("/ai-tasks")
-def list_active_ai_tasks(current_user: User = Depends(get_current_user)):
-    return {"tasks": qb_ai_tasks.active_tasks(current_user.id)}
+def list_active_ai_tasks(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return {"tasks": qb_ai_tasks.active_tasks(db, current_user.id)}
