@@ -81,7 +81,7 @@ def _options_from_stem(stem: str) -> tuple[dict[str, str], str]:
 
 @dataclass
 class ParsedLine:
-    text: str = ""
+    text: str = ""  # 仅去行尾空白，保留行首缩进（代码段需要）
     images: list[tuple[str, bytes, str]] = field(default_factory=list)
 
 
@@ -113,6 +113,7 @@ class ParsedPaper:
     questions: list[ParsedQuestion]
     warnings: list[str]
     sections: list[dict[str, Any]]
+    declared_count: int | None = None  # 文档声明的题目总数（“题数：37”等）
     issues: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -140,15 +141,16 @@ def _read_lines(path: Path) -> list[ParsedLine]:
                 images.append((rel_id, part.blob, ext))
             except Exception:
                 continue
-        text = p.text.strip()
-        if text or images:
+        # 保留行首缩进：代码段/含代码题干的缩进依赖 leading spaces
+        text = p.text.rstrip()
+        if text.strip() or images:
             lines.append(ParsedLine(text=text, images=images))
     # 同时保留表格纯文本（部分真题把选项放表格里），图片暂不处理
     for table in document.tables:
         for row in table.rows:
             for cell in row.cells:
-                text = cell.text.strip()
-                if text:
+                text = cell.text.rstrip()
+                if text.strip():
                     lines.append(ParsedLine(text=text))
     return lines
 
@@ -274,9 +276,17 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
     comments: list[str] = []
     issues: list[dict[str, Any]] = []
 
-    def note(message: str, code: str, question_no: int | None = None) -> None:
+    def note(message: str, code: str, question_no: int | None = None, level: str = "warning") -> None:
         comments.append(message)
-        issues.append({"code": code, "level": "warning", "message": message, "question_no": question_no})
+        issues.append({"code": code, "level": level, "message": message, "question_no": question_no})
+
+    # 文档首部常声明“分数：100  题数：37”，记录它以核对拆分质量
+    declared_count: int | None = None
+    for line in lines[:15]:
+        m = re.search(r"题数\s*[：:]\s*(\d+)", line.text) or re.search(r"共\s*(\d+)\s*题", line.text)
+        if m:
+            declared_count = int(m.group(1))
+            break
 
     sections: list[dict[str, Any]] = []
     questions: list[ParsedQuestion] = []
@@ -501,6 +511,7 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
             actual_by_section[current_section] = actual_by_section.get(current_section, 0) + 1
 
     block: list[ParsedLine] = []
+    block_looks_complete = False  # 当前块是否已出现“标准答案/解析/参考代码”等收尾元信息
     current_no = 0
     for line in lines:
         text = line.text.strip()
@@ -508,6 +519,7 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         if section_match:
             flush_block(block, current_no)
             block = []
+            block_looks_complete = False
             current_section = section_match.group(1).strip()
             current_section_count = int(section_match.group(2))
             current_section_total = (
@@ -538,16 +550,34 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
                     "score": current_section_total,
                     "type": current_type,
                 })
-            if block:
-                if expected_no is not None and number != expected_no:
-                    note(f"题号从 {expected_no} 跳到 {number}，请核对是否漏题", "number_gap", number)
-                flush_block(block, current_no)
-            block = [line]
-            current_no = number
-            expected_no = number + 1
+            accept_new = False
+            if not block:
+                accept_new = True
+            elif expected_no is not None and number == expected_no:
+                accept_new = True
+            elif number > current_no and block_looks_complete:
+                # 文档每章编号重启（如单选 1-20，判断 1-10），且当前块已收尾，按新题拆分
+                accept_new = True
+            if accept_new:
+                if block:
+                    if expected_no is not None and number != expected_no:
+                        note(f"题号从 {expected_no} 跳到 {number}，请核对是否漏题", "number_gap", number)
+                    flush_block(block, current_no)
+                    block_looks_complete = False
+                block = [line]
+                current_no = number
+                expected_no = number + 1
+            else:
+                # 编号不连续且当前块未收尾，大概率是题干/代码/评分标准里的行内编号，归入当前题
+                block.append(line)
             continue
         if block:
             block.append(line)
+            meta_match = META_RE.match(text)
+            if meta_match:
+                key = meta_match.group(1)
+                if key in {"标准答案", "参考答案", "试题解析", "解析", "评分标准", "参考代码"} or key.startswith("参考程序"):
+                    block_looks_complete = True
     flush_block(block, current_no)
 
     if not questions:
@@ -555,13 +585,20 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
     declared_by_section: dict[str, int] = {}
     for section in sections:
         declared_by_section[section["name"]] = declared_by_section.get(section["name"], 0) + section["count"]
-    for name, declared_count in declared_by_section.items():
+    for name, sec_declared in declared_by_section.items():
         parsed_count = actual_by_section.get(name, 0)
-        if parsed_count != declared_count:
+        if parsed_count != sec_declared:
             note(
-                f"章节「{name}」声明 {declared_count} 题，实际解析 {parsed_count} 题",
+                f"章节「{name}」声明 {sec_declared} 题，实际解析 {parsed_count} 题，与原文档不一致，请核对拆分",
                 "section_count_mismatch",
+                level="error",
             )
+    if declared_count is not None and len(questions) != declared_count:
+        note(
+            f"文档声明 {declared_count} 题，实际解析 {len(questions)} 题，与原文档不一致，请核对题目拆分",
+            "total_count_mismatch",
+            level="error",
+        )
 
     return ParsedPaper(
         name=title,
@@ -573,5 +610,6 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         questions=questions,
         warnings=comments,
         sections=sections,
+        declared_count=declared_count,
         issues=issues,
     )

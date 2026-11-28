@@ -103,7 +103,9 @@ def _item_dict(q: QuestionBankQuestion) -> dict[str, Any]:
         "analysis": q.analysis,
         "reference_code": q.reference_code,
         "score": q.score,
+        "media": q.media or [],
         "knowledge_points": q.knowledge_points or [],
+        "source_excerpt": q.source_excerpt,
     }
 
 
@@ -152,19 +154,23 @@ def validate_question(
 
     prompt = (
         "你是少儿编程考级题库审校专家。请检查题目是否与原始试卷一致、答案是否正确、解析是否充分。"
+        "source_excerpt 是该题在原试卷中的原文，可据此补全缺失的答案/选项/解析/参考代码。"
         "只输出严格 JSON："
         '{"aligned":true/false,"confidence":0到1,'
         '"issues":[{"code":"answer_error|analysis_missing|options_incomplete|type_error|stem_mismatch|other","message":"..."}],'
-        '"fixes":{"type":"可选题型","answer":"可选答案（单选A/B/C；多选A,C；判断正确/错误）","options":["可选完整选项"],"analysis":"可选解析"},'
+        '"fixes":{"type":"可选题型","answer":"可选答案（单选A/B/C；多选A,C；判断正确/错误）",'
+        '"options":["可选完整选项"],"analysis":"可选解析","reference_code":"编程题可选参考代码"},'
         '"reasons":["判定依据"]}。没有需要修改的字段就不要放在 fixes 中。题目数据：'
         + json.dumps(
             {
+                "order_no": item["order_no"],
                 "type": item["type"],
                 "stem": item["stem"][:1600],
                 "options": item["options"],
                 "answer_display": _answer_text(item),
                 "analysis": (item["analysis"] or "")[:1200],
                 "reference_code": (item["reference_code"] or "")[:1200],
+                "source_excerpt": (item.get("source_excerpt") or "")[:1500],
             },
             ensure_ascii=False,
         )
@@ -188,9 +194,16 @@ def validate_question(
         db.commit()
         raise
 
+    FIELD_LABELS = {
+        "type": "题型",
+        "options": "选项",
+        "answer": "答案",
+        "analysis": "解析",
+        "reference_code": "参考代码",
+    }
+
     fixes = data.get("fixes") if isinstance(data.get("fixes"), dict) else {}
     after = dict(before)
-    changed = False
     if fixes.get("type") in VALID_TYPES:
         after["type"] = fixes["type"]
     if isinstance(fixes.get("options"), list) and fixes["options"]:
@@ -199,17 +212,58 @@ def validate_question(
         after["answer"] = _answer_from_text(fixes["answer"], str(after.get("type")), after.get("options"))
     if isinstance(fixes.get("analysis"), str) and fixes["analysis"].strip():
         after["analysis"] = fixes["analysis"].strip()
-    changed = any(after.get(key) != before.get(key) for key in before)
+    if isinstance(fixes.get("reference_code"), str) and fixes["reference_code"].strip():
+        after["reference_code"] = fixes["reference_code"].strip()
+
+    def _blank(val: Any) -> bool:
+        if val is None:
+            return True
+        if isinstance(val, str):
+            return not val.strip()
+        if isinstance(val, (list, dict)):
+            return not val
+        return False
+
+    def _answer_invalid(qtype: str | None, ans: Any, opts: Any) -> bool:
+        if qtype == "single_choice":
+            return not isinstance(ans, int) or not isinstance(opts, list) or not (0 <= ans < len(opts))
+        if qtype == "multiple_choice":
+            if not isinstance(ans, list) or not isinstance(opts, list):
+                return True
+            return any(not isinstance(x, int) or x < 0 or x >= len(opts) for x in ans)
+        if qtype == "judgement":
+            return not isinstance(ans, bool)
+        return _blank(ans)
 
     confidence = float(data.get("confidence") or 0)
     issues = data.get("issues") if isinstance(data.get("issues"), list) else []
     issue_codes = {str(i.get("code")) for i in issues if isinstance(i, dict)}
+
+    # 缺失/无效字段（填补）只需中等置信；覆盖已有内容（修正）需高置信，避免误改原有正确内容
     structural = {"options_incomplete", "answer_error", "stem_mismatch", "type_error"}
-    threshold = 0.55 if issue_codes & structural else 0.85
+    fill_threshold = 0.3 if issue_codes & structural else 0.45
+    override_threshold = 0.85
+    qtype_after = str(after.get("type") or before.get("type") or "")
+    apply_fields: list[str] = []
+    for field in ("type", "options", "answer", "analysis", "reference_code"):
+        old_val = before.get(field)
+        new_val = after.get(field)
+        if new_val == old_val:
+            continue
+        if field == "type":
+            missing = old_val not in VALID_TYPES
+        elif field == "options":
+            missing = not isinstance(old_val, list) or any(not str(o or "").strip() for o in old_val)
+        elif field == "answer":
+            missing = _answer_invalid(qtype_after, old_val, after.get("options"))
+        else:
+            missing = _blank(old_val)
+        if confidence >= (fill_threshold if missing else override_threshold):
+            apply_fields.append(field)
+
     auto_apply = bool(
         apply
-        and changed
-        and confidence >= threshold
+        and apply_fields
         and question.status in (BankQuestionStatus.DRAFT.value, BankQuestionStatus.REVIEWED.value)
     )
     if auto_apply:
@@ -221,7 +275,12 @@ def validate_question(
             question.answer = after["answer"]
         if after.get("analysis") is not None:
             question.analysis = after["analysis"]
-        question.review_note = "AI 校准建议已应用，请人工复核"
+        if after.get("reference_code") is not None:
+            question.reference_code = after["reference_code"]
+        names = [FIELD_LABELS[f] for f in apply_fields]
+        question.review_note = (
+            "AI 校准已应用：" + "、".join(names) + f"（置信度 {confidence:.2f}），请人工复核"
+        )
 
     review = QuestionBankAiReview(
         question_id=question.id,

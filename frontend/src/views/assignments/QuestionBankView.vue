@@ -104,11 +104,15 @@
               <label>等级<input v-model="selected.level" :disabled="!canUpload" @blur="saveMeta" /></label>
               <label>年月<input v-model="selected.exam_month" type="month" :disabled="!canUpload" @blur="saveMeta" /></label>
             </div>
-            <div v-if="selected.import_meta?.warnings?.length || validationIssues.length || aiStatus" class="warn-box">
+            <div v-if="parsePromptCount || validationIssues.length || selected.import_meta?.warnings?.length || aiStatus" class="warn-box">
               <div class="warn-head">
                 <strong>解析与质检提示</strong>
+                <span v-if="parsePromptCount" class="qc-count">{{ parsePromptCount }} 处导入提示</span>
                 <span v-if="validationIssues.length" class="qc-count">
                   {{ validationErrorCount }} 处错误 · {{ validationWarnCount }} 处提示
+                </span>
+                <span v-if="declaredCountMismatch" class="qc-count" style="background:#fee2e2;border-color:#fca5a5;color:#991b1b">
+                  文档声明题数与实际解析不符，请核对拆分
                 </span>
                 <span v-if="aiStatus" class="ai-status" :class="{ ok: aiStatus.configured }">
                   {{ aiStatus.configured
@@ -116,6 +120,17 @@
                     : 'AI 习题模型未配置：请到 设置 → 模型配置 为「AI 习题」选模型' }}
                 </span>
               </div>
+              <ul v-if="selected.import_meta?.issues?.length" class="qc-list">
+                <li
+                  v-for="(issue, i) in selected.import_meta.issues"
+                  :key="`import-${issue.code}-${i}`"
+                  class="qc-item"
+                  :class="issue.level"
+                >
+                  <span class="qc-badge" :class="issue.level">{{ issue.level === 'error' ? '导入错误' : '导入提示' }}</span>
+                  {{ issue.message }}
+                </li>
+              </ul>
               <ul v-if="validationIssues.length" class="qc-list">
                 <li
                   v-for="(issue, i) in validationIssues"
@@ -124,11 +139,11 @@
                   :class="issue.level"
                   @click="jumpToQuestionNo(issue.question_no)"
                 >
-                  <span class="qc-badge" :class="issue.level">{{ issue.level === 'error' ? '错误' : '提示' }}</span>
+                  <span class="qc-badge" :class="issue.level">{{ issue.level === 'error' ? '质检错误' : '质检提示' }}</span>
                   {{ issue.message }}
                 </li>
               </ul>
-              <ul v-else-if="selected.import_meta?.warnings?.length">
+              <ul v-if="!validationIssues.length && selected.import_meta?.warnings?.length">
                 <li v-for="w in selected.import_meta.warnings" :key="w">{{ w }}</li>
               </ul>
               <div v-if="canReview" class="warn-actions">
@@ -137,11 +152,12 @@
                   class="btn ghost"
                   :disabled="aiValidating"
                   @click="onValidateFlagged"
+                  title="仅校准质检标记为疑点的题目（质检提示中的“第 n 题”）"
                 >
                   {{ aiValidating ? `校准中 ${aiProgress.done}/${aiProgress.total}` : `AI 校准疑点题（${flaggedQuestionIds.length}）` }}
                 </button>
-                <button class="btn ghost" :disabled="aiValidating" @click="onValidateSet">
-                  {{ aiValidating ? `校准中 ${aiProgress.done}/${aiProgress.total}` : 'AI 校准本卷' }}
+                <button class="btn ghost" :disabled="aiValidating || draftCount === 0" @click="onValidateSet" title="对本套全部草稿题逐题校验；大套卷校准耗时较长，建议先确认已为「AI 习题」选模型">
+                  {{ aiValidating ? `校准中 ${aiProgress.done}/${aiProgress.total}` : `AI 校准全部题（${draftCount}）` }}
                 </button>
                 <button class="btn ghost" :disabled="aiTagging || !aiTaggableCount" @click="onTagSet">
                   {{ aiTagging ? `打标中 ${aiProgress.done}/${aiProgress.total}` : `AI 知识点打标（${aiTaggableCount}）` }}
@@ -686,6 +702,17 @@ const aiSourceLabel = computed(() => {
 const validationIssues = ref<BankIssue[]>([])
 const validationErrorCount = computed(() => validationIssues.value.filter((i) => i.level === 'error').length)
 const validationWarnCount = computed(() => validationIssues.value.filter((i) => i.level !== 'error').length)
+const parsePromptCount = computed(() => {
+  const meta = selected.value?.import_meta ?? {}
+  return (meta.issues?.length ?? 0) + (meta.warnings?.length ?? 0)
+})
+const declaredCountMismatch = computed(() => {
+  const meta = selected.value?.import_meta ?? {}
+  const declared = meta.declared_count
+  if (!declared) return false
+  return declared !== (selected.value?.questions?.length ?? 0)
+})
+const draftCount = computed(() => (selected.value?.questions ?? []).filter((q) => q.status === 'draft').length)
 const flaggedOrderNos = computed(
   () => new Set(validationIssues.value.map((i) => i.question_no).filter((n): n is number => typeof n === 'number')),
 )
@@ -884,10 +911,20 @@ async function onValidateQuestion() {
   if (!q) return
   aiSingleBusy.value = true
   try {
-    const res = await aiValidateQuestion(q.id, true)
+    const res = await aiValidateQuestion(q.id, true, true)
     Object.assign(q, res.question)
     loadEdit(q)
-    toast.success(res.applied ? 'AI 已校准并应用修复，请复核' : 'AI 已生成校准建议，请复核')
+    const fields = res.changed_fields ?? []
+    if (res.applied && fields.length) {
+      toast.success(`AI 已应用：${fields.join('、')}，请复核`)
+    } else if (res.applied) {
+      toast.success('AI 已校准，未发现需要修改的问题')
+    } else if (fields.length) {
+      toast.success(`AI 已生成校准建议：${fields.join('、')}，请复核`)
+    } else {
+      toast.success('AI 未发现需要修改的问题')
+    }
+    if (selected.value) void loadValidation(selected.value.id)
   } catch (e: unknown) {
     toast.error(actionErrorText(e, 'AI 校准失败'))
   } finally {
@@ -954,13 +991,27 @@ async function onTagSet() {
   }
 }
 
+const doneValidateIds = ref<Set<string>>(new Set())
+const validationWatcherPrimed = ref(false)
 watch(
   () => setAiTasks.value.map((t) => `${t.id}:${t.status}:${t.progress}`).join('|'),
   () => {
-    if (!setAiTasks.value.some((t) => t.status === 'done')) return
-    if (selected.value) {
+    const done = setAiTasks.value.filter((t) => t.kind === 'validate' && t.status === 'done')
+    const previously = doneValidateIds.value
+    doneValidateIds.value = new Set(done.map((t) => t.id))
+    const newly = done.filter((t) => !previously.has(t.id))
+    const running = setAiTasks.value.some((t) => t.status === 'running')
+    if (!running && newly.length && selected.value) {
       void refreshSetQuietly()
       void loadValidation(selected.value.id)
+    }
+    if (!validationWatcherPrimed.value) {
+      validationWatcherPrimed.value = true
+      return
+    }
+    for (const t of newly) {
+      const applied = t.result?.applied ?? 0
+      if (applied) toast.success(`AI 校准完成，已应用修复 ${applied} 题；其余题目仍需人工复核`)
     }
   },
 )
@@ -1094,7 +1145,11 @@ async function onAutoRepair() {
   try {
     const res = await autoRepairBankSet(selected.value.id, true)
     await refreshSetQuietly()
-    const msg = `已重排题号 ${res.renumbered} 题，AI 自动修复 ${res.fixed} 题` + (res.needs_review ? `，${res.needs_review} 题仍需人工确认` : '')
+    if (selected.value) void loadValidation(selected.value.id)
+    const errs = (res.details ?? []).filter((d) => d.status === 'error').length
+    let msg = `已重排题号 ${res.renumbered} 题，AI 自动修复 ${res.fixed} 题`
+    if (res.needs_review) msg += `，${res.needs_review} 题仍需人工确认`
+    if (errs) msg += `，${errs} 题模型调用失败`
     toast.success(msg)
   } catch {
     toast.error('自动修复失败，请检查 AI 模型是否已配置')

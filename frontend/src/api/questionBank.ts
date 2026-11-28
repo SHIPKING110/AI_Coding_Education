@@ -63,6 +63,7 @@ export interface BankSet {
     sections?: { name: string; count: number; score: number; type: string | null }[]
     warnings?: string[]
     issues?: BankIssue[]
+    declared_count?: number
     parser?: string
   } | null
   created_at: string
@@ -143,6 +144,7 @@ export async function autoRepairBankSet(setId: string, useAi = true): Promise<{
   renumbered: number
   fixed: number
   needs_review: number
+  details?: { order_no: number; applied: boolean; status: string; confidence?: number; message?: string }[]
 }> {
   const { data } = await http.post(`/question-bank/sets/${setId}/auto-repair`, null, {
     params: { use_ai: useAi },
@@ -576,10 +578,11 @@ export async function getQuestionBankAiStatus(): Promise<AiStatusOut> {
 export async function aiValidateQuestion(
   questionId: string,
   apply = true,
-): Promise<{ review: AiReviewOut; question: BankQuestion; applied: boolean; cached?: boolean }> {
+  force = false,
+): Promise<{ review: AiReviewOut; question: BankQuestion; applied: boolean; cached?: boolean; changed_fields?: string[] }> {
   const { data } = await http.post(
     `/question-bank/questions/${questionId}/ai-validate`,
-    { apply },
+    { apply, force },
     { timeout: 120000 },
   )
   return data

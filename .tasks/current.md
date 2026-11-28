@@ -1,5 +1,14 @@
 # 当前任务
 
+## 题库模块（v3.2：删除去重 + 一键修复失效 + 未完成记录取消，2026-12-02）
+
+- [x] **彻底删除后重新上传误报「该文档已经导入过」**：根因=`DELETE /sets/{id}` 只删套卷/题目，`question_bank_sources` 行（含 file_hash）保留导致哈希去重永远命中；现删除套卷时连带删除来源行并清理原始文档与媒体目录
+- [x] **「AI 一键修复」无变化**：①修复范围由「结构缺失题」扩展为质检规则发现的所有可修复问题（缺/空选项、缺答案、答案越界、缺解析、缺参考代码、题型错误）；②`validate_question` 新增 `force` 参数，绕过已存在「suggested」校验记录的缓存重新评估（已 applied 且哈希未变仍命中缓存防重复计费）；③修复后复测质检并回报仍需人工的题数；前端 repair 后自动刷新套卷与质检列表
+- [x] **未完成记录点「取消」留下 0 分脏数据**：`close_attempt` 对从未作答的进行中会话直接删除（返回 `{abandoned:true}`），不再落 0 分记录、不影响练习次数/题目正确率/模考平均得分率；过期未作答会话同样直接丢弃；已作答会话保持评估归档
+- [x] 验证：后端全量 pytest 394 过/1 跳（仅 test_qb_ai_tasks 异步用例因环境缺 pytest-asyncio 失败，属存量环境问题）；ruff 零错误；前端 eslint + vue-tsc + vite build 通过；新增 3 例回归（删卷后可重传/未作答取消不留记录且统计为 0/已作答取消仍评估保留）
+- 提交：57fcce3（题库增删修复接口，上一轮）+ 4d63942（本轮三处修复），均已推送 origin/main
+- 注意：8080 生产需 `docker compose up -d --build` 重建后端容器后生效
+
 ## 题库模块（v3.1：做题 500 修复 + 考试计时/套卷筛选 + AI 任务异步化 + 选项增删，2026-11-26）
 
 - [x] **做题 500 根因修复**：生产库 `question_bank_attempts` 缺 004 新增列（user_id/kind/paper_title/paper_meta/question_results）导致所有复习/考试入口 500；新增幂等迁移 `c00000000005_repair_attempt_schema`（缺列补齐 + student_id 可空 + user_id 从 students 回填 + 索引），部署脚本改为仅校验、由容器 entrypoint 自动 `alembic upgrade head`（已在 8080 生产库应用至 c00000000005）

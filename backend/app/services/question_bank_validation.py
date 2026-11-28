@@ -36,6 +36,17 @@ def validate_question(item: dict[str, Any], *, order_no: int | None = None) -> l
     answer = item.get("answer")
     analysis = (item.get("analysis") or "").strip()
     score = int(item.get("score") or 0)
+    media_scopes = {
+        str(m.get("scope"))
+        for m in (item.get("media") or [])
+        if isinstance(m, dict) and m.get("scope")
+    }
+
+    def option_has_content(index: int, opt: Any) -> bool:
+        # 图片选项允许文字留空：该选项挂了图片即视为有内容
+        if str(opt or "").strip():
+            return True
+        return f"option:{chr(65 + index)}" in media_scopes
 
     if not stem or stem == "待补充题干":
         add("empty_stem", f"第 {no} 题题干为空")
@@ -43,7 +54,7 @@ def validate_question(item: dict[str, Any], *, order_no: int | None = None) -> l
         if not options:
             add("missing_options", f"第 {no} 题缺少选项")
         else:
-            if any((opt or "").strip() == "" for opt in options):
+            if any(not option_has_content(i, opt) for i, opt in enumerate(options)):
                 add("empty_option", f"第 {no} 题存在空选项")
             if qtype == "single_choice" and isinstance(answer, int):
                 if not 0 <= answer < len(options):

@@ -215,31 +215,35 @@ def import_docx(
                 "sections": paper.sections,
                 "warnings": paper.warnings,
                 "issues": paper.issues,
+                "declared_count": paper.declared_count,
                 "parser": "rules-v1",
             },
         )
         db.add(bank_set)
         db.flush()
         for idx, parsed in enumerate(paper.questions, start=1):
-            db.add(
-                QuestionBankQuestion(
-                    bank_set_id=bank_set.id,
-                    order_no=idx,
-                    type=parsed.type,
-                    stem=parsed.stem or "待补充题干",
-                    options=parsed.options,
-                    answer=parsed.answer,
-                    analysis=parsed.analysis,
-                    difficulty=parsed.difficulty,
-                    score=parsed.score,
-                    language=parsed.language,
-                    reference_code=parsed.reference_code,
-                    media=parsed.media,
-                    source_excerpt=parsed.source_excerpt,
-                    knowledge_points=parsed.knowledge_points,
-                    status=BankQuestionStatus.DRAFT,
-                )
+            q = QuestionBankQuestion(
+                bank_set_id=bank_set.id,
+                order_no=idx,
+                type=parsed.type,
+                stem=parsed.stem or "待补充题干",
+                options=parsed.options,
+                answer=parsed.answer,
+                analysis=parsed.analysis,
+                difficulty=parsed.difficulty,
+                score=parsed.score,
+                language=parsed.language,
+                reference_code=parsed.reference_code,
+                media=parsed.media,
+                source_excerpt=parsed.source_excerpt,
+                knowledge_points=parsed.knowledge_points,
+                status=BankQuestionStatus.DRAFT,
             )
+            # 把导入时解析层的问题（缺答案/缺解析/章节题数不符等）附给对应题目，审核时可见
+            parser_issues = [i for i in paper.issues if i.get("question_no") == idx]
+            if parser_issues:
+                q.review_note = "导入解析提示：" + "; ".join(i["message"] for i in parser_issues)
+            db.add(q)
         source.status = BankSourceStatus.REVIEW_REQUIRED
         db.commit()
         return BankImportOut(
@@ -511,6 +515,7 @@ def _question_payload(q: QuestionBankQuestion) -> dict[str, Any]:
         "analysis": q.analysis,
         "reference_code": q.reference_code,
         "score": q.score,
+        "media": q.media or [],
     }
 
 
@@ -549,22 +554,33 @@ def auto_repair_set(
 
     before = _fixable_question_numbers([_question_payload(q) for q in bank_set.questions])
     fixed = 0
+    details: list[dict[str, Any]] = []
     if use_ai and before:
         from app.services import question_bank_ai as qb_ai
 
         candidates = [q for q in bank_set.questions if q.order_no in before]
         for q in candidates:
             try:
-                _, applied = qb_ai.validate_question(db, current_user, q, apply=True, force=True)
+                review, applied = qb_ai.validate_question(db, current_user, q, apply=True, force=True)
             except LLMConfigError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
-            except Exception:  # noqa: BLE001 —— 单题失败不阻断整卷
+            except Exception as exc:  # noqa: BLE001 —— 单题失败不阻断整卷
+                details.append({"order_no": q.order_no, "applied": False, "status": "error", "message": friendly_llm_error(exc)})
                 continue
             if applied:
                 fixed += 1
+            details.append(
+                {
+                    "order_no": q.order_no,
+                    "applied": applied,
+                    "status": review.status,
+                    "confidence": review.confidence,
+                    "message": (review.reasons or [""])[0][:200] if review.reasons else "",
+                }
+            )
     db.commit()
     after = _fixable_question_numbers([_question_payload(q) for q in bank_set.questions])
-    return {"total": total, "renumbered": total, "fixed": fixed, "needs_review": len(after)}
+    return {"total": total, "renumbered": total, "fixed": fixed, "needs_review": len(after), "details": details}
 
 
 @router.post("/sets/{set_id}/review-all")

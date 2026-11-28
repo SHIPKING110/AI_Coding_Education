@@ -70,6 +70,7 @@ def _review_out(review, *, applied: bool = False, cached: bool = False) -> dict[
 
 class AiValidateIn(BaseModel):
     apply: bool = True
+    force: bool = False
 
 
 class AiValidateSetIn(BaseModel):
@@ -108,12 +109,23 @@ def ai_validate_question(
     if not question:
         raise HTTPException(status_code=404, detail="题目不存在")
     try:
-        review, applied = question_bank_ai.validate_question(db, current_user, question, apply=payload.apply)
+        review, applied = question_bank_ai.validate_question(
+            db, current_user, question, apply=payload.apply, force=payload.force
+        )
     except LLMConfigError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=friendly_llm_error(exc)) from exc
-    return {"review": _review_out(review, applied=applied), "question": _q_out(question), "applied": applied}
+    field_labels = {"type": "题型", "options": "选项", "answer": "答案", "analysis": "解析", "reference_code": "参考代码"}
+    changed_fields = []
+    if review.before and review.after:
+        changed_fields = [label for key, label in field_labels.items() if review.before.get(key) != review.after.get(key)]
+    return {
+        "review": _review_out(review, applied=applied),
+        "question": _q_out(question),
+        "applied": applied,
+        "changed_fields": changed_fields,
+    }
 
 
 @router.post("/questions/{question_id}/ai-validate/revert")
