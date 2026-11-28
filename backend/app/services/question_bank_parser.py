@@ -280,10 +280,17 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
         comments.append(message)
         issues.append({"code": code, "level": level, "message": message, "question_no": question_no})
 
-    # 文档首部常声明“分数：100  题数：37”，记录它以核对拆分质量
+    # 文档首部常声明“分数：100  题数：37”，记录它以核对拆分质量。
+    # 注意：章节标题（如“一、单选题(共25题，共50分)”）里的“共 X 题”是单章节题数，
+    # 不能当作文档总题数，否则会误报“声明 25 题、实际 37 题”。
     declared_count: int | None = None
     for line in lines[:15]:
-        m = re.search(r"题数\s*[：:]\s*(\d+)", line.text) or re.search(r"共\s*(\d+)\s*题", line.text)
+        text = line.text.strip()
+        if not text:
+            continue
+        if SECTION_RE.match(text) or SECTION_RE_NO_SCORE.match(text):
+            continue
+        m = re.search(r"题数\s*[：:]\s*(\d+)", text) or re.search(r"共\s*(\d+)\s*题", text)
         if m:
             declared_count = int(m.group(1))
             break

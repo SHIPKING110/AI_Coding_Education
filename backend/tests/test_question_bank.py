@@ -145,6 +145,28 @@ def test_parse_docx_rules_and_images(tmp_path):
     assert any((tmp_path / "media").glob("img_*.png"))
 
 
+def test_section_header_count_not_treated_as_total(tmp_path):
+    """章节标题里的“共 N 题”是单章节题数，不能被当作文档总题数（回归：误报 25 vs 37）。"""
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("青少年软件编程（Python）等级考试试卷（二级）")
+    doc.add_paragraph("一、单选题(共25题，共50分)")
+    doc.add_paragraph("1. 请问以下哪个是变量名？")
+    doc.add_paragraph("A. 1a")
+    doc.add_paragraph("B. _name")
+    doc.add_paragraph("C. a b")
+    doc.add_paragraph("D. for")
+    doc.add_paragraph("标准答案：B")
+    doc.add_paragraph("试题解析：略")
+    path = tmp_path / "section_header.docx"
+    doc.save(str(path))
+    paper = parse_docx(path, media_dir=tmp_path / "m", media_url_prefix="/uploads/qb/m")
+    # 文档没有显式总题数声明，只有章节声明，不能把“共25题”当成总题数
+    assert paper.declared_count is None
+    assert not any(i["code"] == "total_count_mismatch" for i in paper.issues)
+
+
 def test_import_review_publish_and_visibility(client, admin_token, tmp_path):
     path = _build_docx(tmp_path / "202512py二级.docx")
     with path.open("rb") as fh:
