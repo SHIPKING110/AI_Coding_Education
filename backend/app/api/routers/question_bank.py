@@ -11,9 +11,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user, require_roles
@@ -25,6 +25,7 @@ from app.models.question_bank import (
     BankQuestionStatus,
     BankSetStatus,
     BankSourceStatus,
+    PracticeAttempt,
     QuestionBankQuestion,
     QuestionBankSet,
     QuestionBankSource,
@@ -353,6 +354,180 @@ def update_question(
         q.reviewed_at = datetime.now(UTC)
     db.commit()
     return _serialize_question(q)
+
+
+class QuestionCreateIn(BaseModel):
+    type: str = "single_choice"
+    stem: str = ""
+    order_no: int | None = None
+
+
+def _renumber_questions(db: Session, set_id: uuid.UUID) -> None:
+    """把某套卷内的题目按 order_no 顺序重排为 1..N（先转负再转正，避开唯一约束冲突）。"""
+    questions = list(
+        db.scalars(
+            select(QuestionBankQuestion)
+            .where(QuestionBankQuestion.bank_set_id == set_id)
+            .order_by(QuestionBankQuestion.order_no)
+        ).all()
+    )
+    for i, q in enumerate(questions):
+        q.order_no = -(i + 1)
+    db.flush()
+    for i, q in enumerate(questions):
+        q.order_no = i + 1
+    db.flush()
+
+
+@router.post("/sets/{set_id}/questions", status_code=status.HTTP_201_CREATED)
+def create_question(
+    set_id: uuid.UUID,
+    payload: QuestionCreateIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """人工新增题目（导入漏题时补救）。
+
+    可传 order_no 指定插入位置（1 表示最前），该位置及之后的题目自动后移并重新编号；
+    不传则追加到卷末。保存后统一重排 order_no 为 1..N，消除中间漏号。
+    """
+    _require_qb_permission(db, current_user, "question_bank_import")
+    bank_set = db.get(QuestionBankSet, set_id)
+    if bank_set is None:
+        raise HTTPException(status_code=404, detail="套卷不存在")
+    qtype = payload.type if payload.type in {"single_choice", "multiple_choice", "judgement", "programming", "code_fill"} else "single_choice"
+    existing = list(
+        db.scalars(
+            select(QuestionBankQuestion)
+            .where(QuestionBankQuestion.bank_set_id == set_id)
+            .order_by(QuestionBankQuestion.order_no)
+        ).all()
+    )
+    question = QuestionBankQuestion(
+        bank_set_id=set_id,
+        order_no=0,
+        type=qtype,
+        stem=payload.stem.strip() or "（新题目：请编辑题干内容）",
+        options=["", "", "", ""] if qtype in ("single_choice", "multiple_choice") else None,
+        score=10 if qtype == "programming" else 2,
+        difficulty=2,
+        status=BankQuestionStatus.DRAFT,
+    )
+    if payload.order_no is not None:
+        insert_at = max(0, min(len(existing), int(payload.order_no) - 1))
+        ordered = list(existing)
+        ordered.insert(insert_at, question)
+    else:
+        ordered = [*existing, question]
+    db.add(question)
+    # 统一重排：先转负避免唯一约束冲突，再转正为 1..N
+    for i, q in enumerate(ordered):
+        q.order_no = -(i + 1)
+    db.flush()
+    for i, q in enumerate(ordered):
+        q.order_no = i + 1
+    db.flush()
+    db.commit()
+    db.refresh(question)
+    return _serialize_question(question)
+
+
+@router.delete("/questions/{question_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_question(
+    question_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """删除题目（导入多出的题时使用）；删除后剩余题目自动重排题号；历史作答快照不受影响。"""
+    _require_qb_permission(db, current_user, "question_bank_import")
+    question = db.get(QuestionBankQuestion, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="题目不存在")
+    set_id = question.bank_set_id
+    db.delete(question)
+    db.flush()
+    _renumber_questions(db, set_id)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/sets/{set_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_set(
+    set_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """彻底删除整套题库（区别于「归档」）：删除套卷及其全部题目，历史作答保留（快照已固化）。"""
+    _require_qb_permission(db, current_user, "question_bank_archive")
+    bank_set = db.get(QuestionBankSet, set_id)
+    if bank_set is None:
+        raise HTTPException(status_code=404, detail="套卷不存在")
+    # 历史作答保留，但解除对套卷的引用，避免外键约束阻塞删除
+    db.execute(update(PracticeAttempt).where(PracticeAttempt.bank_set_id == set_id).values(bank_set_id=None))
+    # 题目级联删除（AI 复核、收藏标记随题目 ondelete CASCADE 一并清理）
+    db.execute(delete(QuestionBankQuestion).where(QuestionBankQuestion.bank_set_id == set_id))
+    db.delete(bank_set)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _question_needs_repair(q: QuestionBankQuestion) -> bool:
+    """规则层快速判定某题是否结构不完整（用于决定是否调用 AI 校准，省成本）。"""
+    qtype = (q.type or "").strip()
+    if qtype in ("single_choice", "multiple_choice"):
+        opts = [str(o).strip() for o in (q.options or []) if str(o).strip()]
+        if len(opts) < 2:
+            return True
+    if q.answer in (None, "", [], {}):
+        return True
+    if qtype not in ("programming", "code_fill") and not (q.analysis or "").strip():
+        return True
+    return False
+
+
+@router.post("/sets/{set_id}/auto-repair")
+def auto_repair_set(
+    set_id: uuid.UUID,
+    use_ai: bool = Query(default=True, description="是否调用 AI 修复缺失答案/选项/解析"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """一键自动修复整套题库：①题号重排为 1..N（消除跳跃/漏号/重复）；
+    ②对结构不完整的题（缺选项/缺答案/缺解析）逐题调用 AI 校准并高置信自动应用。
+    返回修复统计，尽量减少人工逐题审核。
+    """
+    _require_qb_permission(db, current_user, "question_bank_review")
+    bank_set = db.scalar(
+        select(QuestionBankSet).options(selectinload(QuestionBankSet.questions)).where(QuestionBankSet.id == set_id)
+    )
+    if bank_set is None:
+        raise HTTPException(status_code=404, detail="套卷不存在")
+    # ① 题号重排
+    _renumber_questions(db, set_id)
+    db.commit()
+    db.refresh(bank_set)
+    total = len(bank_set.questions)
+    # ② 结构性问题逐题 AI 校准
+    fixed = 0
+    need_review = 0
+    if use_ai:
+        from app.services import question_bank_ai as qb_ai
+
+        for q in bank_set.questions:
+            if not _question_needs_repair(q):
+                continue
+            try:
+                review, applied = qb_ai.validate_question(db, current_user, q, apply=True)
+            except LLMConfigError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except Exception:  # noqa: BLE001 —— 单题失败不阻断整卷
+                need_review += 1
+                continue
+            if applied:
+                fixed += 1
+            elif review.status == "suggested":
+                need_review += 1
+    return {"total": total, "renumbered": total, "fixed": fixed, "needs_review": need_review}
 
 
 @router.post("/sets/{set_id}/review-all")

@@ -14,7 +14,7 @@ from docx.oxml.ns import qn
 
 from app.core.config import get_settings
 
-QUESTION_START_RE = re.compile(r"^\s*(\d{1,3})\s*[.、．]\s+")
+QUESTION_START_RE = re.compile(r"^\s*(\d{1,3})\s*[.、．]\s*(?=[^\d\s])")
 SECTION_RE = re.compile(
     r"^\s*[一二三四五六七八九十]+\s*[、.．]\s*(.+?)\s*[(（]\s*共\s*(\d+)\s*题[，,]\s*共\s*(\d+)\s*分\s*[)）]"
 )
@@ -31,6 +31,52 @@ IGNORED_META = {
     "展示地址",
     "是否判分",
 }
+
+# 行内选项：选项字母前需有空白或行首；标点后空格可有可无
+INLINE_OPTION_RE = re.compile(r"\s([A-H])\s*[.、．]\s*")
+INLINE_OPTION_FIRST_RE = re.compile(r"(?:^|\s)([A-H])\s*[.、．]\s*")
+_INLINE_META_RE = re.compile(
+    r"(试题编号|题编号|试题类型|题型分类|标准答案|参考答案|试题难度|难易程度|难度|试题解析|解析|评分标准|参考代码|参考程序|分值|建议得分)\s*[：:]"
+)
+
+
+def _strip_inline_meta(text: str) -> str:
+    """截掉选项内容里误并入的行内元信息（如“D.xxx 标准答案：A”）。"""
+    m = _INLINE_META_RE.search(text)
+    return text[: m.start()].rstrip() if m else text
+
+
+def _split_after_first_option(value: str) -> tuple[str, list[tuple[str, str]]]:
+    """把“首个选项内容 B.内容 C.内容”里‘首个选项之后’的剩余内容拆成后续选项。
+
+    输入为已去掉首个选项标签后的剩余文本；返回 (首个选项内容, [(后续标签, 内容), ...])。
+    """
+    markers = list(INLINE_OPTION_RE.finditer(value))
+    if not markers:
+        return value.strip(), []
+    first = _strip_inline_meta(value[: markers[0].start()]).strip()
+    rest: list[tuple[str, str]] = []
+    for i, m in enumerate(markers):
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(value)
+        rest.append((m.group(1), _strip_inline_meta(value[m.end():end].strip())))
+    return first, rest
+
+
+def _options_from_stem(stem: str) -> tuple[dict[str, str], str]:
+    """若题干里内联了整段选项（以 A. 起头），抽取选项并返回 (选项表, 去掉选项后的题干)。"""
+    m = INLINE_OPTION_FIRST_RE.search(stem)
+    if not m or m.group(1) != "A":
+        return {}, stem
+    head = stem[: m.start()].rstrip()
+    tail = stem[m.start():].lstrip()
+    markers = list(INLINE_OPTION_FIRST_RE.finditer(tail))
+    opts: dict[str, str] = {}
+    for i, mm in enumerate(markers):
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(tail)
+        opts[mm.group(1)] = _strip_inline_meta(tail[mm.end():end].strip())
+    if sum(1 for v in opts.values() if v) < 2:
+        return {}, stem
+    return opts, head or stem
 
 
 @dataclass
@@ -281,6 +327,8 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
 
         for line in block[1:]:
             text = line.text.strip()
+            # raw 保留行首缩进（代码块/含代码题干缩进需要），仅去行尾空白
+            raw = line.text.rstrip()
             meta_match = META_RE.match(text)
             if meta_match:
                 key = meta_match.group(1)
@@ -342,6 +390,12 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
                 options_map[label] = value
                 last_opt = label
                 mode = "option"
+                # 若同一行内联了后续选项（“B. xx C. xx”），拆开作为独立选项
+                first_val, rest_opts = _split_after_first_option(value)
+                options_map[label] = first_val
+                for r_label, r_value in rest_opts:
+                    options_map[r_label] = r_value
+                last_opt = rest_opts[-1][0] if rest_opts else label
                 for url in save_images(line.images):
                     media.append({"scope": f"option:{label}", "url": url})
                 continue
@@ -354,7 +408,7 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
                     if mode == "option" and last_opt:
                         options_map[last_opt] = (options_map[last_opt] + "\n" + text).strip()
                     elif mode == "code":
-                        code_parts.append(text)
+                        code_parts.append(raw)
                     elif mode == "analysis":
                         analysis_parts.append(text)
                     else:
@@ -362,23 +416,47 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
                 continue
 
             if not text:
+                if mode == "code":
+                    code_parts.append("")
                 continue
             if mode == "code":
-                code_parts.append(text)
+                code_parts.append(raw)
             elif mode == "analysis":
                 analysis_parts.append(text)
             elif mode == "option" and last_opt:
                 options_map[last_opt] = (options_map[last_opt] + "\n" + text).strip()
             else:
-                stem_parts.append(text)
+                stem_parts.append(raw)
 
         stem = "\n".join(stem_parts).strip()
+        if qtype == "judgement":
+            # 判断题干尾部独立成行的「正确/错误（可带 A./B. 前缀）」属冗余选项文案，按钮已内置
+            judgement_noise = re.compile(r"^\s*(?:[A-Ha-h][.、．:：)）]\s*)?(?:正确|错误|对|错|√|×)\s*$")
+            cleaned = [ln.rstrip() for ln in stem.split("\n")]
+            while cleaned and (not cleaned[-1].strip() or judgement_noise.match(cleaned[-1])):
+                cleaned.pop()
+            stem = "\n".join(cleaned).strip()
         options = None
         if qtype in ("single_choice", "multiple_choice"):
             labels = sorted(options_map.keys())
             if labels:
                 max_idx = max(ord(lb) - ord("A") for lb in labels)
                 options = [options_map.get(chr(ord("A") + i), "") for i in range(max_idx + 1)]
+                # 去除选项值里重复标注的题标前缀（如 "A. 我爱Python"）
+                options = [
+                    re.sub(rf"^{chr(65 + i)}\s*[.、．:：)）]\s*", "", opt or "").strip()
+                    for i, opt in enumerate(options)
+                ]
+            if not options and qtype in ("single_choice", "multiple_choice") and stem:
+                stem_opts, new_stem = _options_from_stem(stem)
+                if stem_opts:
+                    labels2 = sorted(stem_opts.keys())
+                    max_idx = max(ord(lb) - ord("A") for lb in labels2)
+                    options = [
+                        re.sub(rf"^{chr(65 + i)}\s*[.、．:：)）]\s*", "", stem_opts.get(chr(ord("A") + i), "")).strip()
+                        for i in range(max_idx + 1)
+                    ]
+                    stem = new_stem
 
         answer_raw = meta.get("标准答案") or meta.get("参考答案")
         answer = _normalize_answer(answer_raw or "", qtype) if qtype not in ("programming", "code_fill") else None
@@ -446,11 +524,20 @@ def parse_docx(path: Path, *, media_dir: Path | None = None, media_url_prefix: s
                 }
             )
             continue
-        if current_section is None:
-            continue
         q_match = QUESTION_START_RE.match(text)
         if q_match:
             number = int(q_match.group(1))
+            if current_section is None:
+                current_section = "未分章节"
+                current_section_count = 0
+                current_section_total = 0
+                current_type = None
+                sections.append({
+                    "name": current_section,
+                    "count": current_section_count,
+                    "score": current_section_total,
+                    "type": current_type,
+                })
             if block:
                 if expected_no is not None and number != expected_no:
                     note(f"题号从 {expected_no} 跳到 {number}，请核对是否漏题", "number_gap", number)

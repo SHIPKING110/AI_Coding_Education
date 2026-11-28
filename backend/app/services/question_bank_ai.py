@@ -195,7 +195,15 @@ def validate_question(
 
     confidence = float(data.get("confidence") or 0)
     issues = data.get("issues") if isinstance(data.get("issues"), list) else []
-    auto_apply = bool(apply and changed and confidence >= 0.9 and question.status == BankQuestionStatus.DRAFT.value)
+    issue_codes = {str(i.get("code")) for i in issues if isinstance(i, dict)}
+    structural = {"options_incomplete", "answer_error", "stem_mismatch", "type_error"}
+    threshold = 0.55 if issue_codes & structural else 0.85
+    auto_apply = bool(
+        apply
+        and changed
+        and confidence >= threshold
+        and question.status in (BankQuestionStatus.DRAFT.value, BankQuestionStatus.REVIEWED.value)
+    )
     if auto_apply:
         if after.get("type") in VALID_TYPES:
             question.type = after["type"]

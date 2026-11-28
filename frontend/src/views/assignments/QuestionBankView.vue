@@ -166,6 +166,7 @@
               <button v-if="canAssignment && selected.status === 'published'" class="btn" @click="onToAssignment">生成作业草稿</button>
               <button v-if="canBlueprint" class="btn" @click="openBlueprints">组卷规则</button>
               <button v-if="canArchive" class="btn danger-ghost" :disabled="selected.status === 'archived'" @click="onArchive">归档</button>
+              <button v-if="canArchive" class="btn danger-ghost" @click="onDeleteSet">彻底删除</button>
             </div>
           </div>
 
@@ -205,6 +206,10 @@
                   <button v-if="activeQuestion.review_note?.startsWith('AI 校准')" class="btn ghost" @click="onRevertAi">
                     撤销校准
                   </button>
+                  <input v-if="canManage" v-model.number="insertNo" type="number" min="1" class="insert-no" placeholder="插入到第几题(留空追加)" title="输入题号可把新题插入到该位置，后续题号自动后移" />
+                  <button v-if="canManage" class="btn ghost" :disabled="saving" @click="onAddQuestion">+ 新增题目</button>
+                  <button v-if="canManage" class="btn ghost" :disabled="saving || (selected?.questions?.length ?? 0) <= 1" @click="onDeleteQuestion">删除本题</button>
+                  <button v-if="canManage" class="btn ghost" :disabled="saving || repairing" @click="onAutoRepair">{{ repairing ? 'AI 修复中…' : 'AI 一键修复' }}</button>
                   <button class="btn" :disabled="saving" @click="saveQuestion(false)">保存</button>
                   <button class="btn primary" :disabled="saving" @click="saveQuestion(true)">保存并通过</button>
                 </div>
@@ -221,20 +226,18 @@
                   <span>选项（每行一个，按 A/B/C/D 顺序）</span>
                   <span class="hint">图片选项可留空文字</span>
                 </div>
-                <div v-for="(opt, i) in edit.optionsText.split('\n')" :key="i" class="option-row">
+                <div v-for="(opt, i) in editOptions" :key="i" class="option-row">
                   <span class="opt-label">{{ optionLabel(i) }}</span>
-                  <input
-                    :value="opt"
+                  <textarea
+                    v-autogrow
+                    v-model="editOptions[i]"
                     :disabled="!canManage"
-                    @input="(e) => {
-                      const parts = edit.optionsText.split('\n')
-                      parts[i] = (e.target as HTMLInputElement).value
-                      edit.optionsText = parts.join('\n')
-                    }"
-                  />
+                    class="opt-input"
+                    rows="1"
+                  ></textarea>
                   <img v-for="url in mediaFor(`option:${optionLabel(i)}`)" :key="url" :src="url" class="opt-img" alt="" />
                   <button
-                    v-if="canManage && edit.optionsText.split('\n').length > 2"
+                    v-if="canManage && editOptions.length > 2"
                     type="button"
                     class="opt-del"
                     aria-label="删除该选项"
@@ -242,8 +245,22 @@
                   >
                     ×
                   </button>
+                  <button
+                    v-if="canManage"
+                    type="button"
+                    class="opt-merge"
+                    :class="{ invisible: i === 0 }"
+                    :disabled="i === 0"
+                    aria-label="合并到上一项"
+                    @click="mergeIntoPrevious(i)"
+                  >
+                    ↑ 合并到上一项
+                  </button>
                 </div>
-                <button v-if="canManage" type="button" class="opt-add" @click="addOption">+ 添加选项</button>
+                <div class="options-tail">
+                  <button v-if="canManage && editOptions.length < 8" type="button" class="opt-add" @click="addOption">+ 添加选项</button>
+                  <button v-if="canManage && editOptions.length > 2" type="button" class="opt-del-last" @click="removeLastOption()">− 删除最后一项</button>
+                </div>
               </div>
 
               <div class="answer-grid">
@@ -421,6 +438,16 @@
       @start="startExam"
     />
 
+    <div v-if="confirmState.visible" class="modal-mask" @click.self="closeConfirm">
+      <div class="upload-modal confirm-modal" role="dialog" aria-modal="true">
+        <h3 class="confirm-title">{{ confirmState.title }}</h3>
+        <p class="confirm-msg">{{ confirmState.message }}</p>
+        <div class="confirm-actions">
+          <button class="btn" @click="closeConfirm">再想想</button>
+          <button class="btn" :class="confirmState.danger ? 'danger' : 'primary'" @click="runConfirm">{{ confirmState.confirmText }}</button>
+        </div>
+      </div>
+    </div>
     <div v-if="recordsOpen" class="modal-mask" @click.self="recordsOpen = false">
       <div class="upload-modal records-modal">
         <div class="records-head">
@@ -487,9 +514,13 @@ import {
   aiCleanQuestion,
   aiValidateQuestion,
   archiveBankSet,
+  autoRepairBankSet,
   bankSetToAssignment,
   createBankBlueprint,
+  createBankQuestion,
   deleteBankBlueprint,
+  deleteBankQuestion,
+  deleteBankSet,
   getBankSet,
   getBankSetValidation,
   getBankStats,
@@ -565,6 +596,56 @@ const months = computed(
 
 const selectedId = ref('')
 const selected = ref<BankSet | null>(null)
+const confirmState = ref<{
+  visible: boolean
+  title: string
+  message: string
+  confirmText: string
+  danger: boolean
+  onConfirm: (() => Promise<void> | void) | null
+}>({ visible: false, title: '', message: '', confirmText: '确定', danger: false, onConfirm: null })
+function openConfirm(opts: {
+  title: string
+  message: string
+  confirmText?: string
+  danger?: boolean
+  onConfirm: () => Promise<void> | void
+}) {
+  confirmState.value = {
+    visible: true,
+    title: opts.title,
+    message: opts.message,
+    confirmText: opts.confirmText ?? '确定',
+    danger: opts.danger ?? false,
+    onConfirm: opts.onConfirm,
+  }
+}
+function closeConfirm() {
+  confirmState.value.visible = false
+}
+async function runConfirm() {
+  const fn = confirmState.value.onConfirm
+  confirmState.value.visible = false
+  if (fn) await fn()
+}
+const insertNo = ref<number | null>(null)
+const repairing = ref(false)
+// 选项编辑器的自适应高度指令：文本内容越多，文本框自动增高
+const vAutogrow = {
+  mounted(el: HTMLTextAreaElement) {
+    const grow = () => {
+      el.style.height = 'auto'
+      el.style.height = `${el.scrollHeight}px`
+    }
+    el.addEventListener('input', grow)
+    // 初始按内容撑开（下一帧测量，确保布局完成）
+    requestAnimationFrame(grow)
+  },
+  updated(el: HTMLTextAreaElement) {
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  },
+}
 const detailLoading = ref(false)
 const activeQuestionId = ref('')
 const activeQuestionIndex = computed(() => selected.value?.questions?.findIndex((q) => q.id === activeQuestionId.value) ?? -1)
@@ -896,6 +977,7 @@ const edit = reactive({
   referenceCode: '',
   knowledgeText: '',
 })
+const editOptions = ref<string[]>([])
 const saving = ref(false)
 const aiCleaning = ref(false)
 
@@ -910,7 +992,7 @@ function loadEdit(q: BankQuestion | null) {
   if (!q) return
   edit.type = q.type
   edit.stem = q.stem
-  edit.optionsText = (q.options ?? []).join('\n')
+  editOptions.value = (q.options ?? []).slice()
   edit.answerText = answerToText(q.type, q.answer)
   edit.analysis = q.analysis ?? ''
   edit.difficulty = q.difficulty
@@ -927,20 +1009,27 @@ function optionLabel(i: number): string {
 }
 
 function addOption() {
-  const parts = edit.optionsText.split('\n')
-  if (parts.length >= 8) {
+  if (editOptions.value.length >= 8) {
     toast.info('最多支持 8 个选项')
     return
   }
-  parts.push('')
-  edit.optionsText = parts.join('\n')
+  editOptions.value.push('')
 }
 
 function removeOption(index: number) {
-  const parts = edit.optionsText.split('\n')
-  if (parts.length <= 2) return
-  parts.splice(index, 1)
-  edit.optionsText = parts.join('\n')
+  if (editOptions.value.length <= 2) return
+  editOptions.value.splice(index, 1)
+}
+
+function removeLastOption() {
+  if (editOptions.value.length <= 2) return
+  editOptions.value.splice(editOptions.value.length - 1, 1)
+}
+
+function mergeIntoPrevious(index: number) {
+  if (index <= 0 || index >= editOptions.value.length) return
+  editOptions.value[index - 1] = `${editOptions.value[index - 1]}\n${editOptions.value[index]}`.trim()
+  editOptions.value.splice(index, 1)
 }
 
 function typeLabel(t: string): string {
@@ -949,6 +1038,94 @@ function typeLabel(t: string): string {
 
 function mediaFor(scope: string): string[] {
   return (activeQuestion.value?.media ?? []).filter((m) => m.scope === scope).map((m) => m.url)
+}
+
+async function onAddQuestion() {
+  if (!selected.value) return
+  const orderNo = insertNo.value && insertNo.value > 0 ? insertNo.value : undefined
+  saving.value = true
+  try {
+    const created = await createBankQuestion(selected.value.id, {
+      type: activeQuestion.value?.type ?? 'single_choice',
+      stem: '',
+      order_no: orderNo,
+    })
+    await refreshSetQuietly()
+    const nextQuestion = selected.value?.questions?.find((q) => q.id === created.id)
+    if (nextQuestion) {
+      activeQuestionId.value = nextQuestion.id
+      loadEdit(nextQuestion)
+    }
+    insertNo.value = null
+    toast.success(orderNo ? `已在第 ${orderNo} 题位置插入新题，后续题号已自动重排` : '新题目已建立，请编辑题干与答案')
+  } catch {
+    toast.error('新建题目失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+function onDeleteSet() {
+  if (!selected.value) return
+  const set = selected.value
+  openConfirm({
+    title: '彻底删除套卷',
+    message: `确定永久删除「${set.name || '该套卷'}」吗？将删除该套卷及其全部题目，历史作答会保留（快照已固化）。此操作不可撤销，如只想下架请改用「归档」。`,
+    confirmText: '永久删除',
+    danger: true,
+    onConfirm: async () => {
+      try {
+        await deleteBankSet(set.id)
+        toast.success('套卷已彻底删除')
+        selectedId.value = ''
+        selected.value = null
+        await loadStats()
+        await loadSets()
+      } catch {
+        toast.error('删除套卷失败')
+      }
+    },
+  })
+}
+
+async function onAutoRepair() {
+  if (!selected.value) return
+  repairing.value = true
+  try {
+    const res = await autoRepairBankSet(selected.value.id, true)
+    await refreshSetQuietly()
+    const msg = `已重排题号 ${res.renumbered} 题，AI 自动修复 ${res.fixed} 题` + (res.needs_review ? `，${res.needs_review} 题仍需人工确认` : '')
+    toast.success(msg)
+  } catch {
+    toast.error('自动修复失败，请检查 AI 模型是否已配置')
+  } finally {
+    repairing.value = false
+  }
+}
+
+function onDeleteQuestion() {
+  const q = activeQuestion.value
+  if (!q || !selected.value || !selected.value.questions) return
+  const no = selected.value.questions.findIndex((x) => x.id === q.id) + 1
+  openConfirm({
+    title: '删除本题',
+    message: `确定删除第 ${no} 题吗？删除后其后的题目会自动重新编号；历史作答会保留，但该题不再出现在套卷中。`,
+    confirmText: '删除',
+    danger: true,
+    onConfirm: async () => {
+      saving.value = true
+      try {
+        await deleteBankQuestion(q.id)
+        await refreshSetQuietly()
+        activeQuestionId.value = ''
+        toast.success('题目已删除')
+      } catch {
+        toast.error('删除题目失败')
+      } finally {
+        saving.value = false
+      }
+    },
+  })
 }
 
 async function loadStats() {
@@ -1048,7 +1225,7 @@ async function saveQuestion(markReviewed = false) {
       type: edit.type as BankQuestion['type'],
       stem: edit.stem,
       options: ['single_choice', 'multiple_choice'].includes(edit.type)
-        ? edit.optionsText.split('\n').map((x) => x.trim())
+        ? editOptions.value.map((x) => x.trim()).filter((x) => x.length > 0)
         : null,
       answer: answerFromText(edit.type, edit.answerText),
       analysis: edit.analysis || null,
@@ -1631,6 +1808,34 @@ onMounted(async () => {
   color: #991b1b;
 }
 
+.confirm-modal {
+  width: min(420px, 100%);
+  padding: 22px 22px 16px;
+}
+.confirm-title {
+  font-size: 16px;
+  color: #172554;
+  margin-bottom: 8px;
+}
+.confirm-msg {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #475569;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+.btn.danger {
+  background: #dc2626;
+  border-color: #dc2626;
+  color: #fff;
+}
+.btn.danger:hover {
+  background: #b91c1c;
+}
 .records-modal {
   width: min(720px, 100%);
 }
@@ -1955,6 +2160,65 @@ onMounted(async () => {
 }
 .opt-add:hover {
   background: #fdf6e3;
+}
+.opt-input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid #e2d5bb;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  min-height: 34px;
+  resize: none;
+  overflow: hidden;
+  line-height: 1.5;
+  box-sizing: border-box;
+}
+.opt-input:disabled {
+  background: #f8fafc;
+  color: var(--ink-3);
+  cursor: not-allowed;
+}
+.opt-merge {
+  margin-left: 6px;
+  padding: 1px 8px;
+  border: 1px solid #b45309;
+  border-radius: 6px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 11px;
+  cursor: pointer;
+}
+.opt-merge:hover {
+  background: #fef3c7;
+}
+.opt-merge.invisible {
+  visibility: hidden;
+  pointer-events: none;
+}
+.insert-no {
+  width: 150px;
+  padding: 7px 9px;
+  border: 1px solid #e2d5bb;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+.options-tail {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.opt-del-last {
+  padding: 5px 10px;
+  border: 1px dashed #fca5a5;
+  border-radius: 7px;
+  background: #fef2f2;
+  color: #b91c1e;
+  font-size: 12px;
+  cursor: pointer;
+}
+.opt-del-last:hover {
+  background: #fee2e2;
 }
 .answer-grid {
   display: grid;

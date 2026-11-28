@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -25,8 +25,11 @@ const practiceFeedback = ref<{
   correct_answer?: unknown
   analysis?: string | null
   reference_code?: string | null
+  feedback?: string | null
 } | null>(null)
 const selfCorrect = ref<boolean | null>(null)
+const saving = ref(false)
+let advanceTimer: number | undefined
 
 const questions = computed(() => attempt.value?.questions ?? [])
 const question = computed<AttemptQuestion | null>(() => questions.value[current.value] ?? null)
@@ -63,6 +66,40 @@ const typeLabels: Record<string, string> = {
   code_fill: '代码填空',
 }
 
+// 判断题干尾部常带「正确/错误（可含 A./B. 前缀）」冗余行，选择按钮已内置
+const displayStem = computed(() => {
+  const q = question.value
+  if (!q) return ''
+  if (q.type !== 'judgement') return q.stem
+  const noise = /^\s*(?:[A-Ha-h][.、．:：)）]\s*)?(?:正确|错误|对|错|√|×)\s*$/
+  const lines = q.stem.split('\n')
+  while (lines.length && (!lines[lines.length - 1].trim() || noise.test(lines[lines.length - 1]))) {
+    lines.pop()
+  }
+  return lines.join('\n')
+})
+
+function dotState(idx: number): 'ok' | 'bad' | '' {
+  if (!isDone.value) return ''
+  const q = questions.value[idx]
+  const r = q ? attempt.value?.question_results?.[q.id] : undefined
+  if (!r) return ''
+  if (r.is_correct === true) return 'ok'
+  if (r.is_correct === false) return 'bad'
+  return ''
+}
+
+function insertTab(event: KeyboardEvent) {
+  const el = event.target as HTMLTextAreaElement
+  const start = el.selectionStart ?? 0
+  const end = el.selectionEnd ?? 0
+  const nextValue = el.value.slice(0, start) + '    ' + el.value.slice(end)
+  setAnswer(nextValue)
+  void nextTick(() => {
+    el.selectionStart = el.selectionEnd = start + 4
+  })
+}
+
 function answerText(value: unknown): string {
   if (Array.isArray(value)) return value.join(',')
   if (typeof value === 'boolean') return value ? '正确' : '错误'
@@ -81,22 +118,24 @@ function syncAnswer() {
   selfCorrect.value = attempt.value?.answers?.[`__self__:${q.id}`] === undefined
     ? item?.is_correct ?? null
     : Boolean(attempt.value.answers[`__self__:${q.id}`])
+  const persisted = attempt.value?.question_results?.[q.id]
   if (item) {
     practiceFeedback.value = {
       is_correct: item.is_correct,
       correct_answer: item.correct_answer,
       analysis: item.analysis,
       reference_code: item.reference_code,
+      feedback: persisted?.feedback ?? null,
     }
     return
   }
-  const persisted = attempt.value?.question_results?.[q.id]
   if (!isExam.value && persisted) {
     practiceFeedback.value = {
       is_correct: persisted.is_correct ?? null,
       correct_answer: q.answer,
       analysis: q.analysis,
       reference_code: q.reference_code,
+      feedback: persisted.feedback ?? null,
     }
     return
   }
@@ -116,24 +155,63 @@ async function load() {
   }
 }
 
-async function save() {
+async function save(opts: { autoAdvance?: boolean } = {}): Promise<boolean> {
   const a = attempt.value
   const q = question.value
-  if (!a || !q || a.status !== 'in_progress') return
+  if (!a || !q || a.status !== 'in_progress' || saving.value) return false
+  const value = answer.value
+  const empty =
+    value === null ||
+    value === undefined ||
+    (Array.isArray(value) && value.length === 0) ||
+    (typeof value === 'string' && !value.trim())
+  if (empty) return false
+  saving.value = true
   try {
-    const res = await saveAttemptAnswer(a.id, q.id, answer.value)
+    const res = await saveAttemptAnswer(a.id, q.id, value)
     practiceFeedback.value = {
       is_correct: res.is_correct ?? null,
       correct_answer: res.correct_answer,
       analysis: res.analysis,
       reference_code: res.reference_code,
+      feedback: res.feedback ?? null,
     }
-    a.answers[q.id] = answer.value
+    a.answers[q.id] = value
     if (!a.question_results) a.question_results = {}
-    a.question_results[q.id] = { is_correct: res.is_correct ?? null, score: res.score, max_score: res.max_score }
+    a.question_results[q.id] = {
+      is_correct: res.is_correct ?? null,
+      score: res.score,
+      max_score: res.max_score,
+      feedback: res.feedback ?? null,
+    }
+    if (opts.autoAdvance !== false && res.is_correct === true && current.value < questions.value.length - 1) {
+      window.clearTimeout(advanceTimer)
+      advanceTimer = window.setTimeout(() => {
+        if (current.value < questions.value.length - 1) {
+          current.value += 1
+          syncAnswer()
+        }
+      }, 900)
+    }
+    return true
   } catch {
     toast.error('保存答案失败')
+    return false
+  } finally {
+    saving.value = false
   }
+}
+
+const isLocked = computed(() => {
+  const q = question.value
+  if (!q || isDone.value || !practiceFeedback.value) return false
+  return ['single_choice', 'multiple_choice', 'judgement'].includes(q.type)
+})
+
+async function pick(value: unknown) {
+  if (saving.value || isLocked.value) return
+  setAnswer(value)
+  await save({ autoAdvance: true })
 }
 
 async function selfEval(value: boolean) {
@@ -153,7 +231,8 @@ async function selfEval(value: boolean) {
 }
 
 async function next() {
-  if (!isDone.value) await save()
+  if (!isDone.value && !practiceFeedback.value) await save({ autoAdvance: false })
+  window.clearTimeout(advanceTimer)
   if (current.value < questions.value.length - 1) {
     current.value += 1
     syncAnswer()
@@ -250,7 +329,10 @@ onMounted(async () => {
   await load()
   startExamCountdown()
 })
-onBeforeUnmount(stopExamCountdown)
+onBeforeUnmount(() => {
+  stopExamCountdown()
+  window.clearTimeout(advanceTimer)
+})
 </script>
 
 <template>
@@ -297,7 +379,7 @@ onBeforeUnmount(stopExamCountdown)
             v-for="(q, idx) in questions"
             :key="q.id"
             class="q-dot"
-            :class="{ active: idx === current, answered: attempt.answers?.[q.id] !== undefined }"
+            :class="{ active: idx === current, answered: attempt.answers?.[q.id] !== undefined, ok: dotState(idx) === 'ok', bad: dotState(idx) === 'bad' }"
             @click="current = idx; syncAnswer()"
           >
             {{ idx + 1 }}
@@ -310,7 +392,7 @@ onBeforeUnmount(stopExamCountdown)
             <span class="q-type">{{ question.type === 'single_choice' ? '单选题' : question.type === 'multiple_choice' ? '多选题' : question.type === 'judgement' ? '判断题' : question.type === 'programming' ? '编程题' : '代码填空' }}</span>
             <span class="q-score">{{ question.score }} 分</span>
           </div>
-          <pre class="stem">{{ question.stem }}</pre>
+          <pre class="stem">{{ displayStem }}</pre>
 
           <div v-if="question.media?.length" class="media-list">
             <img v-for="m in question.media" :key="m.url" :src="m.url" alt="" />
@@ -321,8 +403,9 @@ onBeforeUnmount(stopExamCountdown)
               v-for="(opt, idx) in question.options ?? []"
               :key="idx"
               class="option-item"
-              :class="{ selected: choiceSelected(idx), right: practiceFeedback?.is_correct && practiceFeedback?.correct_answer === idx, wrong: practiceFeedback?.is_correct === false && choiceSelected(idx) }"
-              @click="toggleChoice(idx)"
+              :class="{ selected: choiceSelected(idx), right: practiceFeedback?.is_correct === true && choiceSelected(idx), wrong: practiceFeedback?.is_correct === false && choiceSelected(idx) }"
+              :disabled="isLocked"
+              @click="question.type === 'multiple_choice' ? toggleChoice(idx) : pick(idx)"
             >
               <span class="opt-mark">{{ String.fromCharCode(65 + idx) }}</span>
               <span class="opt-text">{{ opt || '（图片选项）' }}</span>
@@ -337,8 +420,8 @@ onBeforeUnmount(stopExamCountdown)
           </div>
 
           <div v-else-if="question.type === 'judgement'" class="judge-options">
-            <button class="judge-btn" :class="{ selected: answer === true }" @click="setAnswer(true)">正确</button>
-            <button class="judge-btn" :class="{ selected: answer === false }" @click="setAnswer(false)">错误</button>
+            <button class="judge-btn" :class="{ selected: answer === true }" :disabled="isLocked" @click="pick(true)">正确</button>
+            <button class="judge-btn" :class="{ selected: answer === false }" :disabled="isLocked" @click="pick(false)">错误</button>
           </div>
 
           <textarea
@@ -346,14 +429,16 @@ onBeforeUnmount(stopExamCountdown)
             :value="typeof answer === 'string' ? answer : ''"
             class="code-input"
             rows="8"
-            :placeholder="question.type === 'programming' ? '在此编写代码' : '填写答案'"
+            :placeholder="question.type === 'programming' ? '在此编写代码（Tab 缩进）' : '填写答案'"
             @input="setAnswer(($event.target as HTMLTextAreaElement).value)"
+            @keydown.tab.prevent="insertTab"
           ></textarea>
 
           <div v-if="practiceFeedback" class="feedback" :class="practiceFeedback.is_correct === false ? 'wrong' : 'right'">
             <strong>
-              {{ practiceFeedback.is_correct === null ? '已保存' : practiceFeedback.is_correct ? '回答正确' : '回答错误' }}
+              {{ practiceFeedback.is_correct === null ? '已保存（AI 评分暂不可用，请对照参考程序自评）' : practiceFeedback.is_correct ? '回答正确，即将进入下一题…' : '回答错误，请查看答案解析' }}
             </strong>
+            <p v-if="practiceFeedback.feedback" class="feedback-line">AI 评语：{{ practiceFeedback.feedback }}</p>
             <p v-if="practiceFeedback.correct_answer !== undefined && practiceFeedback.correct_answer !== null" class="feedback-line">
               正确答案：{{ answerText(practiceFeedback.correct_answer) }}
             </p>
@@ -361,7 +446,7 @@ onBeforeUnmount(stopExamCountdown)
             <p v-if="practiceFeedback.analysis" class="feedback-line">解析：{{ practiceFeedback.analysis }}</p>
           </div>
 
-          <div v-if="question.type === 'programming' && !isDone" class="self-eval">
+          <div v-if="question.type === 'programming' && !isDone && practiceFeedback !== null && practiceFeedback.is_correct === null" class="self-eval">
             <span>参考程序对照后自评：</span>
             <button class="judge-btn" :class="{ selected: selfCorrect === true }" @click="selfEval(true)">我写对了</button>
             <button class="judge-btn" :class="{ selected: selfCorrect === false }" @click="selfEval(false)">还需要练习</button>
@@ -369,7 +454,9 @@ onBeforeUnmount(stopExamCountdown)
 
           <div class="q-actions">
             <button class="btn" :disabled="current === 0" @click="previous">上一题</button>
-            <button v-if="!isDone" class="btn" @click="save">保存本题</button>
+            <button v-if="!isDone" class="btn" :disabled="saving" @click="save()">
+              {{ saving ? (['programming', 'code_fill'].includes(question.type) ? 'AI 判题中…' : '保存中…') : '保存本题' }}
+            </button>
             <button v-if="!isDone && current < questions.length - 1" class="btn primary" @click="next">下一题</button>
             <button v-if="!isDone && current === questions.length - 1" class="btn primary" :disabled="submitting" @click="submit">
               {{ submitting ? '交卷中…' : '交卷' }}
@@ -383,7 +470,7 @@ onBeforeUnmount(stopExamCountdown)
         <h2>答案解析</h2>
         <article v-for="item in result.items" :key="item.id" class="review-item">
           <div class="review-head">
-            <span>第 {{ item.order_no }} 题</span>
+            <span :class="{ 'bad-no': item.is_correct === false }">第 {{ item.order_no }} 题</span>
             <span :class="item.is_correct === true ? 'ok' : item.is_correct === false ? 'bad' : 'neutral'">
               {{ item.is_correct === true ? '正确' : item.is_correct === false ? '错误' : '自评/未判' }} · {{ item.score }}/{{ item.max_score }} 分
             </span>
@@ -525,6 +612,19 @@ onBeforeUnmount(stopExamCountdown)
   outline: 2px solid #2f6f73;
   outline-offset: 1px;
 }
+.q-dot.ok {
+  border-color: #22c55e;
+  background: #f0fdf4;
+  color: #166534;
+}
+.q-dot.bad {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+.review-head .bad-no {
+  color: #b91c1c;
+}
 .question-card {
   padding: 18px;
   border-radius: 14px;
@@ -621,6 +721,7 @@ onBeforeUnmount(stopExamCountdown)
 }
 .opt-text {
   flex: 1;
+  white-space: pre-wrap;
 }
 .opt-img {
   width: 50px;

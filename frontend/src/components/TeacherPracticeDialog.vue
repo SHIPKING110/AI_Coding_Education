@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import ExamResultPanel from '@/components/ExamResultPanel.vue'
 import { QUESTION_TYPE_LABELS } from '@/api/assignment'
@@ -49,6 +49,7 @@ type Feedback = {
   correct_answer?: unknown
   analysis?: string | null
   reference_code?: string | null
+  feedback?: string | null
 }
 
 const loading = ref(false)
@@ -158,6 +159,7 @@ function hydrateFromAttempt() {
         correct_answer: resultItem.correct_answer,
         analysis: resultItem.analysis,
         reference_code: resultItem.reference_code,
+        feedback: attempt.question_results?.[q.id]?.feedback ?? null,
       }
       if (resultItem.is_correct === false) wrong.add(q.id)
     } else if (resultState) {
@@ -166,6 +168,7 @@ function hydrateFromAttempt() {
         correct_answer: q.answer,
         analysis: q.analysis,
         reference_code: q.reference_code,
+        feedback: resultState.feedback ?? null,
       }
       if (resultState.is_correct === false) wrong.add(q.id)
     }
@@ -194,7 +197,22 @@ async function ensureSession() {
     hydrateFromAttempt()
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
-    loadError.value = typeof detail === 'string' ? detail : (e as Error).message || '创建练习失败'
+    if (detail && typeof detail === 'object' && 'gaps' in detail) {
+      const labels: Record<string, string> = {
+        single_choice: '单选题',
+        multiple_choice: '多选题',
+        judgement: '判断题',
+        programming: '编程题',
+        code_fill: '代码填空',
+      }
+      const gaps = (detail as { gaps: Record<string, string> }).gaps
+      loadError.value =
+        Object.entries(gaps)
+          .map(([k, v]) => v || `${labels[k] ?? k}库存不足`)
+          .join('；') || '题库库存不足，无法开考'
+    } else {
+      loadError.value = typeof detail === 'string' ? detail : (e as Error).message || '创建练习失败'
+    }
   } finally {
     loading.value = false
   }
@@ -205,19 +223,38 @@ function applyLocalResult(q: PracticeQuestion, res: {
   correct_answer?: unknown
   analysis?: string | null
   reference_code?: string | null
+  feedback?: string | null
 }) {
   feedbackMap.value[q.id] = {
     is_correct: res.is_correct ?? null,
     correct_answer: res.correct_answer,
     analysis: res.analysis,
     reference_code: res.reference_code,
+    feedback: res.feedback ?? null,
   }
   if (res.is_correct === false) wrongSet.value.add(q.id)
   else if (res.is_correct === true) wrongSet.value.delete(q.id)
+  if (res.is_correct === true && index.value < questionList.value.length - 1) {
+    window.setTimeout(() => {
+      if (index.value < questionList.value.length - 1 && feedbackMap.value[q.id]?.is_correct === true) {
+        selectQuestion(index.value + 1)
+      }
+    }, 900)
+  }
 }
 
-async function judgeCurrent() {
-  const q = question.value
+function insertTab(q: PracticeQuestion, event: KeyboardEvent) {
+  const el = event.target as HTMLTextAreaElement
+  const start = el.selectionStart ?? 0
+  const end = el.selectionEnd ?? 0
+  const next = el.value.slice(0, start) + '    ' + el.value.slice(end)
+  setText(question.value!, next)
+  void nextTick(() => {
+    el.selectionStart = el.selectionEnd = start + 4
+  })
+}
+
+async function judgeCurrent() {  const q = question.value
   if (!q || isExam.value) return
   if (!hasAnswer(q)) return
   const value = picked.value[q.id]
@@ -233,6 +270,8 @@ async function judgeCurrent() {
         is_correct: res.is_correct ?? null,
         score: res.score,
         max_score: res.max_score,
+        feedback: res.feedback ?? null,
+        ai_graded: res.ai_graded ?? false,
       }
     } else {
       const res = await checkAggregateAnswer(q.id, value)
@@ -554,20 +593,20 @@ function referenceAnswer(q: PracticeQuestion): string {
                 :value="textValue(question)"
                 class="code-input"
                 rows="7"
-                :placeholder="question.type === 'programming' ? '在此编写代码' : '填写答案'"
+                :placeholder="question.type === 'programming' ? '在此编写代码（Tab 缩进）' : '填写答案'"
                 @input="setText(question, ($event.target as HTMLTextAreaElement).value)"
                 @blur="isExam ? persistExamAnswer(question) : judgeCurrent()"
+                @keydown.tab.prevent="insertTab(question, $event)"
               ></textarea>
 
               <div v-if="isExam && question.type === 'programming' && !isEvaluated" class="exam-self">
-                <span>参考程序请自行对照后自评（未自评按 0 分）：</span>
-                <button type="button" class="judge-btn" :class="{ selected: selfEvalMap[question.id] === true }" @click="markSelf(true)">我写对了</button>
-                <button type="button" class="judge-btn" :class="{ selected: selfEvalMap[question.id] === false }" @click="markSelf(false)">还需练习</button>
+                <span>编程题将在交卷时由 AI 客观评测，无需自评。</span>
               </div>
 
               <div v-if="feedback" class="feedback" :class="{ wrong: feedback.is_correct === false }">
                 <strong>
                   {{ feedback.is_correct === null ? '参考答案' : feedback.is_correct ? '回答正确' : '回答错误' }}
+                  <template v-if="feedback.feedback"> · {{ feedback.feedback }}</template>
                 </strong>
                 <p v-if="question.type !== 'programming' && question.type !== 'code_fill'" class="feedback-line">
                   正确答案：{{ answerText(feedback.correct_answer ?? question.answer) }}

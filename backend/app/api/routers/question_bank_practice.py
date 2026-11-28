@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
 import uuid
 from datetime import UTC, date, datetime, timedelta
@@ -29,6 +30,8 @@ from app.models.question_bank import (
     QuestionBankUserMark,
 )
 from app.models.user import Role, User
+from app.services import qb_grade
+from app.services.llm import LLMConfigError
 
 router = APIRouter(prefix="/question-bank", tags=["question-bank-practice"])
 
@@ -216,7 +219,7 @@ def _compose_questions(
     for qtype, count in rules.items():
         rows = list(db.scalars(base.where(QuestionBankQuestion.type == qtype)).all())
         if len(rows) < count:
-            gaps[qtype] = f"需要 {count} 题，库存仅 {len(rows)} 题"
+            gaps[qtype] = f"{_TYPE_LABELS.get(qtype, qtype)}库存不足：需要 {count} 题，题库仅 {len(rows)} 题"
             continue
         picked.extend(random.sample(rows, count))
     if gaps:
@@ -292,7 +295,13 @@ def _evaluate(attempt: PracticeAttempt) -> dict[str, Any]:
         qid = str(item.get("id"))
         answer = answers.get(qid)
         self_correct = bool(answers.get(f"__self__:{qid}"))
-        is_correct, got = _grade_one(item, answer, self_correct)
+        stored = (attempt.question_results or {}).get(qid) or {}
+        if stored.get("ai_graded"):
+            # 编程题以模型评分为准（保存作答时已打分并落库，避免交卷重复计费）
+            is_correct = stored.get("is_correct")
+            got = int(stored.get("score") or 0)
+        else:
+            is_correct, got = _grade_one(item, answer, self_correct)
         max_score = int(item.get("score") or 0)
         score += got
         if is_correct:
@@ -501,6 +510,26 @@ def start_attempt(
         raise HTTPException(status_code=422, detail=f"未知的练习类型：{kind}")
     mode = PracticeMode.EXAM.value if (kind in EXAM_KINDS or payload.mode == "exam") else PracticeMode.PRACTICE.value
     user_id, student_id = _resolve_owner(db, user, payload.student_id)
+    _expire_stale_attempts(db, user_id=user_id)
+    active_count = (
+        db.scalar(
+            select(func.count())
+            .select_from(PracticeAttempt)
+            .where(
+                PracticeAttempt.user_id == user_id,
+                PracticeAttempt.status == AttemptStatus.IN_PROGRESS.value,
+            )
+        )
+        or 0
+    )
+    if active_count >= MAX_ACTIVE_ATTEMPTS:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"进行中的练习/考试已有 {active_count} 个（上限 {MAX_ACTIVE_ATTEMPTS} 个），"
+                "请先在「做题记录」里完成或取消部分记录后再开始"
+            ),
+        )
     bank_set_id: uuid.UUID | None = None
     title: str | None = None
     meta: dict[str, Any] = {"kind": kind}
@@ -616,6 +645,89 @@ def start_attempt(
     return _attempt_out(attempt, reveal=False)
 
 
+MAX_ACTIVE_ATTEMPTS = 10
+STALE_ATTEMPT_HOURS = 24 * 7
+_TYPE_LABELS = {
+    "single_choice": "单选题",
+    "multiple_choice": "多选题",
+    "judgement": "判断题",
+    "programming": "编程题",
+    "code_fill": "代码填空",
+}
+
+
+def _expire_stale_attempts(db: Session, *, user_id: uuid.UUID) -> int:
+    """长期停留在「进行中」的记录自动收尾（按已作答内容评估），返回处理条数。"""
+    cutoff = datetime.now(UTC) - timedelta(hours=STALE_ATTEMPT_HOURS)
+    rows = list(
+        db.scalars(
+            select(PracticeAttempt).where(
+                PracticeAttempt.user_id == user_id,
+                PracticeAttempt.status == AttemptStatus.IN_PROGRESS.value,
+                PracticeAttempt.started_at < cutoff,
+            )
+        ).all()
+    )
+    for attempt in rows:
+        result = _evaluate(attempt)
+        attempt.result = result
+        attempt.score = result["score"]
+        attempt.total_score = result["total_score"]
+        attempt.status = AttemptStatus.EVALUATED
+        attempt.submitted_at = datetime.now(UTC)
+        attempt.question_results = {
+            str(item["id"]): {
+                "is_correct": item["is_correct"],
+                "score": item["score"],
+                "max_score": item["max_score"],
+            }
+            for item in result["items"]
+        }
+    if rows:
+        db.commit()
+    return len(rows)
+
+
+def _ai_grade_pending_programming(db: Session, user: User, attempt: PracticeAttempt) -> None:
+    """交卷/收卷前，对尚未评级且未自评的编程题调用 AI 客观评分。
+
+    每题只评一次（结果写回 question_results 并标记 ai_graded），
+    避免考试作答过程中逐键评分带来的高额模型成本；评分用量由 qb_grade 内部
+    统一记入「用量与成本」模块。
+    """
+    answers = attempt.answers or {}
+    results = dict(attempt.question_results or {})
+    changed = False
+    for item in attempt.question_snapshot or []:
+        if (item.get("type") or "") not in ("programming", "code_fill"):
+            continue
+        qid = str(item.get("id"))
+        answer = answers.get(qid)
+        if not isinstance(answer, str) or not answer.strip():
+            continue
+        if (results.get(qid) or {}).get("ai_graded"):
+            continue
+        if answers.get(f"__self__:{qid}") is not None:
+            continue  # 已人工自评则尊重自评结果
+        try:
+            grade = qb_grade.grade_programming(db, user, item, answer)
+        except Exception:  # noqa: BLE001 —— AI 不可用时回退为 0 分（由 _grade_one 处理）
+            grade = None
+        if grade is None:
+            continue
+        results[qid] = {
+            "is_correct": grade.get("is_correct"),
+            "score": int(grade.get("score") or 0),
+            "max_score": int(item.get("score") or 0),
+            "feedback": grade.get("feedback"),
+            "ai_graded": True,
+        }
+        changed = True
+    if changed:
+        attempt.question_results = results
+        db.commit()
+
+
 def _get_attempt(db: Session, attempt_id: uuid.UUID, user: User) -> PracticeAttempt:
     attempt = db.get(PracticeAttempt, attempt_id)
     if not attempt:
@@ -634,6 +746,7 @@ def list_attempts(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    _expire_stale_attempts(db, user_id=user.id)
     query = select(PracticeAttempt)
     if user.role in {Role.ADMIN.value, Role.STAFF.value, Role.TEACHER.value}:
         query = query.where(PracticeAttempt.user_id == user.id)
@@ -755,8 +868,64 @@ def save_answer(
 
     answers[qid] = payload.answer
     attempt.answers = answers
+    qtype = item.get("type")
+    prior = results.get(qid) or {}
+    if qtype in ("programming", "code_fill") and isinstance(payload.answer, str) and payload.answer.strip() and attempt.mode == PracticeMode.PRACTICE.value:
+        answer_hash = hashlib.sha1(payload.answer.encode("utf-8")).hexdigest()
+        if prior.get("ai_graded") and prior.get("graded_hash") == answer_hash:
+            # 同一份代码不重复计费：直接返回上次模型评分
+            db.commit()
+            return {
+                "saved": True,
+                "is_correct": prior.get("is_correct"),
+                "correct_answer": item.get("answer"),
+                "analysis": item.get("analysis"),
+                "reference_code": item.get("reference_code"),
+                "feedback": prior.get("feedback"),
+                "ai_graded": True,
+                "score": int(prior.get("score") or 0),
+                "max_score": int(item.get("score") or 0),
+            }
+        try:
+            grade = qb_grade.grade_programming(db, user, item, payload.answer)
+        except LLMConfigError:
+            grade = None
+        except Exception:  # noqa: BLE001 - 评分服务异常时降级为对照自评
+            grade = None
+        if grade is not None:
+            results[qid] = {
+                "is_correct": grade["is_correct"],
+                "score": grade["score"],
+                "max_score": int(item.get("score") or 0),
+                "feedback": grade["feedback"],
+                "ai_graded": True,
+                "graded_hash": answer_hash,
+            }
+            attempt.question_results = results
+            _mark_wrong_question(db, user, payload.question_id, not grade["is_correct"], attempt.student_id)
+            db.commit()
+            return {
+                "saved": True,
+                "is_correct": grade["is_correct"],
+                "correct_answer": item.get("answer"),
+                "analysis": item.get("analysis"),
+                "reference_code": item.get("reference_code"),
+                "feedback": grade["feedback"],
+                "ai_graded": True,
+                "score": grade["score"],
+                "max_score": int(item.get("score") or 0),
+            }
     if attempt.mode == PracticeMode.PRACTICE.value:
-        is_correct, got = _grade_one(item, payload.answer, bool(answers.get(f"__self__:{qid}")))
+        graded_stale = (
+            qtype in ("programming", "code_fill")
+            and prior.get("ai_graded")
+            and prior.get("graded_hash") != hashlib.sha1(str(payload.answer or "").encode("utf-8")).hexdigest()
+        )
+        if graded_stale:
+            # 新代码的模型评分暂不可用：保留上一次评分，避免记录分数意外清零
+            is_correct, got = prior.get("is_correct"), int(prior.get("score") or 0)
+        else:
+            is_correct, got = _grade_one(item, payload.answer, bool(answers.get(f"__self__:{qid}")))
         results[qid] = {
             "is_correct": is_correct,
             "score": got,
@@ -817,6 +986,7 @@ def submit_attempt(
     attempt = _get_attempt(db, attempt_id, user)
     if attempt.status == AttemptStatus.EVALUATED.value:
         return _attempt_out(attempt, reveal=True)
+    _ai_grade_pending_programming(db, user, attempt)
     result = _evaluate(attempt)
     attempt.result = result
     attempt.score = result["score"]
@@ -846,6 +1016,7 @@ def close_attempt(
     attempt = _get_attempt(db, attempt_id, user)
     if attempt.status == AttemptStatus.EVALUATED.value:
         return _attempt_out(attempt, reveal=True)
+    _ai_grade_pending_programming(db, user, attempt)
     result = _evaluate(attempt)
     attempt.result = result
     attempt.score = result["score"]

@@ -134,6 +134,22 @@ export async function archiveBankSet(setId: string): Promise<BankSet> {
   return data
 }
 
+export async function deleteBankSet(setId: string): Promise<void> {
+  await http.delete(`/question-bank/sets/${setId}`)
+}
+
+export async function autoRepairBankSet(setId: string, useAi = true): Promise<{
+  total: number
+  renumbered: number
+  fixed: number
+  needs_review: number
+}> {
+  const { data } = await http.post(`/question-bank/sets/${setId}/auto-repair`, null, {
+    params: { use_ai: useAi },
+  })
+  return data
+}
+
 export async function getBankSetValidation(setId: string): Promise<{ issues: BankIssue[]; total: number }> {
   const { data } = await http.get(`/question-bank/sets/${setId}/validation`)
   return data
@@ -152,6 +168,18 @@ export async function getBankStats(): Promise<BankStats> {
 export async function listBankBlueprints(): Promise<BankBlueprint[]> {
   const { data } = await http.get('/question-bank/blueprints')
   return data
+}
+
+export async function createBankQuestion(
+  setId: string,
+  payload: { type?: string; stem?: string; order_no?: number },
+): Promise<BankQuestion> {
+  const { data } = await http.post(`/question-bank/sets/${setId}/questions`, payload)
+  return data
+}
+
+export async function deleteBankQuestion(id: string): Promise<void> {
+  await http.delete(`/question-bank/questions/${id}`)
 }
 
 export async function createBankBlueprint(payload: {
@@ -283,6 +311,8 @@ export async function saveAttemptAnswer(
   correct_answer?: unknown
   analysis?: string | null
   reference_code?: string | null
+  feedback?: string | null
+  ai_graded?: boolean
   score?: number
   max_score?: number
 }> {
@@ -402,7 +432,10 @@ export interface PracticeAttemptOut {
     type_stats: Record<string, AttemptTypeStat>
   } | null
   answers: Record<string, unknown>
-  question_results: Record<string, { is_correct?: boolean | null; score?: number; max_score?: number }>
+  question_results: Record<
+    string,
+    { is_correct?: boolean | null; score?: number; max_score?: number; feedback?: string | null; ai_graded?: boolean }
+  >
   questions: AttemptQuestion[]
 }
 

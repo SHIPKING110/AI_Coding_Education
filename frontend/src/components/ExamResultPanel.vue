@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import { QUESTION_TYPE_LABELS } from '@/api/assignment'
 import type { AttemptItemResult, PracticeAttemptOut } from '@/api/questionBank'
@@ -15,6 +15,12 @@ const emit = defineEmits<{
 }>()
 
 const result = computed(() => props.attempt.result)
+const items = computed(() => result.value?.items ?? [])
+const activeIdx = ref(0)
+const activeItem = computed(() => items.value[activeIdx.value] ?? null)
+function selectItem(i: number) {
+  activeIdx.value = i
+}
 const normalized = computed(() => result.value?.normalized_score ?? (result.value?.total_score ? Math.round(((result.value?.score ?? 0) / result.value.total_score) * 100) : 0))
 const rating = computed(() => result.value?.rating ?? null)
 const typeEntries = computed(() => Object.entries(result.value?.type_stats ?? {}))
@@ -87,19 +93,31 @@ function itemClass(item: AttemptItemResult): string {
 
     <div class="review-list">
       <h3>答案解析</h3>
-      <article v-for="item in result?.items ?? []" :key="item.id" class="review-item">
+      <div class="q-grid" role="tablist" aria-label="题号导航">
+        <button
+          v-for="(item, i) in items"
+          :key="item.id"
+          type="button"
+          class="q-chip"
+          :class="[itemClass(item), { active: i === activeIdx }]"
+          @click="selectItem(i)"
+        >
+          {{ item.order_no }}
+        </button>
+      </div>
+      <article v-if="activeItem" class="review-item">
         <div class="review-head">
-          <span class="review-no">第 {{ item.order_no }} 题 · {{ typeLabel(item.type) }}</span>
-          <span class="review-state" :class="itemClass(item)">
-            {{ itemState(item) }} · {{ item.score }}/{{ item.max_score }} 分
+          <span class="review-no" :class="{ 'bad-no': activeItem.is_correct === false }">第 {{ activeItem.order_no }} 题 · {{ typeLabel(activeItem.type) }}</span>
+          <span class="review-state" :class="itemClass(activeItem)">
+            {{ itemState(activeItem) }} · {{ activeItem.score }}/{{ activeItem.max_score }} 分
           </span>
         </div>
-        <p class="review-line"><strong>你的答案：</strong>{{ answerText(item.type, item.user_answer) }}</p>
-        <p class="review-line"><strong>正确答案：</strong>{{ answerText(item.type, item.correct_answer) }}</p>
-        <pre v-if="item.reference_code" class="ref-code">{{ item.reference_code }}</pre>
-        <p v-if="item.analysis" class="review-line"><strong>解析：</strong>{{ item.analysis }}</p>
-        <div v-if="item.knowledge_points?.length" class="kp-row">
-          <span v-for="kp in item.knowledge_points" :key="kp">{{ kp }}</span>
+        <p class="review-line"><strong>你的答案：</strong>{{ answerText(activeItem.type, activeItem.user_answer) }}</p>
+        <p class="review-line"><strong>正确答案：</strong>{{ answerText(activeItem.type, activeItem.correct_answer) }}</p>
+        <pre v-if="activeItem.reference_code" class="ref-code">{{ activeItem.reference_code }}</pre>
+        <p v-if="activeItem.analysis" class="review-line"><strong>解析：</strong>{{ activeItem.analysis }}</p>
+        <div v-if="activeItem.knowledge_points?.length" class="kp-row">
+          <span v-for="kp in activeItem.knowledge_points" :key="kp">{{ kp }}</span>
         </div>
       </article>
     </div>
@@ -224,10 +242,44 @@ function itemClass(item: AttemptItemResult): string {
   font-size: 11px;
   color: var(--ink-3);
 }
+.q-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+.q-chip {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 9px;
+  border: 1px solid var(--line, #e2e8f0);
+  background: #f8fafc;
+  color: #334155;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+.q-chip.ok {
+  background: #ecfdf5;
+  border-color: #86efac;
+  color: #15803d;
+}
+.q-chip.bad {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #dc2626;
+}
+.q-chip.active {
+  outline: 2px solid #172554;
+  outline-offset: 1px;
+}
 .review-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  max-height: 50vh;
+  overflow-y: auto;
 }
 .review-list h3 {
   font-size: 15px;
@@ -273,6 +325,10 @@ function itemClass(item: AttemptItemResult): string {
   line-height: 1.65;
   color: var(--ink-2);
   white-space: pre-wrap;
+}
+.review-list .bad-no {
+  color: #b91c1c;
+  font-weight: 700;
 }
 .ref-code {
   margin: 8px 0;

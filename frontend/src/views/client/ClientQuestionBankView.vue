@@ -6,6 +6,8 @@ import AbilityRadar from '@/components/AbilityRadar.vue'
 import ExamStartDialog from '@/components/ExamStartDialog.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import {
+  closePracticeAttempt,
+  getPracticeAttempt,
   aggregateSubjects,
   getAbilityComment,
   getAttemptTrend,
@@ -29,6 +31,10 @@ const student = computed(() => store.activeStudent)
 const sets = ref<BankSet[]>([])
 const stats = ref<LearningStatsOut | null>(null)
 const attempts = ref<AttemptSummary[]>([])
+const attemptsTotal = ref(0)
+const attemptsPage = ref(0)
+const attemptsPageSize = 10
+const recordLoading = ref(false)
 const recordKind = ref('')
 const recordStatus = ref('')
 const trendWeeks = ref<AttemptTrendWeek[]>([])
@@ -64,6 +70,41 @@ const filteredSets = computed(() =>
 )
 const inProgress = computed(() => attempts.value.find((a) => a.status === 'in_progress'))
 const examOpen = ref(false)
+const confirmState = ref<{
+  visible: boolean
+  title: string
+  message: string
+  confirmText: string
+  danger: boolean
+  onConfirm: (() => Promise<void> | void) | null
+}>({ visible: false, title: '', message: '', confirmText: '确定', danger: false, onConfirm: null })
+
+function openConfirm(opts: {
+  title: string
+  message: string
+  confirmText?: string
+  danger?: boolean
+  onConfirm: () => Promise<void> | void
+}) {
+  confirmState.value = {
+    visible: true,
+    title: opts.title,
+    message: opts.message,
+    confirmText: opts.confirmText ?? '确定',
+    danger: opts.danger ?? false,
+    onConfirm: opts.onConfirm,
+  }
+}
+
+function closeConfirm() {
+  confirmState.value.visible = false
+}
+
+async function runConfirm() {
+  const fn = confirmState.value.onConfirm
+  confirmState.value.visible = false
+  if (fn) await fn()
+}
 
 function kindLabel(kind?: string): string {
   const map: Record<string, string> = {
@@ -89,10 +130,33 @@ function fmtDate(iso: string | null): string {
 
 function attemptQuery() {
   return {
-    limit: 20,
+    limit: attemptsPageSize,
+    offset: attemptsPage.value * attemptsPageSize,
     ...(recordKind.value ? { kind: recordKind.value } : {}),
     ...(recordStatus.value ? { status: recordStatus.value } : {}),
   }
+}
+
+async function loadAttempts() {
+  if (!student.value) return
+  recordLoading.value = true
+  try {
+    const data = await listPracticeAttempts(student.value.id, attemptQuery())
+    attempts.value = data.items
+    attemptsTotal.value = data.total
+  } catch {
+    attempts.value = []
+    attemptsTotal.value = 0
+  } finally {
+    recordLoading.value = false
+  }
+}
+
+function changeAttemptsPage(delta: number) {
+  const nextPage = attemptsPage.value + delta
+  if (nextPage < 0 || nextPage * attemptsPageSize >= attemptsTotal.value) return
+  attemptsPage.value = nextPage
+  void loadAttempts()
 }
 
 const trendChart = computed(() => {
@@ -119,12 +183,8 @@ const trendChart = computed(() => {
 })
 
 watch([recordKind, recordStatus], async () => {
-  if (!student.value) return
-  const data = await listPracticeAttempts(student.value.id, attemptQuery()).catch(() => ({
-    items: [] as AttemptSummary[],
-    total: 0,
-  }))
-  attempts.value = data.items
+  attemptsPage.value = 0
+  await loadAttempts()
 })
 
 async function load() {
@@ -140,7 +200,9 @@ async function load() {
     ])
     sets.value = setData.items
     stats.value = statData
+    attemptsPage.value = 0
     attempts.value = attemptData.items
+    attemptsTotal.value = attemptData.total
     trendWeeks.value = trendData.weeks
   } catch {
     toast.error('题库加载失败')
@@ -177,7 +239,18 @@ async function beginAttempt(payload: Parameters<typeof startPracticeAttempt>[0])
     const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
     if (detail && typeof detail === 'object' && 'gaps' in detail) {
       const gaps = (detail as { gaps: Record<string, string> }).gaps
-      toast.error(Object.values(gaps).join('；') || '题库库存不足')
+      const labels: Record<string, string> = {
+        single_choice: '单选题',
+        multiple_choice: '多选题',
+        judgement: '判断题',
+        programming: '编程题',
+        code_fill: '代码填空',
+      }
+      toast.error(
+        Object.entries(gaps)
+          .map(([k, v]) => v || `${labels[k] ?? k}库存不足`)
+          .join('；') || '题库库存不足',
+      )
     } else if (typeof detail === 'string') {
       toast.error(detail)
     } else {
@@ -261,8 +334,45 @@ async function loadAbilityComment() {
   }
 }
 
-function openAttempt(a: AttemptSummary) {
+function resumeAttempt(a: AttemptSummary) {
   router.push({ name: 'client-practice', params: { id: a.id } })
+}
+
+async function viewResultAttempt(a: AttemptSummary) {
+  if (a.status !== 'evaluated') {
+    resumeAttempt(a)
+    return
+  }
+  try {
+    const detail = await getPracticeAttempt(a.id)
+    router.push({ name: 'client-practice', params: { id: detail.id } })
+  } catch {
+    toast.error('记录加载失败')
+  }
+}
+
+async function cancelAttempt(a: AttemptSummary) {
+  if (a.status !== 'in_progress') return
+  openConfirm({
+    title: '取消本次练习',
+    message: '取消后，本次练习将按已作答内容交卷存档，且无法继续作答。确定要取消吗？',
+    confirmText: '取消练习',
+    danger: true,
+    onConfirm: async () => {
+      try {
+        await closePracticeAttempt(a.id)
+        toast.success('已取消并归档本次练习')
+        await Promise.all([loadAttempts(), refreshStats()])
+      } catch {
+        toast.error('取消失败，请稍后再试')
+      }
+    },
+  })
+}
+
+async function refreshStats() {
+  if (!student.value) return
+  stats.value = await getLearningStats(student.value.id).catch(() => stats.value)
 }
 
 onMounted(load)
@@ -284,7 +394,7 @@ watch(() => store.activeStudentId, load)
       </div>
     </header>
 
-    <div v-if="inProgress" class="resume-card" @click="openAttempt(inProgress)">
+    <div v-if="inProgress" class="resume-card" @click="resumeAttempt(inProgress)">
       <div>
         <strong>继续上次练习</strong>
         <span>{{ inProgress.mode === 'exam' ? '模拟考试' : '套卷练习' }} · {{ fmtDate(inProgress.started_at) }}</span>
@@ -452,11 +562,11 @@ watch(() => store.activeStudentId, load)
         </circle>
       </svg>
     </section>
-    <section v-if="attempts.length" class="history-section">
+    <section v-if="student" class="history-section">
       <div class="section-head">
         <h2>做题记录</h2>
         <div class="history-filters">
-          <span class="history-total">最近 {{ attempts.length }} 条</span>
+          <span class="history-total">共 {{ attemptsTotal }} 条</span>
           <select v-model="recordKind" class="history-select">
             <option value="">全部模式</option>
             <option value="quick">刷题练习</option>
@@ -474,8 +584,11 @@ watch(() => store.activeStudentId, load)
         </div>
       </div>
       <div class="history-list">
-        <button v-for="a in attempts" :key="a.id" class="history-row" @click="openAttempt(a)">
-          <span class="h-mode">{{ kindLabel(a.kind) || (a.mode === 'exam' ? '模拟考试' : '套卷练习') }}</span>
+        <div v-for="a in attempts" :key="a.id" class="history-row" @click="viewResultAttempt(a)">
+          <span class="h-mode">
+            {{ kindLabel(a.kind) || (a.mode === 'exam' ? '模拟考试' : '套卷练习') }}
+            <em v-if="a.status === 'in_progress'" class="h-badge">进行中</em>
+          </span>
           <span class="h-date">{{ fmtDate(a.started_at) }}</span>
           <span class="h-score" :class="{ done: a.status === 'evaluated' }">
             <template v-if="a.status === 'evaluated' && a.mode === 'exam'">
@@ -484,8 +597,26 @@ watch(() => store.activeStudentId, load)
             <template v-else-if="a.status === 'evaluated'">
               正确率 {{ pct(a.correct_rate ?? 0) }}
             </template>
-            <template v-else>进行中 · 继续</template>
+            <template v-else>未完成</template>
           </span>
+          <span v-if="a.status === 'in_progress'" class="h-actions">
+            <button class="h-continue" @click.stop="resumeAttempt(a)">继续</button>
+            <button class="h-cancel" @click.stop="cancelAttempt(a)">取消</button>
+          </span>
+        </div>
+        <p v-if="!attempts.length && !recordLoading" class="empty">暂无做题记录</p>
+      </div>
+      <div v-if="attemptsTotal > attemptsPageSize" class="history-pager">
+        <button class="h-page-btn" :disabled="attemptsPage === 0 || recordLoading" @click="changeAttemptsPage(-1)">
+          上一页
+        </button>
+        <span>第 {{ attemptsPage + 1 }} / {{ Math.ceil(attemptsTotal / attemptsPageSize) }} 页 · 共 {{ attemptsTotal }} 条</span>
+        <button
+          class="h-page-btn"
+          :disabled="(attemptsPage + 1) * attemptsPageSize >= attemptsTotal || recordLoading"
+          @click="changeAttemptsPage(1)"
+        >
+          下一页
         </button>
       </div>
     </section>
@@ -500,6 +631,19 @@ watch(() => store.activeStudentId, load)
       @close="examOpen = false"
       @start="startExam"
     />
+
+    <div v-if="confirmState.visible" class="confirm-mask" @click.self="closeConfirm">
+      <div class="confirm-card" role="dialog" aria-modal="true">
+        <h3>{{ confirmState.title }}</h3>
+        <p>{{ confirmState.message }}</p>
+        <div class="confirm-actions">
+          <button class="confirm-btn" @click="closeConfirm">再想想</button>
+          <button class="confirm-btn primary" :class="{ danger: confirmState.danger }" @click="runConfirm">
+            {{ confirmState.confirmText }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -545,6 +689,10 @@ watch(() => store.activeStudentId, load)
   font-size: 13px;
   cursor: pointer;
   white-space: nowrap;
+}
+.hero-tools {
+  display: flex;
+  gap: 10px;
 }
 .resume-card {
   display: flex;
@@ -936,6 +1084,59 @@ watch(() => store.activeStudentId, load)
 .h-score.done {
   color: #166534;
 }
+.h-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+.h-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.h-continue,
+.h-cancel {
+  padding: 4px 10px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  cursor: pointer;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.h-cancel {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+.history-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.h-page-btn {
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 12px;
+  cursor: pointer;
+}
+.h-page-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 .empty {
   padding: 30px;
   text-align: center;
@@ -996,6 +1197,63 @@ watch(() => store.activeStudentId, load)
   justify-content: flex-end;
   gap: 8px;
   margin-top: 14px;
+}
+.confirm-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  padding: 16px;
+}
+.confirm-card {
+  width: min(380px, 100%);
+  background: #fff;
+  border-radius: 16px;
+  padding: 20px 20px 16px;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.28);
+}
+.confirm-card h3 {
+  font-size: 16px;
+  color: #172554;
+  margin-bottom: 8px;
+}
+.confirm-card p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #475569;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+.confirm-btn {
+  padding: 8px 16px;
+  border-radius: 9px;
+  border: 1px solid var(--line, #e2e8f0);
+  background: #f8fafc;
+  color: #334155;
+  font-size: 13px;
+  cursor: pointer;
+}
+.confirm-btn:hover {
+  background: #f1f5f9;
+}
+.confirm-btn.primary {
+  border-color: transparent;
+  background: #172554;
+  color: #fff;
+  font-weight: 700;
+}
+.confirm-btn.primary.danger {
+  background: #dc2626;
+}
+.confirm-btn.primary.danger:hover {
+  background: #b91c1c;
 }
 @media (max-width: 640px) {
   .qb-hero {
