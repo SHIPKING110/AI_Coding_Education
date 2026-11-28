@@ -411,6 +411,7 @@ def tag_question(
     after = dict(before)
     after["knowledge_points"] = tags
     question.knowledge_points = tags
+    question.review_note = "AI 知识点打标已应用，请人工复核"
     _ensure_taxonomy(db, bank_set, tags, source_status="active" if all(t in candidates for t in tags) else "candidate")
     review = QuestionBankAiReview(
         question_id=question.id,
@@ -426,6 +427,18 @@ def tag_question(
     )
     db.add(review)
     return tags, model
+
+
+def revert_tag(db: Session, question: QuestionBankQuestion) -> QuestionBankQuestion:
+    """撤销该题最近一次已应用的 AI 知识点打标，恢复打标前的知识点。"""
+    review = latest_review(db, question.id, "tag")
+    if not review or review.status != "applied" or not review.before:
+        raise ValueError("没有可撤销的 AI 打标")
+    question.knowledge_points = review.before.get("knowledge_points") or []
+    question.review_note = "已撤销 AI 知识点打标，请人工复核"
+    review.status = "reverted"
+    db.commit()
+    return question
 
 
 def stats_hash(payload: dict[str, Any]) -> str:

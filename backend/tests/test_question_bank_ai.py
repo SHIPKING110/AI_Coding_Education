@@ -370,3 +370,29 @@ def test_practice_marked_and_close(client, admin_token, db_session):
     assert "normalized_score" in exam_body["result"]
     assert exam_body["result"]["rating"] in ("达标", "未达标")
     assert len(exam_body["questions"]) == 3
+
+
+def test_ai_tag_revert(client, admin_token, db_session, monkeypatch):
+    """AI 打标可撤回：恢复打标前的知识点，重复撤回返回 409。"""
+    set_id, qids = _publish_sample(db_session)
+    _mock_llm(monkeypatch, tag_payload='{"knowledge_points":["循环结构"],"confidence":0.8}')
+    qid = qids[0]
+
+    tagged = client.post(
+        f"/api/question-bank/sets/{set_id}/ai-tag",
+        headers=admin_token,
+        json={"question_ids": [qid]},
+    )
+    assert tagged.status_code == 200, tagged.text
+    assert tagged.json()["tagged"] == 1
+
+    detail = client.get(f"/api/question-bank/sets/{set_id}", headers=admin_token).json()
+    question = next(item for item in detail["questions"] if item["id"] == qid)
+    assert question["knowledge_points"] == ["循环结构"]
+
+    reverted = client.post(f"/api/question-bank/questions/{qid}/ai-tag/revert", headers=admin_token)
+    assert reverted.status_code == 200, reverted.text
+    assert reverted.json()["knowledge_points"] in (None, [])
+
+    again = client.post(f"/api/question-bank/questions/{qid}/ai-tag/revert", headers=admin_token)
+    assert again.status_code == 409, again.text

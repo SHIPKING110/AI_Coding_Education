@@ -205,6 +205,9 @@
                   <button v-if="activeQuestion.review_note?.startsWith('AI 校准')" class="btn ghost" @click="onRevertAi">
                     撤销校准
                   </button>
+                  <button v-if="activeQuestion.review_note?.startsWith('AI 打标')" class="btn ghost" @click="onRevertTag">
+                    撤销打标
+                  </button>
                   <input v-if="canManage" v-model.number="insertNo" type="number" min="1" class="insert-no" placeholder="插入到第几题(留空追加)" title="输入题号可把新题插入到该位置，后续题号自动后移" />
                   <button v-if="canManage" class="btn ghost" :disabled="saving" @click="onAddQuestion">+ 新增题目</button>
                   <button v-if="canManage" class="btn ghost" :disabled="saving || (selected?.questions?.length ?? 0) <= 1" @click="onDeleteQuestion">删除本题</button>
@@ -532,6 +535,7 @@ import {
   publishBankSet,
   reviewAllQuestions,
   revertAiReview,
+  revertAiTag,
   startPracticeAttempt,
   updateBankQuestion,
   updateBankSet,
@@ -945,6 +949,21 @@ async function onRevertAi() {
     Object.assign(q, updated)
     loadEdit(q)
     toast.success('已撤销 AI 校准')
+  } catch (e: unknown) {
+    toast.error(actionErrorText(e, '撤销失败'))
+  } finally {
+    if (selected.value) void loadValidation(selected.value.id)
+  }
+}
+
+async function onRevertTag() {
+  const q = activeQuestion.value
+  if (!q) return
+  try {
+    const updated = await revertAiTag(q.id)
+    Object.assign(q, updated)
+    loadEdit(q)
+    toast.success('已撤销 AI 打标')
   } catch (e: unknown) {
     toast.error(actionErrorText(e, '撤销失败'))
   } finally {
