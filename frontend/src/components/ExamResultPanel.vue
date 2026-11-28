@@ -44,13 +44,19 @@ function answerText(type: string, value: unknown): string {
 
 function itemState(item: AttemptItemResult): string {
   if (item.is_correct === true) return '正确'
-  if (item.is_correct === false) return '错误'
+  if (item.is_correct === false) {
+    if ((item.score ?? 0) > 0 && (item.score ?? 0) < (item.max_score ?? 0)) return '部分正确'
+    return '错误'
+  }
   return '待自评'
 }
 
 function itemClass(item: AttemptItemResult): string {
   if (item.is_correct === true) return 'ok'
-  if (item.is_correct === false) return 'bad'
+  if (item.is_correct === false) {
+    if ((item.score ?? 0) > 0 && (item.score ?? 0) < (item.max_score ?? 0)) return 'partial'
+    return 'bad'
+  }
   return 'neutral'
 }
 </script>
@@ -107,7 +113,7 @@ function itemClass(item: AttemptItemResult): string {
       </div>
       <article v-if="activeItem" class="review-item">
         <div class="review-head">
-          <span class="review-no" :class="{ 'bad-no': activeItem.is_correct === false }">第 {{ activeItem.order_no }} 题 · {{ typeLabel(activeItem.type) }}</span>
+          <span class="review-no" :class="{ 'bad-no': itemClass(activeItem) === 'bad', 'partial-no': itemClass(activeItem) === 'partial' }">第 {{ activeItem.order_no }} 题 · {{ typeLabel(activeItem.type) }}</span>
           <span class="review-state" :class="itemClass(activeItem)">
             {{ itemState(activeItem) }} · {{ activeItem.score }}/{{ activeItem.max_score }} 分
           </span>
@@ -270,6 +276,12 @@ function itemClass(item: AttemptItemResult): string {
   border-color: #fca5a5;
   color: #dc2626;
 }
+
+.q-chip.partial {
+  background: #fffbeb;
+  border-color: #fcd34d;
+  color: #b45309;
+}
 .q-chip.active {
   outline: 2px solid #172554;
   outline-offset: 1px;
@@ -315,6 +327,11 @@ function itemClass(item: AttemptItemResult): string {
   background: #fee2e2;
   color: #991b1b;
 }
+
+.review-state.partial {
+  background: #fef3c7;
+  color: #92400e;
+}
 .review-state.neutral {
   background: #fef3c7;
   color: #92400e;
@@ -328,6 +345,11 @@ function itemClass(item: AttemptItemResult): string {
 }
 .review-list .bad-no {
   color: #b91c1c;
+  font-weight: 700;
+}
+
+.review-list .partial-no {
+  color: #b45309;
   font-weight: 700;
 }
 .ref-code {
