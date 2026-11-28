@@ -364,7 +364,7 @@
         <div class="upload-grid">
           <label>套卷名称<input v-model="uploadMeta.name" placeholder="留空则自动识别" /></label>
           <label>机构<input v-model="uploadMeta.institution" /></label>
-          <label>年月<input v-model="uploadMeta.exam_year" placeholder="如 2025年12月 或 2025-12" /></label>
+          <label>年月<input v-model="uploadMeta.exam_year" type="month" /></label>
           <label>科目<input v-model="uploadMeta.subject" placeholder="Python / C++ / 图形化 / 机器人" /></label>
           <label>等级<input v-model="uploadMeta.level" placeholder="如 二级" /></label>
         </div>
@@ -1283,7 +1283,7 @@ async function saveQuestion(markReviewed = false) {
     q.status = updated.status
     toast.success(markReviewed ? '已保存并通过审核' : '题目已保存')
     if (markReviewed) await refreshSetQuietly()
-    else void loadValidation(selected.value.id)
+    else { void loadValidation(selected.value.id); void loadSets() }
   } catch {
     toast.error('保存题目失败')
   } finally {
@@ -1296,6 +1296,7 @@ async function refreshSetQuietly() {
   try {
     const data = await getBankSet(selected.value.id)
     selected.value = data
+    await loadSets()
     void loadValidation(selected.value.id)
     await loadStats()
   } catch {
